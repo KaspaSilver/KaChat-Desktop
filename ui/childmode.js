@@ -277,7 +277,7 @@ export function renderUserTypeGuideStep(container) {
   if (isChildModeEnabled()) {
     // Replay with Simple Mode already on: informational only — offering "Full"
     // here would be a password-free way out.
-    container.innerHTML = `<p class="setup-usertype-note">Simple Mode is on. Chats, Group Chats, Portfolio and Cold Storage are available; Swaps, KaPosts and Public Chats are hidden. Manage this in Settings &gt; Security &gt; Simple Mode.</p>`;
+    container.innerHTML = `<p class="setup-usertype-note">Simple Mode is on. Chats, Group Chats, Portfolio and Cold Storage are available; Swaps, KaPost and Public Chats are hidden. Manage this in Settings &gt; Security &gt; Simple Mode.</p>`;
     return;
   }
   const rows = [
@@ -285,7 +285,7 @@ export function renderUserTypeGuideStep(container) {
     { key: "child", title: "Simple", sub: "Chats, Portfolio and Cold Storage only. A password unlocks the rest later." },
   ];
   container.innerHTML = `
-    <p class="setup-usertype-note">Simple Mode is a smaller KaChat: just Chats, Group Chats, Portfolio and Cold Storage. Swaps, KaPosts and Public Chats stay hidden until the password unlocks them.</p>
+    <p class="setup-usertype-note">Simple Mode is a smaller KaChat: just Chats, Group Chats, Portfolio and Cold Storage. Swaps, KaPost and Public Chats stay hidden until the password unlocks them.</p>
     <div class="setup-choice-list">
       ${rows.map((row) => `<button type="button" class="setup-node-row${guideChoice === row.key ? " selected" : ""}" data-cm-usertype="${row.key}"><span class="setup-node-dot"></span><span class="setup-node-copy"><strong>${row.title}</strong><small>${row.sub}</small></span></button>`).join("")}
     </div>
@@ -372,7 +372,7 @@ const ABOUT_CARD_HTML = `
     <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Portfolio</strong></span></div>
     <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Cold Storage</strong></span></div>
   </div>
-  <p class="settings-group-footer">While Simple Mode is on, Swaps, KaPosts and Public Chats are removed everywhere - the dock, links and notifications. Only the password unlocks Simple Mode.</p>`;
+  <p class="settings-group-footer">While Simple Mode is on, Swaps, KaPost and Public Chats are removed everywhere - the dock, links and notifications. Only the password unlocks Simple Mode.</p>`;
 
 export function renderChildModeSettingsPage() {
   if (!pageEl) pageEl = document.querySelector("[data-child-mode-page]");

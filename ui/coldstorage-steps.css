@@ -1,0 +1,43 @@
+/* Cold Storage's send in steps (KaPay 05db583 ColdSendFlowView; ui/coldstorage.js). The step
+   screens are send-steps.css's (.ss-step / .ss-head / .ss-body / .ss-bar) inside the sheet's
+   .ss-host frame; this is the signed screen's card (a swipe-up), the slide between steps, and the
+   few pieces only Cold Storage has. */
+
+/* The signed screen: a swipe-up (createSwipeUpScreen) over the whole sheet, above the steps. */
+.cold-send-modal > .cold-send-signed {
+  position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--sheet-bg, var(--panel)); color: var(--text);
+}
+.cold-send-modal > .cold-send-signed[hidden] { display: none; }
+
+/* A screen comes in from the side it comes from (iOS move(edge:) transitions). */
+.cold-send-in-right { animation: cold-send-in-right .32s cubic-bezier(.2,.9,.25,1); }
+.cold-send-in-left { animation: cold-send-in-left .32s cubic-bezier(.2,.9,.25,1); }
+@keyframes cold-send-in-right { from { transform: translateX(100%); } to { transform: none; } }
+@keyframes cold-send-in-left { from { transform: translateX(-100%); } to { transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .cold-send-in-right, .cold-send-in-left { animation: none; }
+}
+
+.cold-send-center { text-align: center; }
+.cold-send-footnote { margin: 0; padding: 0 8px; font-size: 13px; line-height: 1.4; color: var(--muted); text-align: center; }
+
+/* Sign with KasSigner: the QR's own white card, full width of the step. */
+.cold-send-qr-step .cold-send-qr-panel { box-sizing: border-box; width: 100%; flex: 0 0 auto; }
+
+/* "Signed by KasSigner" (iOS checkmark.seal.fill in a green capsule). */
+.cold-send-signed-badge {
+  align-self: center; display: inline-flex; align-items: center; gap: 7px; margin-top: 8px; padding: 8px 14px;
+  border-radius: 999px; background: rgba(52,199,89,.12); color: var(--ios-green); font-size: 15px; font-weight: 600;
+}
+.cold-send-signed-badge svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.cold-send-seal { fill: currentColor; }
+.cold-send-seal-check { fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Coin Control as a step: the list takes the screen's height instead of its own scroll box. */
+.cold-send-coin-step .cold-coincontrol-list { max-height: none; overflow: visible; }
+
+/* The scanner and the failure: centred in the step. */
+.cold-send-scan-step .cold-send-scan-wrap { flex: 1 1 auto; justify-content: center; }
+.cold-send-failed { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px 8px; text-align: center; }
+.cold-send-failed .cold-send-result-icon { font-size: 52px; }

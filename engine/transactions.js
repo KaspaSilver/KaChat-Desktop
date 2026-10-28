@@ -505,7 +505,7 @@ async function sendPayloadToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAdd
   let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Self-stash UTXO refresh" });
   if (!entries || entries.length === 0) throw new Error("No UTXOs found. Fund the receive address first.");
   entries = excludeReservedUtxos(entries);
-  if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPosts > Scheduled.");
+  if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPost > Scheduled.");
   return sendSelfPayloadFromEntries({ kaspa, rpc, withRpc, privateKey, sourceAddress, payload, entries, label: "Self-stash", log });
 }
 
@@ -698,7 +698,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "UTXO refresh" });
   if (!entries || entries.length === 0) throw new Error("No UTXOs found. Fund the receive address first.");
   entries = excludeReservedUtxos(entries);
-  if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPosts > Scheduled.");
+  if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post. Wait for it to go out, or cancel it in KaPost > Scheduled.");
   requireSigningScriptFor(entries, redeemScript);
 
   // Coin control: if the caller picked specific UTXOs, spend only those (mirrors

@@ -1188,7 +1188,7 @@ function openAddressImport(presetAddress = null) {
 // The floating +'s sheet (iOS 59593af PortfolioTransactionsView.actionsSheet): every way to add to,
 // import into or export this portfolio, in one place. A sheet rather than a popup menu so each row
 // can say what it does - "Add Kaspa Address" reads as a contact until you learn otherwise. Laid out
-// as the Address Book's + sheet is (ui/address-book.js renderImportExportSheet).
+// as the Contacts + sheet is (ui/address-book.js renderImportExportSheet).
 const ACTION_ICON = (paths) => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
 const PORTFOLIO_ACTION_ICONS = {
   // SF Symbols pencil, arrow.left.arrow.right, bubble.left.and.bubble.right, square.and.arrow.down/up,
@@ -1924,7 +1924,7 @@ function render() {
         : transactions.map(transactionRowHtml).join("")}
     </div>
     ${loading ? `<div class="portfolio-chart-empty">Refreshing…</div>` : ""}
-    <!-- The floating glass + (iOS 59593af actionsButton; the Address Book's + here), hidden while
+    <!-- The floating glass + (iOS 59593af actionsButton; Contacts' + here), hidden while
          selecting. Fixed to the window, so the screen keeps room to scroll the last row out from
          under it (ui/portfolio-actions.css). -->
     ${selecting ? "" : `<button class="new-chat-fab ab-fab portfolio-fab" type="button" data-portfolio-actions aria-label="Add, import or export" title="Add, import or export">${FAB_PLUS_SVG}</button>`}`;

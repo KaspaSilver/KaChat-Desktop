@@ -153,3 +153,69 @@ export function kapostsDrawerDim(dx, panelWidth) {
   const progress = Math.max(0, 1 + Math.min(0, Number(dx) || 0) / panelWidth);
   return 0.45 * progress;
 }
+
+// --- Default tip and payment request cards (iOS 4c0d5a8, 0b9fd28) --------------------------------
+
+/** A currency amount for the default-tip field: two decimals, trimmed ("1", "1.5", "0.25") (iOS
+ *  KaPostsSettingsView.fiatText). */
+export function kapostsFiatFieldText(value) {
+  const v = Number(value);
+  if (!Number.isFinite(v) || v <= 0) return "";
+  return v.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+/** A KAS amount for the field: eight decimals, trimmed (iOS KaPostsSettingsView.trimmed). */
+export function kapostsKasFieldText(value) {
+  const v = Number(value);
+  if (!Number.isFinite(v) || v <= 0) return "";
+  return v.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+/** The number typed in the default-tip field, in either unit: a dot or the locale's comma, null for
+ *  anything that is not a positive number. */
+export function kapostsTipFieldAmount(text) {
+  const raw = String(text ?? "").trim().replace(",", ".");
+  if (!/^(?:\d+\.?\d*|\.\d+)$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/** The field's text after the unit is tapped (iOS switchTipUnit): the amount carried over at
+ *  `price` (1 KAS in the currency), or the text as typed when there is no price or no amount. */
+export function kapostsSwitchTipText(text, toFiat, price) {
+  const amount = kapostsTipFieldAmount(text);
+  if (amount == null || !(Number(price) > 0)) return String(text ?? "");
+  return toFiat ? kapostsFiatFieldText(amount * price) : kapostsKasFieldText(amount / price);
+}
+
+/** What one default tip sends, in sompi (iOS KaPostsView tip): a tip set in KAS (`{ sompi }`) as
+ *  it is, one set in a currency (`{ fiat, currency }`) worked out at `price` - 1 KAS in that
+ *  currency, the price of the moment - to the nearest sompi. null with no tip set, and for a
+ *  currency tip with no price yet. */
+export function kapostsDefaultTipSompi(tip, price) {
+  if (!tip) return null;
+  if (Number(tip.fiat) > 0) {
+    if (!(Number(price) > 0)) return null;
+    const sompi = Math.round((Number(tip.fiat) / Number(price)) * 1e8);
+    return sompi > 0 ? sompi : null;
+  }
+  const sompi = Math.floor(Number(tip.sompi) || 0);
+  return sompi > 0 ? sompi : null;
+}
+
+// The KaChat links a post can carry (the same set as ui/app.js INTERNAL_LINK_IN_TEXT_RE).
+const KAPOSTS_INTERNAL_LINK_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile|pay)\/[^\s<>"']+|https?:\/\/(?:www\.)?kachat\.app\/(?:post|broadcast|u|pay)\/[^\s<>"']+)/i;
+
+/** A payment request link in a post (iOS 0b9fd28 KaPostCellView.paymentRequestLink): the first
+ *  KaChat link in `text`, when it is a payment request `parseLink` accepts (signature and all).
+ *  Returns `{ request, raw, bodyText }` - `bodyText` is the post without the link, which the card
+ *  under it stands for - or null. Trailing prose punctuation is not part of the link. */
+export function kapostsPaymentRequestIn(text, parseLink) {
+  const value = String(text ?? "");
+  const match = value.match(KAPOSTS_INTERNAL_LINK_RE);
+  if (!match || !/\/pay\//i.test(match[0])) return null;
+  const raw = match[0].replace(/[.,;:!?)\]}'"]+$/, "");
+  const request = typeof parseLink === "function" ? parseLink(raw) : null;
+  if (!request) return null;
+  return { request, raw, bodyText: value.split(raw).join("").trim() };
+}

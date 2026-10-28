@@ -308,8 +308,8 @@
 .kl-grace-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .kl-grace-copy .kl-countdown { font-weight: 600; }
 
-/* ---- Send-style sheets (iOS e426432): glass cards, the Send screens' fee card, info pills and
-   slide to confirm, for every name transaction and the claim ------------------------------- */
+/* ---- Send-style sheets (iOS e426432, KaPay 05db583): glass cards, the Send screens' fee card,
+   info pills and swipe up to confirm, for every name transaction and the claim ------------- */
 .kl-send-sheet { display: flex; flex-direction: column; gap: 16px; padding-top: 12px; }
 .kl-send-sheet > div:empty { display: none; }
 .kl-send-sheet .kl-cards { display: flex; flex-direction: column; gap: 16px; }
@@ -324,18 +324,21 @@
 .kl-card .kl-card-step { display: flex; }
 .kl-pills { justify-content: flex-start; }
 .kl-tx-note { margin: 0; font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
-.kl-tx-action { padding-top: 4px; }
-.kl-tx-action[hidden] { display: none; }
-.kl-amount-field { display: flex; align-items: baseline; gap: 8px; cursor: text; }
-.kl-amount-input {
-  flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; padding: 0;
-  color: var(--text); font: inherit; font-size: 22px; font-weight: 600; line-height: 28px;
-}
-.kl-amount-input::placeholder { color: var(--placeholder); }
-.kl-amount-field > span { font-size: 15px; font-weight: 600; }
-.kl-fieldset:disabled .sk-icon-button, .kl-fieldset:disabled .kl-amount-input, .kl-fieldset:disabled .sk-recipient-input { opacity: .6; }
-.kl-transfer-status:not([hidden]) { display: block; font-size: 12px; }
-.kl-transfer-status .kl-spinner { width: 16px; height: 16px; }
+.kl-fieldset:disabled .settings-segmented { opacity: .6; }
+
+/* The steps over a .kachat swipe-up sheet (ui/send-steps.js, KaPay 05db583): the market's grouped
+   surface, like the review under them. */
+.kmkt-sheet.sk-swipe-host .ss-layer, .kmkt-sheet.sk-swipe-host .ss-step { background: var(--grouped-bg-elevated, var(--sheet-bg)); }
+.kmkt-sheet.sk-swipe-host .ss-bar { background: color-mix(in srgb, var(--grouped-bg-elevated, var(--sheet-bg)) 82%, transparent); }
+.kmkt-sheet.sk-swipe-host .sk-swipe-cancel[hidden], .ss-continue[hidden] { display: none; }
+/* An entry step: Make an Offer's "Refundable after" over the keypad; the captions under a card. */
+.kl-entry-picker { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+.kl-entry-picker .settings-segmented { margin: 0; }
+.kl-entry-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.kl-entry-caption { margin: 0; font-size: 12px; line-height: 16px; color: var(--muted); }
+.kl-entry-caption[hidden] { display: none; }
+.kl-entry-step .sk-recipient { margin: 0; }
+.kl-entry-step .sk-caption.kl-entry-caption { margin-top: -6px; }
 
 /* a busy network: Normal may wait (iOS KachatBusyNetworkNotice) */
 .kl-busy-notice {
@@ -450,23 +453,43 @@ a.kl-receipt-txid:hover { background: var(--primary-08, var(--row-hover)); }
 .kl-fund-body { padding: 4px 16px 20px; }
 .kl-fund-card { margin-top: 0; }
 
-/* Renew, step 1 (iOS KachatRenewSheet): "How long?", then a full-width radio row per period - the
-   circle, the period, what it costs on the right; the picked one filled with the accent - and Next. */
-.kl-renew-step { display: flex; flex-direction: column; gap: 14px; padding: 16px; }
-.kl-renew-title { margin: 0; font-size: 22px; font-weight: 700; color: var(--text); }
-.kl-renew-sub { margin: 0; font-size: 15px; line-height: 1.35; }
+/* Renew, step 1 (iOS KachatRenewSheet, KaPay 05db583): "How long?", then a full-width radio row per
+   period - the circle, the period, what it costs on the right; the picked one filled with the
+   accent - and Review at the bottom. */
+.kl-renew-sub { margin: -6px 0 0; font-size: 15px; line-height: 1.35; }
 .kl-renew-choices { display: flex; flex-direction: column; gap: 14px; }
 .kl-renew-choice {
   display: flex; align-items: center; gap: 8px; width: 100%; padding: 16px;
-  border: 1.5px solid var(--kaspa); border-radius: 12px; background: transparent; color: var(--kaspa-ink);
+  border: 1.5px solid var(--kaspa); border-radius: 16px; background: transparent; color: var(--kaspa-ink);
   font: inherit; font-size: 17px; font-weight: 600; text-align: left; cursor: pointer;
 }
-.kl-renew-choice.on { background: var(--kaspa); color: #fff; }
+.kl-renew-choice.on { background: var(--kaspa); color: #000; }
 .kl-renew-choice .kmkt-ico { flex: 0 0 auto; width: 22px; height: 22px; }
 .kl-renew-choice-label { flex: 1 1 auto; min-width: 0; }
 .kl-renew-choice-price { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .kl-renew-choice:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
-.kl-renew-next { width: 100%; margin-top: 6px; min-height: 50px; }
+
+/* Claim, step 1 (iOS KachatClaimSheet yearsStep): "For how long?", the name, then one glass button
+   per length with its price and a chevron; a click goes on to the review. */
+.kl-claim-years-step .ss-body { gap: 14px; }
+.kl-claim-years-name { margin: 0; font-size: 17px; font-weight: 600; color: var(--kaspa-ink); overflow-wrap: anywhere; }
+.kl-claim-lengths { display: flex; flex-direction: column; gap: 14px; }
+.kl-claim-length {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 68px; padding: 0 20px; box-sizing: border-box;
+  border: 1px solid var(--glass-stroke, var(--line)); border-radius: 20px; background: var(--material, var(--surface-1));
+  color: var(--text); font: inherit; font-size: 20px; font-weight: 600; text-align: left; cursor: pointer;
+  transition: transform .12s ease, background-color .12s ease;
+}
+@media (hover: hover) { .kl-claim-length:hover { background: color-mix(in srgb, var(--kaspa) 8%, var(--material, var(--surface-1))); } }
+.kl-claim-length:active { transform: scale(.98); }
+.kl-claim-length:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+.kl-claim-length-label { flex: 1 1 auto; min-width: 0; }
+.kl-claim-length-price { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.kl-claim-length-chevron { flex: 0 0 auto; display: grid; place-items: center; color: var(--kaspa-ink); }
+.kl-claim-length-chevron .kmkt-ico { width: 16px; height: 16px; }
+.kl-claim-years-note { margin: 4px 0 0; font-size: 13px; line-height: 18px; }
+.kl-claim-fee-text { display: inline-flex; align-items: center; font-variant-numeric: tabular-nums; }
+.kl-claim-fee-text .kl-spinner { width: 16px; height: 16px; }
 
 /* A name a notification pointed at (iOS KachatNameRouteView): free to claim, or the lookup failed. */
 .kl-route-body { display: flex; flex-direction: column; gap: 16px; padding: 16px; }

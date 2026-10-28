@@ -458,7 +458,7 @@ async function ensureFolder(davRoot, parts) {
 /** Uploads `body` as `filename` into the KaChat folder (backupFolderPath - beside the chat
  *  backup), creating the folder chain if needed, and returns the stored path. A file of the same
  *  name is replaced; exports carry a timestamp in their name, so each one is a new file.
- *  `keepSpaces` keeps a name the user gave (a portfolio's, "KaChat Address Book") readable in
+ *  `keepSpaces` keeps a name the user gave (a portfolio's, "KaChat Contacts") readable in
  *  Nextcloud instead of turning its spaces into underscores (iOS 87b2a0b). */
 export async function uploadToKaChatFolder(body, filename, contentType, { keepSpaces = false } = {}) {
   if (!nc) throw new Error("Nextcloud is not connected.");
@@ -1678,7 +1678,7 @@ function renderSettings() {
       <div class="settings-list-row settings-info-row" data-nc-backup-result-row hidden><span class="settings-row-copy"><small data-nc-backup-result></small></span></div>
     </div>
     <p class="settings-group-footer">Keeps your chat history in ${deps.escapeHtml(BACKUP_FILENAME)} in the folder above (choosing All Files resets to the default ${deps.escapeHtml(DEFAULT_BACKUP_FOLDER)} folder). Automatic Sync keeps your devices in near-live sync: new messages upload moments after they arrive, and while the app is open it also watches the server and quietly pulls in what your other devices upload, fastest while you are in a chat. A wallet that connects to an existing backup restores it once automatically. Every upload merges with what is already on the server, so no device can erase another's history. Restoring merges the archive into this device's history.</p>
-    <p class="settings-group-footer">Your Address Book and portfolios are in the same backup and sync between your devices the same way.</p>
+    <p class="settings-group-footer">Your contacts and portfolios are in the same backup and sync between your devices the same way.</p>
     <div class="settings-list-card danger-list-card">
       <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
     </div>

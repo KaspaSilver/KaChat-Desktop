@@ -13,7 +13,7 @@ export const DOCK_PINNED = ["chats", "hub", "profile"];
 /** Tabs the user can place. Chats is listed (as on iOS) but pinned, so it never reaches the Hub. */
 // .kachat and KaChat Stats (iOS 5.2) are Hub sections like the rest: first in the Hub on a fresh
 // install, appended for an existing arrangement (normalizeDockPrefs), assignable to the dock.
-// Address Book (iOS 00767a4) is a Hub section too: first in the Hub on a fresh install.
+// Contacts (the Address Book, iOS 00767a4) is a Hub section too: first in the Hub on a fresh install.
 // KaChat Bots (iOS 82ab31d AppTab.kachatBots) follows KaChat Stats in the Hub; Simple Mode keeps it.
 // ChangeNOW Swap (iOS AppTab.swap) is back (owner, 2026-10-22: KaChat is Desktop/PWA only, so the
 // app-store rule that turned it off on iOS, f94db5a, does not apply): assignable, and in the Hub

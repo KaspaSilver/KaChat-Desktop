@@ -22,6 +22,7 @@ import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transa
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { mediaFrameByteLength, mediaFrameForEnvelope } from "../engine/media-frame.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange, showKaPostsActionToast } from "./kaposts.js";
+import { kapostsFiatFieldText, kapostsKasFieldText, kapostsTipFieldAmount, kapostsSwitchTipText, kapostsDefaultTipSompi } from "./kaposts-format.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount, chessTournamentsMayLeave } from "./chess-tournaments.js";
@@ -35,6 +36,9 @@ import { initWebPush, scheduleWebPushSync, webPushStatus, webPushStatusText, web
 import { authorKeyFromAddress, compressedPubkeyHex } from "./web-push-core.js";
 import { deriveBlindedGroupId as pushBlindedGroupId, bytesToHex as pushBytesToHex, hexToBytes as pushHexToBytes } from "../engine/group.js";
 import { broadcastPushWatch, activeBroadcastChannelName } from "./broadcasts.js";
+// The Chats dock tab's unread count (iOS 64d63846 / eec2e30) and the Select bar's room Mute.
+import { chatListUnreadCount, chatsTabUnreadCount, debouncedCountPublisher } from "./chat-unread.js";
+import { setBroadcastRoomsNotify } from "./broadcasts.js";
 import { kaPostsWatchedAuthorAddresses } from "./kaposts.js";
 import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml } from "./kachat-bots.js";
 import {
@@ -53,13 +57,17 @@ import { scanKaspaAddress } from "./qr-scan.js";
 import {
   mountSendPieces, recipientCardHtml, recipientStatusHtml, setRecipientLocked, amountEntryHtml, layoutAmountEntry,
   sanitizeAmountText, availablePillInnerHtml, infoPillHtml, feeControlsHtml, feeControls, sendActionButtonHtml,
-  createSendActionButton, openOwnAddressPicker, closeOwnAddressPicker,
+  createSendActionButton, openOwnAddressPicker, closeOwnAddressPicker, mountOwnAddressList,
   sendFromSectionHtml, sendFromControls, selectablePillHtml, setSelectedPill,
   otherDomainsHtml, pickOtherDomain, nameNotFoundText,
   configureSendAddressBook, refreshRecipientAddressBook, coinControlSummaryText, openCoinControlPicker, closeCoinControlPicker, formatSompiPlain, utxoEntryKey, utxoEntrySompi,
   openSentConfirmation, closeSentConfirmation, fixedKas8,
   createSwipeUpScreen, SWIPE_UP_LABELS, NOT_CONFIRMED_ON_DEVICE,
 } from "./send-kaspa-components.js";
+import {
+  createStepFlow, createFeeEditorStep, keypadHtml, wireKeypad, applyKeypadKey, stepChipHtml, stepQuestionHtml, reviewRowHtml, reviewAddressHtml,
+} from "./send-steps.js";
+import "./send-steps.css";
 import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason } from "./nextcloud.js";
 import * as Calls from "./calls.js";
 // Kaspa Hub > ChangeNOW Swap (iOS SwapView), back on Desktop (owner, 2026-10-22).
@@ -1837,9 +1845,9 @@ function buildInternalLinkCard(link) {
     : isProfile
       ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>'
       : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>';
-  const eyebrow = isPost ? (entry?.action === "reply" ? "KaPosts reply" : entry?.action === "quote" ? "KaPosts quote" : "KaPosts") : isProfile ? "KaChat Profile" : "Public Chat Room";
+  const eyebrow = isPost ? (entry?.action === "reply" ? "KaPost reply" : entry?.action === "quote" ? "KaPost quote" : "KaPost") : isProfile ? "KaChat Profile" : "Public Chat Room";
   const title = isPost
-    ? (entry?.authorName || "KaPosts post")
+    ? (entry?.authorName || "KaPost post")
     : isProfile
       ? (knsDomainForAddress(link.address) || (profileContact ? displayNameForAddress(profileContact) : (kachatNamesUiEnabled() ? identityNameForAddress(link.address) : shortAddress(link.address))))
       : `#${link.channel}`;
@@ -1975,10 +1983,11 @@ function paymentRequestSummaryHtml(request) {
     ${maker}`;
 }
 function renderSendKaspaPaymentRequest() {
-  const host = sendKaspaModal?.querySelector("[data-send-kaspa-request-summary]");
-  if (!host) return;
-  host.hidden = !sendKaspaPaymentRequest;
-  host.innerHTML = sendKaspaPaymentRequest ? paymentRequestSummaryHtml(sendKaspaPaymentRequest) : "";
+  // On the amount step and the review (KaPay 05db583).
+  sendKaspaModal?.querySelectorAll("[data-send-kaspa-request-summary]").forEach((host) => {
+    host.hidden = !sendKaspaPaymentRequest;
+    host.innerHTML = sendKaspaPaymentRequest ? paymentRequestSummaryHtml(sendKaspaPaymentRequest) : "";
+  });
 }
 /** Fills Send Kaspa in from a request (iOS WithdrawKaspaView.apply): the address (locked), the
  *  exact amount in KAS and the request above it. */
@@ -2093,25 +2102,69 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
   if (!engine.address) return;
   const conversationEntry = conversationId ? state.conversations.find((entry) => entry.id === conversationId) : null;
   const recipient = conversationEntry ? contactForConversation(conversationEntry) : null;
-  const { sheet, close } = openPaymentRequestBackdrop("Request Payment", `
-    ${paymentRequestHeaderHtml("Request Payment", "Cancel")}
-    <div class="sk-screen">
-      <div class="sk-select-pills" role="group" aria-label="Paid to">
-        ${selectablePillHtml({ attr: "payreq-dest", value: "fresh", title: "Fresh Address", selected: true })}
-        ${selectablePillHtml({ attr: "payreq-dest", value: "chosen", title: "Choose an Address" })}
-      </div>
-      <div data-payreq-address></div>
-      <p class="sk-caption" data-payreq-dest-note hidden></p>
+  const { sheet, close } = openPaymentRequestBackdrop("Request Payment", "");
+  // In steps (KaPay 05db583, KaChat-iPhone bc3e1ff3 CreatePaymentRequestView): "Where do you want
+  // to be paid?" (Fresh Address, or Choose an Address with your addresses right on the step), "How
+  // much?" on the keypad, then the review with the memo; its bottom button is Copy Payment Request
+  // (Share sits under the memo), or Send Payment Request from a chat.
+  sheet.classList.add("ss-host");
+  const steps = createStepFlow(sheet, { title: "Request Payment", onCancel: () => close() });
+  const destBody = steps.addStep("destination", {
+    question: "Where do you want to be paid?",
+    back: () => null,
+    canContinue: () => Boolean(destination === "fresh" ? (freshAddress || nextFreshAddress) : chosenAddress),
+    onContinue: () => steps.go("amount"),
+  });
+  destBody.insertAdjacentHTML("beforeend", `
+    <div class="sk-select-pills" role="group" aria-label="Paid to">
+      ${selectablePillHtml({ attr: "payreq-dest", value: "fresh", title: "Fresh Address", selected: true })}
+      ${selectablePillHtml({ attr: "payreq-dest", value: "chosen", title: "Choose an Address" })}
+    </div>
+    <div data-payreq-address></div>
+    <p class="ss-note" data-payreq-dest-note hidden></p>
+    <div class="sk-source-list ss-address-list" data-payreq-list role="listbox" aria-label="Your addresses" hidden></div>`);
+  const amountBody = steps.addStep("amount", {
+    question: "How much?",
+    className: "ss-amount-step",
+    continueTitle: "Review",
+    back: () => "destination",
+    canContinue: () => amountSompi() != null,
+    onContinue: () => steps.go("review"),
+    onShow: () => { const pill = amountBody.querySelector("[data-payreq-paid-to]"); if (pill) pill.innerHTML = paidToPillHtml(); },
+  });
+  amountBody.insertAdjacentHTML("beforeend", `
+    <div class="ss-chips start"><span class="ss-chip" data-payreq-paid-to></span></div>
+    <div class="ss-keypad-stage">
       ${amountEntryHtml({ prefix: "payreq", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})`, attrs: { conversion: "payreq-fiat" } })}
-      <div class="payment-request-memo-field">
-        <textarea class="field-input" rows="2" data-payreq-memo placeholder="What it's for (optional)" aria-label="What it's for (optional)"></textarea>
-        <span class="payment-request-memo-count" data-payreq-memo-count>0/${PAYMENT_REQUEST_MEMO_LIMIT}</span>
-      </div>
-      <p class="field-error" data-payreq-error role="alert" hidden></p>
-      <button class="primary-button full" type="button" data-payreq-action disabled>${recipient ? "Send Payment Request" : "Copy Payment Request"}</button>
-      ${recipient ? "" : '<button class="secondary-button full" type="button" data-payreq-share disabled>Share</button>'}
-      <p class="sk-caption payment-request-footnote">Anyone who opens or pastes it in KaChat gets Send Kaspa with this filled in, and sees it was made by your chatting address (signed with its key).</p>
-    </div>`);
+    </div>
+    ${keypadHtml()}`);
+  const reviewBody = steps.addStep("review", {
+    title: () => "Review",
+    continueTitle: () => (recipient ? "Send Payment Request" : (copied ? "Copied" : "Copy Payment Request")),
+    back: () => "amount",
+    canContinue: () => canMake() && !working,
+    onContinue: () => actionButton.click(),
+    onShow: () => renderReview(),
+  });
+  reviewBody.insertAdjacentHTML("beforeend", `
+    <div class="ss-review-amount" data-payreq-review-amount></div>
+    <div class="payment-request-paid-to"><span class="sk-from-label">Paid to</span><div data-payreq-review-address></div></div>
+    <div class="payment-request-memo-field">
+      <textarea class="field-input" rows="2" data-payreq-memo placeholder="What it's for (optional)" aria-label="What it's for (optional)"></textarea>
+      <span class="payment-request-memo-count" data-payreq-memo-count>0/${PAYMENT_REQUEST_MEMO_LIMIT}</span>
+    </div>
+    <p class="ss-note" data-payreq-memo-note></p>
+    <p class="field-error" data-payreq-error role="alert" hidden></p>
+    ${recipient ? "" : '<button class="sk-fee-edit-pill payment-request-share" type="button" data-payreq-share disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3.5M8 7.5l4-4 4 4"/><path d="M6 11H5a1.5 1.5 0 0 0-1.5 1.5v7A1.5 1.5 0 0 0 5 21h14a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 19 11h-1"/></svg>Share</button>'}
+    <p class="sk-caption payment-request-footnote">Anyone who opens or pastes it in KaChat gets Send Kaspa with this filled in, and sees it was made by your chatting address (signed with its key).</p>`);
+  // The review's bottom button; Copy / Send run through it (the step's Continue clicks it).
+  const actionButton = document.createElement("button");
+  actionButton.type = "button";
+  const paidToAddress = () => (destination === "fresh" ? (freshAddress || nextFreshAddress) : chosenAddress);
+  const paidToPillHtml = () => {
+    const address = paidToAddress();
+    return `<span class="ss-chip-label">Paid to</span><span class="ss-chip-value mono">${escapeHtml(shortAddress(address || ""))}</span>`;
+  };
   // Asking for an amount, not sending one: no Max (iOS KaspaAmountEntry showsMax: false).
   sheet.querySelector("[data-payreq-max]")?.remove();
   const amountInput = sheet.querySelector("[data-payreq-amount]");
@@ -2120,7 +2173,6 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
   const conversion = sheet.querySelector("[data-payreq-fiat]");
   const memoInput = sheet.querySelector("[data-payreq-memo]");
   const memoCount = sheet.querySelector("[data-payreq-memo-count]");
-  const actionButton = sheet.querySelector("[data-payreq-action]");
   const shareButton = sheet.querySelector("[data-payreq-share]");
   const errorEl = sheet.querySelector("[data-payreq-error]");
   let destination = "fresh";
@@ -2156,19 +2208,39 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
   const renderAddress = () => {
     const host = sheet.querySelector("[data-payreq-address]");
     const note = sheet.querySelector("[data-payreq-dest-note]");
-    const shown = destination === "fresh" ? (freshAddress || nextFreshAddress) : chosenAddress;
+    const list = sheet.querySelector("[data-payreq-list]");
+    const fresh = destination === "fresh";
+    const shown = freshAddress || nextFreshAddress;
+    // Fresh Address shows the address it will be paid to (iOS 3f5f79c); Choose an Address lists
+    // yours right on the step.
     if (host) {
-      host.innerHTML = shown
+      host.hidden = !fresh;
+      host.innerHTML = !fresh ? "" : shown
         ? addressResolutionCardHtml(shown, { onLoaded: (loaded) => { if (loaded === shown && sheet.isConnected) renderAddress(); } })
-        : destination === "fresh" ? '<div class="payment-request-loading"><span class="sk-spinner" aria-hidden="true"></span></div>' : "";
+        : '<div class="payment-request-loading"><span class="sk-spinner" aria-hidden="true"></span></div>';
     }
-    // Fresh Address just shows the address it will be paid to (iOS 3f5f79c).
-    let text = "";
-    if (destination === "chosen") {
-      text = !chosenAddress ? "Pick which of your addresses gets paid."
-        : chosenAddress === engine.address ? PAYMENT_REQUEST_CHATTING_NOTE : PAYMENT_REQUEST_CHOSEN_NOTE;
-    }
+    const text = fresh ? (shown ? "A brand-new address of yours that has never been used or handed out." : "") : "Pick which of your addresses gets paid.";
     if (note) { note.textContent = text; note.hidden = !text; }
+    if (list) list.hidden = fresh;
+    addressList?.setSelected(chosenAddress);
+    steps.refresh();
+  };
+  let addressList = null;
+  const renderReview = () => {
+    const sompi = amountSompi();
+    const amountHost = sheet.querySelector("[data-payreq-review-amount]");
+    if (amountHost) {
+      const fiat = sompi != null && price ? formatFiatValue(Number(sompi) / 1e8, price) : "";
+      amountHost.innerHTML = `<span class="ss-review-eyebrow">You're requesting</span>${sompi == null ? "" : `<strong class="ss-review-big">${escapeHtml(`${formatSompiPlain(sompi)} ${KAS_UNIT}`)}</strong>`}${fiat ? `<span class="ss-review-fiat">${escapeHtml(fiat)}</span>` : ""}`;
+    }
+    const address = paidToAddress();
+    const addressHost = sheet.querySelector("[data-payreq-review-address]");
+    if (addressHost && addressHost.dataset.address !== address) {
+      addressHost.dataset.address = address || "";
+      addressHost.innerHTML = address ? addressResolutionCardHtml(address, { onLoaded: (loaded) => { if (loaded === address && sheet.isConnected) { addressHost.dataset.address = ""; renderReview(); } } }) : "";
+    }
+    const memoNote = sheet.querySelector("[data-payreq-memo-note]");
+    if (memoNote) memoNote.textContent = address === engine.address ? PAYMENT_REQUEST_CHATTING_NOTE : PAYMENT_REQUEST_CHOSEN_NOTE;
   };
   const renderAmount = () => {
     layoutAmountEntry(amountInput, unitCode);
@@ -2187,15 +2259,12 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
   };
   const refresh = () => {
     const ready = canMake() && !working;
-    if (actionButton) {
-      actionButton.disabled = !ready;
-      if (!recipient) actionButton.textContent = copied ? "Copied" : "Copy Payment Request";
-    }
     if (shareButton) shareButton.disabled = !ready;
     if (memoCount) memoCount.textContent = `${memoCharacters(memoInput?.value || "").length}/${PAYMENT_REQUEST_MEMO_LIMIT}`;
+    steps.refresh();
   };
   // Any change to what the request says un-does "Copied".
-  const edited = () => { copied = false; refresh(); };
+  const edited = () => { copied = false; refresh(); if (steps.current === "review") renderReview(); };
 
   // The request to hand out, signed by your chatting address (whoever pays sees it's from you, even
   // when it's paid to a spending address, which has no identity). A fresh address is reserved here,
@@ -2238,21 +2307,30 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
     if (dest !== destination) {
       destination = dest;
       setSelectedPill(sheet, "payreq-dest", destination);
+      if (dest === "chosen" && !addressList) {
+        addressList = mountOwnAddressListFor(sheet.querySelector("[data-payreq-list]"), {
+          selectedAddress: chosenAddress,
+          onPick: (picked) => {
+            if (!sheet.isConnected || working) return;
+            chosenAddress = picked.address;
+            renderAddress();
+            edited();
+          },
+        });
+      }
       renderAddress();
       edited();
     }
-    if (dest === "chosen") {
-      openOwnAddressPickerFor({
-        title: "Choose an Address",
-        selectedAddress: chosenAddress,
-        onPick: (picked) => {
-          if (!sheet.isConnected) return;
-          chosenAddress = picked.address;
-          renderAddress();
-          edited();
-        },
-      });
-    }
+  });
+  // The keypad (iOS KaspaKeypadAmountEntry, showsMax: false); a phone's keyboard stays down.
+  if (amountInput && window.matchMedia?.("(pointer: coarse)").matches) { amountInput.readOnly = true; amountInput.inputMode = "none"; }
+  wireKeypad(amountBody.querySelector(".ss-keypad"), (key) => {
+    if (!amountInput || working) return false;
+    const next = applyKeypadKey(key, amountInput.value, unit === "fiat" && selectedCurrency !== "btc" ? 2 : 8);
+    if (next === amountInput.value) return false;
+    amountInput.value = next;
+    amountInput.dispatchEvent(new Event("input"));
+    return true;
   });
   unitToggle?.addEventListener("click", () => {
     if (!price) return;
@@ -2305,10 +2383,10 @@ function openCreatePaymentRequest({ conversationId = null } = {}) {
     close();
   }));
 
+  steps.go("destination", { instant: true });
   renderAddress();
   renderAmount();
   refresh();
-  amountInput?.focus();
   fetchKasPrice(selectedCurrency).then((value) => { price = value || null; renderAmount(); }).catch(() => {});
   // Derived, not reserved: opening the screen and cancelling uses no address up (iOS 3f5f79c).
   // The fresh slot is quantum-safe (KIP-22, iOS bba1b1e), matching what reserving returns.
@@ -5809,7 +5887,7 @@ function chatListDeliveryGlyphHtml(message) {
 const WEB_LINK_RE = /https?:\/\/\S+/i;
 function webLinkPreviewLabel(text) {
   const internal = firstInternalLinkIn(text);
-  if (internal?.kind === "kapost") return "Shared a KaPosts post";
+  if (internal?.kind === "kapost") return "Shared a KaPost post";
   if (internal?.kind === "profile") return "Shared a KaChat profile";
   if (internal?.kind === "broadcast") return `Public chat room #${internal.channel}`;
   if (internal?.kind === "pay") return kasLabel(`Payment request: ${paymentRequestAmountText(internal.request)} KAS`);
@@ -5828,7 +5906,7 @@ function chatListPreviewText(message) {
   // text is just a web link below.
   const internal = firstInternalLinkIn(unwrapped);
   if (internal && unwrapped.trim() === internal.raw) {
-    if (internal.kind === "kapost") return "Shared a KaPosts post";
+    if (internal.kind === "kapost") return "Shared a KaPost post";
     if (internal.kind === "profile") return "Shared a KaChat profile";
     if (internal.kind === "broadcast") return `Public chat room #${internal.channel}`;
     if (internal.kind === "pay") return kasLabel(`Payment request: ${paymentRequestAmountText(internal.request)} KAS`);
@@ -7391,7 +7469,7 @@ const NOTIF_SESSION_START = Date.now();
 const notifOverlay = document.querySelector("[data-notif-overlay]");
 let globalNotifications = [];
 let notifCenterLastSeenAt = 0;
-const NOTIF_SOURCE_LABELS = { kaposts: "KaPosts", group: "Group", broadcast: "Public Chats", wallet: "Wallet", kachat: ".kachat" };
+const NOTIF_SOURCE_LABELS = { kaposts: "KaPost", group: "Group", broadcast: "Public Chats", wallet: "Wallet", kachat: ".kachat" };
 // The Profile bell is for broadcasts and for Kaspa arriving on your addresses (chatting,
 // spending, cold storage). KaPosts has its own bell inside KaPosts, and group @mentions ping
 // the chat itself, so neither lands here.
@@ -11042,7 +11120,7 @@ sidebarTabButtons.forEach((button) => {
 
 const DOCK_PREFS_KEY = "kachat-dock-prefs-v1"; // account-scoped: { dock, hub }
 /** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "Chess Online", "kachat-names": ".kachat Domains", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "KaPlay", "kachat-names": ".kachat Domains", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -11185,13 +11263,38 @@ function tabUnreadCount(tab) {
     // bell inside KaPosts (owner, 2026-10-23). It stays in refreshTabBadges' list so an old badge
     // is taken off.
     if (tab === "broadcasts") return broadcastUnreadTotal();
+    if (tab === "chats") return chatsTabUnreadTotal();
   } catch {}
   return 0;
+}
+/** Chats: unread messages in the chats the list shows and in the group chats (iOS 64d63846, the
+ *  Chats and Groups tabs: Desktop has no Groups tab), and across the public rooms (KaPosts-iPhone
+ *  eec2e30's Public Chats tab: the rooms live under Chats here). Simple Mode hides the rooms. */
+function chatsTabUnreadTotal() {
+  if (!engine.address) return 0;
+  const chats = chatListUnreadCount(state.conversations, (conversationEntry) => {
+    const contact = contactForConversation(conversationEntry);
+    // iOS isConversationVisibleInChatList: not declined, not blocked, not a Message Request.
+    return Boolean(contact?.address) && contact.relationshipState !== "declined"
+      && !isChatBlocked(contact.address) && !isMessageRequest(conversationEntry);
+  });
+  let rooms = 0;
+  if (!isChildModeEnabled()) { try { rooms = broadcastUnreadTotal(); } catch { rooms = 0; } }
+  return chatsTabUnreadCount({ chats, groups: totalGroupUnread(), rooms });
+}
+/** Recounts the Chats badge a moment after anything that moves it - a message, a read, a group's
+ *  or a room's change - and redraws only when the number changed (iOS PublicChatUnreadBadge's
+ *  300 ms debounce). The publisher lives on the function: renderChats runs during boot. */
+function scheduleChatsTabBadge() {
+  if (!scheduleChatsTabBadge.recount) {
+    scheduleChatsTabBadge.recount = debouncedCountPublisher({ read: () => tabUnreadCount("chats"), publish: () => refreshTabBadges() });
+  }
+  scheduleChatsTabBadge.recount();
 }
 function tabBadgeLabel(count) { return count > 99 ? "99+" : String(count); }
 // Dock tabs carry the same badge as the hub tiles (iOS AppTabBadge on both).
 function refreshTabBadges() {
-  for (const tab of ["profile", "kaposts"]) {
+  for (const tab of ["profile", "kaposts", "chats"]) {
     const count = tabUnreadCount(tab);
     const button = document.querySelector(`.sidebar-tab[data-app-tab="${tab}"]`);
     if (button) {
@@ -11204,7 +11307,7 @@ function refreshTabBadges() {
         badge.classList.toggle("dot", dot);
         badge.textContent = dot ? "" : tabBadgeLabel(count);
         if (dot) badge.setAttribute("aria-label", "Unread notifications");
-        else badge.removeAttribute("aria-label");
+        else badge.setAttribute("aria-label", `${count} unread`);
       } else if (badge) badge.remove();
     }
     const tile = hubGrid?.querySelector(`[data-hub-tile="${tab}"]`);
@@ -12153,7 +12256,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 255;
+const APP_BUILD = 256;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -12578,7 +12681,8 @@ mountSendPieces(sendKaspaModal, {
   // Compound UTXOs has no From (it merges this one address): its balance shows here (iOS 6333dd3).
   pills: `<div class="sk-pills" data-send-kaspa-pills hidden>${infoPillHtml({ attr: "send-kaspa-source-pill" })}</div>`,
   // Coin Control opens the shared picker (iOS CoinControlView), like the chat's Send KAS sheet.
-  fee: feeControlsHtml({ prefix: "send-kaspa" }),
+  // The review's fee: Edit opens the fee editor (KaPay 05db583).
+  fee: feeControlsHtml({ prefix: "send-kaspa", editPill: true }),
   action: "",
 });
 // Swipe up to Send / Swipe up to Consolidate (iOS 59593af / 7abc06e8 WithdrawKaspaView,
@@ -12649,6 +12753,244 @@ const sendKaspaSelected = new Set();
 let sendKaspaSourceIndex = null;
 // The picked spending address's name, as Choose an Address listed it.
 let sendKaspaSourceLabel = null;
+
+// --- Send Kaspa in steps (KaPay 05db583, KaChat-iPhone bc3e1ff3 WithdrawKaspaView) ----------------
+// To ("Who are you sending to?"), From ("Where are you sending from?", your addresses listed right
+// on the step), the amount on the keypad, then the swipe-up screen as the Review: the amount, To,
+// From and Total, the payment request, and the only things that can still change - the fee (Edit
+// opens the fee editor) and Coin Control. Compound UTXOs opens on the review; a payment request or
+// a pre-filled recipient on From (the amount when From is fixed); a request's amount is fixed, so
+// it has no keypad.
+const sendKaspaSteps = createStepFlow(sendKaspaModal?.querySelector(".send-kaspa-modal"), { onCancel: () => closeSendKaspaModal() });
+sendKaspaSteps.setOrder(["to", "from", "amount", "review", "fee"]);
+// Opened to pay a request (a link, a scan): its address is fixed, so there is no To step.
+let sendKaspaRequestFromLink = false;
+
+function sendKaspaAfterRecipient() { return sendKaspaSourceLocked ? "amount" : "from"; }
+/** Where Back goes from a step (iOS backStep(from:)); null for the first one. */
+function sendKaspaBackFrom(step) {
+  if (step === "from") return sendKaspaRequestFromLink ? null : "to";
+  if (step === "amount") {
+    if (!sendKaspaSourceLocked) return "from";
+    return sendKaspaCompound || sendKaspaRequestFromLink ? null : "to";
+  }
+  if (step === "review") return sendKaspaCompound ? null : "amount";
+  return null;
+}
+function goSendKaspaStep(step, options = {}) {
+  closeOwnAddressPicker();
+  // Back from a pasted request: the recipient starts over (iOS go(to: .recipient)).
+  if (step === "to" && sendKaspaPaymentRequest && !sendKaspaRequestFromLink) clearPastedSendKaspaRequest();
+  const back = sendKaspaBackFrom("review");
+  sendKaspaSwipe.setBack(back ? () => goSendKaspaStep(back) : null);
+  sendKaspaSteps.go(step, options);
+  if (step === "review") renderSendKaspaReview();
+}
+function clearPastedSendKaspaRequest() {
+  sendKaspaPaymentRequest = null;
+  sendKaspaUnit = "kas";
+  sendKaspaMaxMode = false;
+  sendKaspaMaxPin = null;
+  applySendKaspaUnit();
+  applySendKaspaCompoundUi();
+  renderSendKaspaPaymentRequest();
+  const recipient = document.querySelector("[data-send-kaspa-recipient]");
+  if (recipient) { recipient.value = ""; recipient.dispatchEvent(new Event("input")); }
+  if (sendKaspaAmountInput) { sendKaspaAmountInput.value = ""; sendKaspaAmountInput.dispatchEvent(new Event("input")); }
+}
+
+// The amount as sompi (null while there is none), the From address's balance, and whether one
+// is more than the other.
+function sendKaspaAmountSompi() {
+  try {
+    const sompi = kasToSompi(normalizeKasAmount(sendKaspaResolveAmountKas()));
+    return sompi != null && sompi > 0n ? sompi : null;
+  } catch { return null; }
+}
+function sendKaspaExceedsBalance() {
+  const amount = sendKaspaAmountSompi();
+  if (amount == null || sendKaspaAvailableKas == null) return false;
+  const available = kasToSompi(trimKas8(sendKaspaAvailableKas)) ?? 0n;
+  return amount > available;
+}
+function sendKaspaCanReview() {
+  return Boolean(sendKaspaRecipient) && sendKaspaAmountSompi() != null && !sendKaspaExceedsBalance() && sendKaspaMaxBusy === 0;
+}
+// The recipient's name: the domain it resolved from, else its Address Book name.
+function sendKaspaRecipientName() {
+  if (!sendKaspaRecipient) return null;
+  const text = String(sendKaspaController.recipientText() || "");
+  if (text && text.toLowerCase() !== sendKaspaRecipient.toLowerCase() && !/^kaspa(test)?:/i.test(text)) return text;
+  return addressBookEntry(sendKaspaRecipient)?.name || null;
+}
+function sendKaspaSourceTitle() {
+  if (sendKaspaCompound) return "This address";
+  return sendKaspaSourceIndex == null ? "Chatting Address" : (sendKaspaSourceLabel || spendingSourceLabel(sendKaspaSourceIndex));
+}
+
+// Step 1, To.
+const sendKaspaToBody = sendKaspaSteps.addStep("to", {
+  question: "Who are you sending to?",
+  back: () => null,
+  canContinue: () => Boolean(sendKaspaRecipient),
+  onContinue: () => goSendKaspaStep(sendKaspaAfterRecipient()),
+  onShow: () => document.querySelector("[data-send-kaspa-recipient]")?.focus({ preventScroll: true }),
+});
+const sendKaspaRecipientCard = sendKaspaModal?.querySelector("[data-send-kaspa-recipient-card]");
+if (sendKaspaRecipientCard) sendKaspaToBody.append(sendKaspaRecipientCard);
+document.querySelector("[data-send-kaspa-recipient]")?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing || sendKaspaSteps.current !== "to" || !sendKaspaRecipient) return;
+  event.preventDefault();
+  goSendKaspaStep(sendKaspaAfterRecipient());
+});
+
+// Step 2, From: the Chatting Address, or Choose an Address with your addresses right on the step.
+const sendKaspaFromBody = sendKaspaSteps.addStep("from", {
+  question: "Where are you sending from?",
+  className: "ss-from-step",
+  back: () => sendKaspaBackFrom("from"),
+  canContinue: () => !(sendKaspaChoosingFrom && sendKaspaSourceIndex == null),
+  onContinue: () => goSendKaspaStep("amount"),
+  onShow: () => { if (sendKaspaChoosingFrom) showSendKaspaAddressList(); },
+});
+const sendKaspaFromSection = sendKaspaModal?.querySelector("[data-send-kaspa-from]");
+if (sendKaspaFromSection) sendKaspaFromBody.append(sendKaspaFromSection);
+sendKaspaFromBody.insertAdjacentHTML("beforeend", `
+  <p class="ss-note" data-send-kaspa-from-note hidden>Pick which of your addresses the Kaspa leaves from.</p>
+  <div class="sk-source-list ss-address-list" data-send-kaspa-from-list role="listbox" aria-label="Your addresses" hidden></div>`);
+let sendKaspaFromList = null;
+function showSendKaspaAddressList() {
+  sendKaspaFromList = mountOwnAddressListFor(sendKaspaFromBody.querySelector("[data-send-kaspa-from-list]"), {
+    selectedAddress: sendKaspaSourceIndex == null ? null : sendKaspaSourceAddress(),
+    onPick: (picked) => {
+      if (sendKaspaSlider.busy) return;
+      // the chatting address picked from the list: back on its own pill
+      if (picked.kind === "spending") switchSendKaspaSource(picked.index, picked.label);
+      else { sendKaspaChoosingFrom = false; switchSendKaspaSource(null); }
+      paintSendKaspaFromStep();
+    },
+  });
+  paintSendKaspaFromStep();
+}
+function paintSendKaspaFromStep() {
+  if (!sendKaspaFromSection) return;
+  const choosing = sendKaspaChoosingFrom;
+  const card = sendKaspaFromSection.querySelector(".sk-from-card");
+  if (card) card.hidden = choosing;
+  const note = sendKaspaFromBody.querySelector("[data-send-kaspa-from-note]");
+  const list = sendKaspaFromBody.querySelector("[data-send-kaspa-from-list]");
+  if (note) note.hidden = !choosing;
+  if (list) list.hidden = !choosing;
+  sendKaspaFromList?.setSelected(sendKaspaSourceIndex == null ? null : sendKaspaSourceAddress());
+  sendKaspaSteps.refresh();
+}
+
+// Step 3, the amount on the keypad (iOS KaspaKeypadAmountEntry): "To" and "From" chips, the amount
+// with its KAS / currency switch and Max, what's available (or what's wrong), and the keys. A
+// physical keyboard types into it too.
+const sendKaspaAmountBody = sendKaspaSteps.addStep("amount", {
+  className: "ss-amount-step",
+  continueTitle: "Review",
+  back: () => sendKaspaBackFrom("amount"),
+  canContinue: sendKaspaCanReview,
+  onContinue: () => goSendKaspaStep("review"),
+  onShow: () => paintSendKaspaAmountStep(),
+});
+sendKaspaAmountBody.innerHTML = `
+  <div class="ss-chips" data-send-kaspa-chips></div>
+  <div class="ss-keypad-stage" data-send-kaspa-keypad-stage>
+    <div class="ss-review-stack" data-send-kaspa-request-stage hidden>
+      <div class="ss-review-amount" data-send-kaspa-request-amount></div>
+      <div class="sk-card payment-request-summary" data-send-kaspa-request-summary hidden></div>
+    </div>
+    <p class="ss-footnote" data-send-kaspa-amount-note></p>
+  </div>
+  ${keypadHtml()}`;
+const sendKaspaAmountEntry = sendKaspaModal?.querySelector("[data-send-kaspa-amount-entry]");
+if (sendKaspaAmountEntry) sendKaspaAmountBody.querySelector("[data-send-kaspa-keypad-stage]").prepend(sendKaspaAmountEntry);
+// The keypad stands in for the phone's keyboard, which would cover the screen.
+if (sendKaspaAmountInput && window.matchMedia?.("(pointer: coarse)").matches) {
+  sendKaspaAmountInput.readOnly = true;
+  sendKaspaAmountInput.inputMode = "none";
+}
+wireKeypad(sendKaspaAmountBody.querySelector(".ss-keypad"), (key) => {
+  if (!sendKaspaAmountInput || sendKaspaPaymentRequest || sendKaspaSlider.busy) return false;
+  const next = applyKeypadKey(key, sendKaspaAmountInput.value, sendKaspaUnit === "fiat" && selectedCurrency !== "btc" ? 2 : 8);
+  if (next === sendKaspaAmountInput.value) return false;
+  // A key press stops treating the amount as Max (iOS onKeyTyped).
+  sendKaspaMaxMode = false;
+  setSendKaspaError("");
+  sendKaspaAmountInput.value = next;
+  sendKaspaAmountInput.dispatchEvent(new Event("input"));
+  return true;
+});
+function paintSendKaspaAmountStep() {
+  if (!sendKaspaAmountBody || sendKaspaModal?.hidden) return;
+  const chips = sendKaspaAmountBody.querySelector("[data-send-kaspa-chips]");
+  if (chips) {
+    const name = sendKaspaRecipientName();
+    chips.innerHTML = `${stepChipHtml({ label: "To", value: name || sendKaspaRecipient || "", isAddress: !name })}${stepChipHtml({ label: "From", value: sendKaspaSourceTitle() })}`;
+  }
+  const request = sendKaspaPaymentRequest;
+  const stage = sendKaspaAmountBody.querySelector("[data-send-kaspa-request-stage]");
+  if (stage) stage.hidden = !request;
+  if (sendKaspaAmountEntry) sendKaspaAmountEntry.hidden = Boolean(request);
+  const keypad = sendKaspaAmountBody.querySelector(".ss-keypad");
+  if (keypad) keypad.hidden = Boolean(request);
+  if (request) {
+    const amount = sendKaspaAmountBody.querySelector("[data-send-kaspa-request-amount]");
+    if (amount) amount.innerHTML = sendKaspaReviewAmountHtml();
+  }
+  // Under the amount: what's wrong with it, else what's available.
+  const note = sendKaspaAmountBody.querySelector("[data-send-kaspa-amount-note]");
+  if (note) {
+    const errorEl = sendKaspaModal?.querySelector("[data-send-kaspa-error]");
+    const error = errorEl && !errorEl.hidden ? errorEl.textContent : "";
+    const exceeds = sendKaspaExceedsBalance();
+    note.textContent = error || (exceeds ? "This is more than the address you're sending from holds."
+      : (sendKaspaAvailableKas != null ? `Available: ${trimKas8(sendKaspaAvailableKas)} ${KAS_UNIT}` : " "));
+    note.classList.toggle("error", Boolean(error || exceeds));
+  }
+  sendKaspaSteps.refresh();
+}
+
+// Step 4, the review: the swipe-up screen, the amount and To / From / Total over the fee.
+sendKaspaModal?.querySelector(".sk-screen")?.insertAdjacentHTML("afterbegin", '<div class="ss-review-stack" data-send-kaspa-review></div>');
+function sendKaspaReviewAmountHtml() {
+  const sompi = sendKaspaAmountSompi();
+  const eyebrow = `<span class="ss-review-eyebrow">${sendKaspaCompound ? "Consolidating" : "You're sending"}</span>`;
+  if (sompi == null) return `${eyebrow}<span class="sk-spinner" aria-hidden="true"></span>`;
+  const fiat = sendKaspaPrice ? formatFiatValue(Number(sompi) / 1e8, sendKaspaPrice) : "";
+  return `${eyebrow}<strong class="ss-review-big">${escapeHtml(`${formatSompiPlain(sompi)} ${KAS_UNIT}`)}</strong>${fiat ? `<span class="ss-review-fiat">${escapeHtml(fiat)}</span>` : ""}`;
+}
+function renderSendKaspaReview() {
+  const host = sendKaspaModal?.querySelector("[data-send-kaspa-review]");
+  if (!host || sendKaspaModal.hidden) return;
+  const sompi = sendKaspaAmountSompi();
+  const to = sendKaspaCompound ? "This address (consolidating)" : null;
+  let total = '<span class="ss-review-address">—</span>';
+  if (sompi != null && sendKaspaBaseFeeKas != null) {
+    total = `<strong>${escapeHtml(`${formatSompiPlain(sompi + (kasToSompi(trimKas8(sendKaspaTotalFeeKas())) ?? 0n))} ${KAS_UNIT}`)}</strong>`;
+  } else if (sompi != null && sendKaspaRecipient) {
+    total = '<span class="sk-spinner" aria-hidden="true"></span>';
+  }
+  host.innerHTML = `
+    <div class="ss-review-amount">${sendKaspaReviewAmountHtml()}</div>
+    <div class="sk-card ss-review-card">
+      ${reviewRowHtml("To", to ? escapeHtml(to) : reviewAddressHtml({ name: sendKaspaRecipientName(), address: sendKaspaRecipient || "" }))}
+      ${reviewRowHtml("From", reviewAddressHtml({ name: sendKaspaSourceTitle(), address: sendKaspaSourceAddress() || "" }))}
+      ${reviewRowHtml("Total", total)}
+    </div>`;
+}
+// The fee editor, from the review's Edit (iOS feeStep): the typed total, never under the Normal fee.
+const sendKaspaFeeEditor = createFeeEditorStep(sendKaspaSteps, {
+  onConfirm: (sompi) => {
+    if (sendKaspaBaseFeeKas == null) return;
+    sendKaspaCustomFeeKas = Number(sompi) / 1e8;
+    updateSendKaspaFeeSummary();
+    refillSendKaspaMaxIfActive();
+  },
+});
 
 function sendKaspaSourceAddress() {
   return sendKaspaSourceIndex == null ? engine.address : deriveSpendingAddressAt(sendKaspaSourceIndex);
@@ -12742,6 +13084,8 @@ sendKaspaAmountInput?.addEventListener("input", () => {
   if (sanitized !== sendKaspaAmountInput.value) sendKaspaAmountInput.value = sanitized;
   updateSendKaspaFiatHint();
   scheduleSendKaspaFeeEstimate();
+  paintSendKaspaAmountStep();
+  renderSendKaspaReview();
 });
 
 // Network fee - matches iOS WithdrawKaspaView: an estimated base (Normal) fee scaled by the tier
@@ -12773,6 +13117,8 @@ function sendKaspaGetFeeKas() {
 // The fee card's amount (the shared SendFeeControls): what's paid, "--" before an estimate.
 function updateSendKaspaFeeSummary() {
   sendKaspaFeeCtl.setText(sendKaspaBaseFeeKas == null ? "--" : `${trimKas8(sendKaspaTotalFeeKas())} ${KAS_UNIT}`);
+  sendKaspaModal?.querySelector("[data-send-kaspa-fee-card]")?.classList.toggle("ss-fee-unknown", sendKaspaBaseFeeKas == null);
+  renderSendKaspaReview();
 }
 function applySendKaspaFeeField() {
   updateSendKaspaFeeSummary();
@@ -12807,7 +13153,13 @@ function commitSendKaspaCustomFee() {
 }
 sendKaspaModal?.querySelector("[data-send-kaspa-fee-edit]")?.addEventListener("click", () => {
   if (sendKaspaBaseFeeKas == null) return; // nothing to edit before an estimate (iOS startEditingFee)
-  sendKaspaFeeCtl.setEditing(true, trimKas8(sendKaspaTotalFeeKas()));
+  // The fee editor (KaPay 05db583 SendFeeEditorScreen): the whole fee on the keypad, never under
+  // the network's minimum (the Normal fee).
+  sendKaspaFeeEditor.open({
+    feeSompi: kasToSompi(trimKas8(sendKaspaTotalFeeKas())),
+    minimumSompi: kasToSompi(trimKas8(sendKaspaBaseFeeKas)),
+    kasUnit: KAS_UNIT,
+  });
 });
 sendKaspaModal?.querySelector("[data-send-kaspa-fee-commit]")?.addEventListener("click", commitSendKaspaCustomFee);
 sendKaspaFeeCustom?.addEventListener("keydown", (event) => {
@@ -12883,6 +13235,7 @@ function updateSendKaspaMaxButton() {
   const busy = sendKaspaMaxBusy > 0;
   sendKaspaMaxButton.disabled = !sendKaspaRecipient || busy;
   sendKaspaMaxButton.innerHTML = busy ? '<span class="sk-spinner" aria-hidden="true"></span>' : "Max";
+  sendKaspaSteps?.refresh();
 }
 // The screen's red line under the fee card (iOS errorMessage): Max's failures go here too.
 function setSendKaspaError(message) {
@@ -12890,11 +13243,13 @@ function setSendKaspaError(message) {
   if (!el) return;
   el.textContent = message || "";
   el.hidden = !message;
+  paintSendKaspaAmountStep();
 }
 function onSendKaspaRecipientChange(address) {
   sendKaspaRecipient = address || null;
   updateSendKaspaMaxButton();
   scheduleSendKaspaFeeEstimate();
+  sendKaspaSteps?.refresh();
 }
 
 // Coin Control (iOS CoinControlView): the shared picker over the screen; nothing picked = automatic.
@@ -13187,27 +13542,35 @@ function spendingSourceLabel(index) {
   const trimmed = custom != null ? String(custom).trim() : "";
   return trimmed || spendingIndexTitle(index); // quantum rows by their own chain's number (e001786)
 }
+// On the From step, Choose an Address lists your addresses right there (KaPay 05db583 OwnAddressList).
+let sendKaspaChoosingFrom = false;
 const sendKaspaFrom = sendFromControls(sendKaspaModal, "send-kaspa", {
-  onChatting: () => { if (!sendKaspaSlider.busy && !sendKaspaSourceLocked) switchSendKaspaSource(null); },
+  onChatting: () => {
+    if (sendKaspaSlider.busy || sendKaspaSourceLocked) return;
+    sendKaspaChoosingFrom = false;
+    switchSendKaspaSource(null);
+    renderSendKaspaSourcePill(sendKaspaAvailableKas == null ? "…" : trimKas8(sendKaspaAvailableKas));
+  },
   onChoose: () => {
     if (sendKaspaCompound || sendKaspaSlider.busy || sendKaspaSourceLocked) return;
-    openOwnAddressPickerFor({
-      title: "Send From",
-      selectedAddress: sendKaspaSourceAddress(),
-      onPick: (picked) => switchSendKaspaSource(picked.kind === "spending" ? picked.index : null, picked.label),
-    });
+    sendKaspaChoosingFrom = true;
+    showSendKaspaAddressList();
+    renderSendKaspaSourcePill(sendKaspaAvailableKas == null ? "…" : trimKas8(sendKaspaAvailableKas));
   },
 });
 function renderSendKaspaSourcePill(balanceText) {
   const loading = balanceText == null || balanceText === "…";
   sendKaspaFrom.render({
-    chatting: sendKaspaSourceIndex == null,
+    chatting: sendKaspaSourceIndex == null && !sendKaspaChoosingFrom,
     title: sendKaspaSourceIndex == null ? "Chatting Address" : (sendKaspaSourceLabel || spendingSourceLabel(sendKaspaSourceIndex)),
     address: sendKaspaSourceAddress() || "",
     balanceText: loading ? null : `${balanceText} ${KAS_UNIT}`,
   });
   const pill = sendKaspaModal?.querySelector("[data-send-kaspa-source-pill]");
   if (pill) pill.innerHTML = availablePillInnerHtml({ text: `Available: ${balanceText ?? "…"} ${KAS_UNIT}` });
+  paintSendKaspaFromStep();
+  paintSendKaspaAmountStep();
+  renderSendKaspaReview();
 }
 
 // Compound UTXOs mode (matches iOS's WithdrawKaspaView isCompoundMode): the Send Kaspa screen with
@@ -13218,10 +13581,9 @@ function applySendKaspaCompoundUi() {
   // iOS WithdrawKaspaView: "Compound UTXOs", "Payment Request" while paying one (iOS c6851d6), else
   // "Send Kaspa" - which address pays is the From section's to say (iOS 6333dd3). An address's own
   // Send is "Send Kaspa from Address #N" (iOS 59593af SpendingAddressWithdrawView).
-  sendKaspaSwipe.setScreenTitle(sendKaspaCompound
-    ? "Compound UTXOs"
-    : (sendKaspaPaymentRequest ? "Payment Request"
-      : (sendKaspaSourceLocked && sendKaspaSourceIndex != null ? `Send Kaspa from ${spendingIndexTitle(sendKaspaSourceIndex)}` : "Send Kaspa")));
+  // In steps (KaPay 05db583) the steps carry that title and the swipe-up screen is the Review.
+  sendKaspaSteps?.setTitle(sendKaspaCompound ? "Compound UTXOs" : (sendKaspaPaymentRequest ? "Payment Request" : "Send Kaspa"));
+  sendKaspaSwipe.setScreenTitle(sendKaspaCompound ? "Compound UTXOs" : "Review");
   // From on every send but Compound UTXOs, whose balance shows in the Available pill instead.
   const from = sendKaspaModal?.querySelector("[data-send-kaspa-from]");
   if (from) from.hidden = sendKaspaCompound;
@@ -13323,6 +13685,8 @@ function openSendKaspaModal(options = {}) {
   sendKaspaFrom.setLocked(sendKaspaSourceLocked);
   sendKaspaPaymentRequest = null;
   sendKaspaPaidAsChatPayment = false;
+  sendKaspaRequestFromLink = Boolean(options?.paymentRequest) && !sendKaspaCompound;
+  sendKaspaChoosingFrom = false;
   renderSendKaspaPaymentRequest();
   closeOwnAddressPicker();
   sendKaspaSwipe.reset();
@@ -13342,6 +13706,10 @@ function openSendKaspaModal(options = {}) {
     recipient.value = prefill;
     recipient.dispatchEvent(new Event("input"));
   }
+  // The step it opens on (iOS initialStep): Compound UTXOs on the review, a request or a pre-filled
+  // recipient past To, everything else on To.
+  goSendKaspaStep(sendKaspaCompound ? "review"
+    : (sendKaspaPaymentRequest || prefill ? sendKaspaAfterRecipient() : "to"), { instant: true });
   return opened;
 }
 // A payment request pasted (or scanned) into the recipient fills in everything it carries (iOS
@@ -13351,7 +13719,10 @@ document.querySelector("[data-send-kaspa-recipient]")?.addEventListener("input",
   const value = String(event.target.value || "");
   if (!/\/pay\//i.test(value)) return;
   const link = firstInternalLinkIn(value.trim());
-  if (link?.kind === "pay") applyPaymentRequestToSendKaspa(link.request);
+  if (link?.kind !== "pay") return;
+  applyPaymentRequestToSendKaspa(link.request);
+  // Pasted on To, it fills everything in: on to From (iOS handleInputChange).
+  if (sendKaspaSteps.current === "to") goSendKaspaStep(sendKaspaAfterRecipient());
 });
 
 
@@ -13404,6 +13775,18 @@ async function ownAddressProbeUsed(address) {
 }
 /** Choose an Address over the current screen (a send's "Send From", Request Payment's "Choose an
  *  Address"): every address of the account, chatting first, each Used / Unused (iOS 6333dd3). */
+/** The same addresses listed right on a step (KaPay 05db583 OwnAddressList). */
+function mountOwnAddressListFor(list, { selectedAddress, onPick, excludeQuantum = false }) {
+  return mountOwnAddressList(list, {
+    selectedAddress,
+    excludeQuantum,
+    loadEntries: async () => { await ensureRuntimes({ quiet: true }); return loadOwnAddressEntries(); },
+    cachedUsed: ownAddressCachedUsed,
+    probeUsed: ownAddressProbeUsed,
+    kasUnit: KAS_UNIT,
+    onPick,
+  });
+}
 function openOwnAddressPickerFor({ title, selectedAddress, onPick, excludeQuantum = false }) {
   openOwnAddressPicker({
     title,
@@ -14041,9 +14424,50 @@ document.querySelectorAll("[data-manage-address-tab]").forEach((tabButton) => {
     document.querySelectorAll("[data-manage-address-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.manageAddressPanel !== target;
     });
+    // Receive and Send only on History (iOS 0b9fd28).
+    const actions = document.querySelector("[data-manage-address-actions]");
+    if (actions) actions.hidden = target !== "transactions";
     if (target === "kachat") paintKachatAddressDomains("[data-manage-address-panel=\"kachat\"]", engine.address);
   });
 });
+// Swipe sideways between History, UTXOs and Domains (iOS 0b9fd28, the pager Connection Settings
+// uses too).
+attachTabSwipe(document.querySelector("[data-manage-view=\"list\"] .manage-address-body"), () => [...document.querySelectorAll("[data-manage-address-tab]")]);
+
+/**
+ * Swipe left / right on `body` to the next / previous of `tabs()` (tab buttons, the active one
+ * with .active): judged when the finger lifts, on a move more than 50 px across and more than 1.5
+ * times as far across as up or down, as on .kachat's tabs (ui/kachat-market.js). The touch is only
+ * measured, never claimed, so the page keeps scrolling under it and a tap stays a tap. Touch only:
+ * a mouse drag selects text, and the tabs are right there. Not from a text field.
+ */
+function attachTabSwipe(body, tabs) {
+  if (!body) return;
+  let start = null;
+  body.addEventListener("touchstart", (event) => {
+    start = null;
+    if (event.touches.length !== 1 || event.target.closest?.("input, textarea, select, [contenteditable]")) return;
+    const t = event.touches[0];
+    // From the left edge it is the swipe back (ui/edge-back.js), not a tab change.
+    if (t.clientX <= 24) return;
+    start = { id: t.identifier, x: t.clientX, y: t.clientY };
+  }, { passive: true });
+  body.addEventListener("touchcancel", () => { start = null; }, { passive: true });
+  body.addEventListener("touchend", (event) => {
+    const from = start;
+    start = null;
+    if (!from || event.touches.length) return;
+    const t = [...event.changedTouches].find((touch) => touch.identifier === from.id);
+    if (!t) return;
+    const dx = t.clientX - from.x;
+    const dy = t.clientY - from.y;
+    if (!(Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5)) return;
+    const list = tabs();
+    const index = list.findIndex((tab) => tab.classList.contains("active"));
+    const next = index >= 0 ? list[dx < 0 ? index + 1 : index - 1] : null;
+    next?.click();
+  }, { passive: true });
+}
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
@@ -14475,6 +14899,21 @@ async function fetchKasPrice(currency) {
     if (typeof price === "number") { kasPriceCache.set(currency, { price, at: Date.now() }); return price; }
   } catch { /* offline / rate-limited — fiat features degrade gracefully */ }
   return null;
+}
+
+// The value in the app's currency for a screen that draws at once, from the price last fetched
+// (a post's payment request card, iOS 0b9fd28): "≈ $1.23", or null while there is none. Without a
+// price, or with one over a minute old, one fetch starts and `onPrice` runs when it lands; a
+// failed fetch waits a minute before the next.
+const kasPriceAttemptAt = new Map();
+function kasFiatTextNow(kasAmount, onPrice = null) {
+  const currency = selectedCurrency;
+  const cached = kasPriceCache.get(currency);
+  if ((!cached || Date.now() - cached.at >= 60000) && Date.now() - (kasPriceAttemptAt.get(currency) || 0) >= 60000) {
+    kasPriceAttemptAt.set(currency, Date.now());
+    fetchKasPrice(currency).then((price) => { if (price && currency === selectedCurrency) onPrice?.(); }).catch(() => {});
+  }
+  return cached ? `≈ ${formatFiatValue(kasAmount, cached.price)}` : null;
 }
 
 function formatFiatValue(kasAmount, price) {
@@ -18118,11 +18557,12 @@ document.querySelector("[data-chat-info-open-chat]")?.addEventListener("click", 
   closeChatInfo();
   openOrCreateOneToOne(address);
 });
-// User Info's Address Book row (iOS 00767a4): "Add to Address Book", or "Address Book" once saved.
+// User Info's Address Book row (iOS 00767a4): "Add to Contacts", or "Contacts" once saved (KaChat
+// bc3e1ff3; "Address Book" before).
 function refreshChatInfoAddressBookRow() {
   const saved = Boolean(chatInfoContactAddress && addressBookEntry(chatInfoContactAddress));
   const title = document.querySelector("[data-chat-info-address-book-title]");
-  if (title) title.textContent = saved ? "Address Book" : "Add to Address Book";
+  if (title) title.textContent = saved ? "Contacts" : "Add to Contacts";
   const icon = document.querySelector("[data-chat-info-address-book-icon]");
   if (icon) icon.innerHTML = (saved ? ADDRESS_BOOK_ICONS.bookFill : ADDRESS_BOOK_ICONS.book).replace("<svg ", '<svg class="chat-info-row-icon" ');
 }
@@ -18134,8 +18574,8 @@ document.querySelector("[data-chat-info-address-book]")?.addEventListener("click
     address,
     suggestedName: contact?.nameIsCustom ? contact.name : (contact ? displayNameForAddress(contact) : identityNameForAddress(address)),
   });
-  if (result === "saved") showCopyToast("Saved to Address Book.");
-  else if (result === "removed") showCopyToast("Removed from Address Book.");
+  if (result === "saved") showCopyToast("Saved to Contacts.");
+  else if (result === "removed") showCopyToast("Removed from Contacts.");
   refreshChatInfoAddressBookRow();
 });
 // Clicking the dimmed area outside the sheet dismisses it, the way a detent sheet does.
@@ -18372,8 +18812,8 @@ mountSendPieces(tipModal, {
   from: sendFromSectionHtml({ prefix: "tip" }),
   amount: amountEntryHtml({ prefix: "tip", unitText: KAS_UNIT, ariaLabel: `Amount (${KAS_UNIT})` }),
   // Prefix "tip-kas" so its data-tip-kas-fee="tier" buttons never collide with the other data-tip-*.
-  fee: feeControlsHtml({ prefix: "tip-kas" }),
-  action: sendActionButtonHtml({ attr: "tip-send", title: "Slide to Send" }),
+  fee: feeControlsHtml({ prefix: "tip-kas", editPill: true }),
+  action: "",
 });
 const tipFeeCtl = feeControls(tipModal, "tip-kas");
 let tipState = null;
@@ -18384,36 +18824,232 @@ let tipMaxToken = 0;
 let tipMaxTimer = null;
 
 function tipQ(selector) { return tipModal ? tipModal.querySelector(selector) : null; }
-const tipSlider = createSendActionButton(tipQ("[data-tip-send]"), { onAction: () => submitTipSheet() });
+// Swipe up to Send (KaPosts-iPhone da3e953): the screen's own header in place of the sheet's, and
+// the sending screen - BlockDAG, then Sent with the transaction and Done, or Failed with Try Again.
+tipQ("[data-close-tip]")?.remove();
+tipQ(".pay-sheet-head")?.remove();
+const tipSwipe = createSwipeUpScreen(tipModal?.querySelector(".tip-sheet"), {
+  screenTitle: "Review",
+  barTitle: "Swipe up to Send",
+  kasUnit: KAS_UNIT,
+  getPreview: () => ({ amountSompi: tipAmountSompi() || null, recipient: tipState?.shownName || tipState?.address || null }),
+  getFailureMessage: () => tipState?.error || null,
+  onCancel: () => closeTipModal(),
+  onDone: () => closeTipModal({ force: true }),
+  onAction: () => submitTipSheet(),
+});
+// What the slide button did for the sheet: busy, and whether it can send.
+const tipSlider = {
+  busy: false,
+  setBusy(on) { this.busy = Boolean(on); tipSwipe.setBusy(on); },
+  setEnabled(on) { tipSwipe.setEnabled(on); },
+  reset() {},
+};
 const tipFromCtl = sendFromControls(tipModal, "tip", {
-  onChatting: () => tipSetSource(null),
+  onChatting: () => {
+    if (!tipState || tipState.sending) return;
+    tipChoosingFrom = false;
+    tipSetSource(null);
+    tipRenderAvailable();
+  },
+  // Choose an Address lists your addresses on the From step (KaPosts-iPhone da3e953).
   onChoose: () => {
     const tip = tipState;
     if (!tip || tip.sending || tip.tip) return; // a tip that names a post is the chatting address's
-    openOwnAddressPickerFor({
-      title: "Send From",
-      selectedAddress: tip.fundingAddress || engine.address,
-      onPick: (picked) => tipSetSource(picked.kind === "spending" ? picked.index : null, picked.label),
-    });
+    tipChoosingFrom = true;
+    showTipAddressList();
+    tipRenderAvailable();
+  },
+});
+// --- Tips in steps (KaPosts-iPhone da3e953 KaPostTipSheet) ---------------------------------------
+// From (when it can change: a tip that names a post is the chatting address's), the amount on the
+// keypad with the To and From chips, then the swipe-up Review: the amount, To / From / Total, the
+// encrypted memo, the fee (its Edit opens the fee editor) and Coin Control.
+const tipSteps = createStepFlow(tipModal?.querySelector(".tip-sheet"), { title: "Tip", onCancel: () => closeTipModal() });
+tipSteps.setOrder(["from", "amount", "review", "fee"]);
+let tipChoosingFrom = false;
+
+function goTipStep(step, options = {}) {
+  closeOwnAddressPicker();
+  tipSwipe.setBack(() => goTipStep("amount"));
+  tipSteps.go(step, options);
+  if (step === "review") renderTipReview();
+}
+function tipSourceTitle() {
+  const tip = tipState;
+  return tip?.fundingIndex == null ? "Chatting Address" : (tip.sourceLabel || spendingSourceLabel(tip.fundingIndex));
+}
+function tipToChipHtml() {
+  const tip = tipState;
+  const named = tip?.shownName && tip.shownName !== shortAddress(tip.address);
+  return stepChipHtml({ label: "To", value: named ? tip.shownName : (tip?.address || ""), isAddress: !named });
+}
+function tipExceedsBalance() {
+  const sompi = tipAmountSompi();
+  return sompi > 0n && tipState?.availableSompi != null && sompi > tipState.availableSompi;
+}
+
+const tipFromBody = tipSteps.addStep("from", {
+  className: "ss-from-step",
+  back: () => null,
+  canContinue: () => !(tipChoosingFrom && tipState?.fundingIndex == null),
+  onContinue: () => goTipStep("amount"),
+  onShow: () => { if (tipChoosingFrom) showTipAddressList(); },
+});
+tipFromBody.innerHTML = `<div class="ss-chips" data-tip-from-chips></div>${stepQuestionHtml("Where are you sending from?")}`;
+const tipFromSection = tipModal?.querySelector("[data-tip-from]");
+if (tipFromSection) tipFromBody.append(tipFromSection);
+tipFromBody.insertAdjacentHTML("beforeend", `
+  <p class="ss-note" data-tip-from-note hidden>Pick which of your addresses the Kaspa leaves from.</p>
+  <div class="sk-source-list ss-address-list" data-tip-from-list role="listbox" aria-label="Your addresses" hidden></div>`);
+let tipFromList = null;
+function showTipAddressList() {
+  tipFromList = mountOwnAddressListFor(tipFromBody.querySelector("[data-tip-from-list]"), {
+    selectedAddress: tipState?.fundingAddress || null,
+    onPick: (picked) => {
+      if (!tipState || tipState.sending) return;
+      if (picked.kind === "spending") tipSetSource(picked.index, picked.label);
+      else { tipChoosingFrom = false; tipSetSource(null); }
+      paintTipFromStep();
+    },
+  });
+  paintTipFromStep();
+}
+function paintTipFromStep() {
+  if (!tipFromSection || !tipState) return;
+  const chips = tipFromBody.querySelector("[data-tip-from-chips]");
+  if (chips) chips.innerHTML = tipToChipHtml();
+  const card = tipFromSection.querySelector(".sk-from-card");
+  if (card) card.hidden = tipChoosingFrom;
+  const note = tipFromBody.querySelector("[data-tip-from-note]");
+  const list = tipFromBody.querySelector("[data-tip-from-list]");
+  if (note) note.hidden = !tipChoosingFrom;
+  if (list) list.hidden = !tipChoosingFrom;
+  tipFromList?.setSelected(tipState.fundingAddress || null);
+  tipSteps.refresh();
+}
+
+const tipAmountBody = tipSteps.addStep("amount", {
+  className: "ss-amount-step",
+  continueTitle: "Review",
+  back: () => (tipState?.tip ? null : "from"),
+  canContinue: () => tipAmountSompi() > 0n && !tipExceedsBalance() && !tipMaxTimer,
+  onContinue: () => goTipStep("review"),
+  onShow: () => paintTipAmountStep(),
+});
+tipAmountBody.innerHTML = `
+  <div class="ss-chips" data-tip-amount-chips></div>
+  <div class="ss-keypad-stage" data-tip-keypad-stage><p class="ss-footnote" data-tip-amount-note></p></div>
+  ${keypadHtml()}`;
+const tipAmountEntry = tipModal?.querySelector("[data-tip-amount-entry]");
+if (tipAmountEntry) tipAmountBody.querySelector("[data-tip-keypad-stage]").prepend(tipAmountEntry);
+const tipAmountField = tipModal?.querySelector("[data-tip-amount]");
+if (tipAmountField && window.matchMedia?.("(pointer: coarse)").matches) {
+  tipAmountField.readOnly = true;
+  tipAmountField.inputMode = "none";
+}
+wireKeypad(tipAmountBody.querySelector(".ss-keypad"), (key) => {
+  const tip = tipState;
+  if (!tipAmountField || !tip || tip.sending) return false;
+  const next = applyKeypadKey(key, tipAmountField.value, tip.unit === "fiat" ? 2 : 8);
+  if (next === tipAmountField.value) return false;
+  tip.max = null; // a typed amount is no longer Max
+  tipAmountField.value = next;
+  tipAmountField.dispatchEvent(new Event("input"));
+  return true;
+});
+function paintTipAmountStep() {
+  const tip = tipState;
+  if (!tipAmountBody || !tip) return;
+  const chips = tipAmountBody.querySelector("[data-tip-amount-chips]");
+  if (chips) chips.innerHTML = `${tipToChipHtml()}${stepChipHtml({ label: "From", value: tipSourceTitle() })}`;
+  const note = tipAmountBody.querySelector("[data-tip-amount-note]");
+  if (note) {
+    const exceeds = tipExceedsBalance();
+    note.textContent = tip.error || (exceeds ? "This is more than the address you're sending from holds."
+      : (tip.availableSompi != null ? `Available: ${formatSompiPlain(tip.availableSompi)} ${KAS_UNIT}` : " "));
+    note.classList.toggle("error", Boolean(tip.error || exceeds));
+  }
+  tipSteps.refresh();
+}
+
+tipModal?.querySelector(".sk-swipe-scroll")?.insertAdjacentHTML("afterbegin", '<div class="ss-review-stack" data-tip-review></div>');
+function renderTipReview() {
+  const tip = tipState;
+  const host = tipModal?.querySelector("[data-tip-review]");
+  if (!host || !tip) return;
+  const sompi = tipAmountSompi();
+  const fee = tipTotalFeeSompi();
+  const fiat = sompi > 0n && tip.price > 0 ? formatFiatValue(Number(sompi) / 1e8, tip.price) : "";
+  const amount = sompi > 0n
+    ? `<strong class="ss-review-big">${escapeHtml(`${formatSompiPlain(sompi)} ${KAS_UNIT}`)}</strong>${fiat ? `<span class="ss-review-fiat">${escapeHtml(fiat)}</span>` : ""}`
+    : '<span class="sk-spinner" aria-hidden="true"></span>';
+  let total = '<span class="ss-review-address">—</span>';
+  if (sompi > 0n && fee != null && !tip.estimating) total = `<strong>${escapeHtml(`${formatSompiPlain(sompi + fee)} ${KAS_UNIT}`)}</strong>`;
+  else if (sompi > 0n) total = '<span class="sk-spinner" aria-hidden="true"></span>';
+  const named = tip.shownName && tip.shownName !== shortAddress(tip.address);
+  host.innerHTML = `
+    <div class="ss-review-amount"><span class="ss-review-eyebrow">You're tipping</span>${amount}</div>
+    <div class="sk-card ss-review-card">
+      ${reviewRowHtml("To", reviewAddressHtml({ name: named ? tip.shownName : null, address: tip.address }))}
+      ${reviewRowHtml("From", reviewAddressHtml({ name: tipSourceTitle(), address: tip.fundingAddress || engine.address || "" }))}
+      ${reviewRowHtml("Total", total)}
+    </div>`;
+}
+const tipFeeEditor = createFeeEditorStep(tipSteps, {
+  onConfirm: (sompi) => {
+    const tip = tipState;
+    if (!tip || tip.baseFeeSompi == null) return;
+    // never under the network's minimum (commitTipCustomFee)
+    tip.customExtraFeeSompi = sompi > tip.baseFeeSompi ? sompi - tip.baseFeeSompi : 0n;
+    tipRenderFee();
+    if (activeTipMax()) scheduleTipMaxRefill(0); // Max follows the fee at once (DSK-043)
   },
 });
 
-// --- KaPosts Settings (iOS a566da7) ------------------------------------------
-// The gear in KaPosts' icon row: a default tip (tapping Tip sends it at once, no amount screen)
-// and the KaPosts notification switches, which moved here from Settings > Notifications.
+
+// --- KaPost Settings (iOS a566da7, 4c0d5a8) ---------------------------------
+// The gear in KaPost's icon row: Cool down before post (the 5-second Undo window, or none), a
+// default tip (tapping Tip sends it at once, no amount screen) set in KAS or the app's currency,
+// and the KaPost notification switches, which moved here from Settings > Notifications.
 const KAPOSTS_DEFAULT_TIP_KEY = "kachat-kaposts-default-tip-sompi";
-function kaPostsDefaultTipKas() {
+// The same default tip set in a currency instead (iOS 4c0d5a8 kaPostsDefaultTipFiat): { fiat,
+// currency }, each tip sending what it is worth in KAS at the price of the moment. Only one of the
+// two keys is set.
+const KAPOSTS_DEFAULT_TIP_FIAT_KEY = "kachat-kaposts-default-tip-fiat-v1";
+// Cool down before post (iOS 4c0d5a8 kaPostsCooldownEnabled): on unless switched off.
+const KAPOSTS_COOLDOWN_KEY = "kachat-kaposts-cooldown-v1";
+/** The default tip: `{ sompi }`, `{ fiat, currency }`, or null for none (ask every time). */
+function kaPostsDefaultTip() {
   try {
+    const fiat = JSON.parse(localStorage.getItem(KAPOSTS_DEFAULT_TIP_FIAT_KEY) || "null");
+    if (fiat && Number(fiat.fiat) > 0) return { fiat: Number(fiat.fiat), currency: CURRENCIES[fiat.currency] ? fiat.currency : selectedCurrency };
     const sompi = Number(localStorage.getItem(KAPOSTS_DEFAULT_TIP_KEY) || 0);
-    return sompi > 0 ? sompi / 1e8 : 0;
-  } catch { return 0; }
+    return sompi > 0 ? { sompi } : null;
+  } catch { return null; }
 }
-function setKaPostsDefaultTipKas(kas) {
-  const value = Number(kas);
+function setKaPostsDefaultTip(tip) {
   try {
-    if (value > 0) localStorage.setItem(KAPOSTS_DEFAULT_TIP_KEY, String(Math.round(value * 1e8)));
-    else localStorage.removeItem(KAPOSTS_DEFAULT_TIP_KEY);
+    localStorage.removeItem(KAPOSTS_DEFAULT_TIP_KEY);
+    localStorage.removeItem(KAPOSTS_DEFAULT_TIP_FIAT_KEY);
+    if (Number(tip?.fiat) > 0) localStorage.setItem(KAPOSTS_DEFAULT_TIP_FIAT_KEY, JSON.stringify({ fiat: Number(tip.fiat), currency: tip.currency }));
+    else if (Number(tip?.sompi) > 0) localStorage.setItem(KAPOSTS_DEFAULT_TIP_KEY, String(Math.round(Number(tip.sompi))));
   } catch { /* fine */ }
+}
+function kaPostsCooldownEnabled() {
+  try { return localStorage.getItem(KAPOSTS_COOLDOWN_KEY) !== "0"; } catch { return true; }
+}
+function setKaPostsCooldownEnabled(on) {
+  try {
+    if (on) localStorage.removeItem(KAPOSTS_COOLDOWN_KEY); else localStorage.setItem(KAPOSTS_COOLDOWN_KEY, "0");
+  } catch { /* fine */ }
+}
+/** A currency amount as the app writes it ("$1.50"), in `currency` rather than the app's own. */
+function fiatAmountText(value, currency = selectedCurrency) {
+  const v = Number(value);
+  if (!isFinite(v)) return "";
+  const btc = currency === "btc";
+  return `${(CURRENCIES[currency] || currencyMeta()).symbol}${v.toLocaleString(undefined, { minimumFractionDigits: btc ? 0 : 2, maximumFractionDigits: btc ? 8 : 2 })}`;
 }
 // The six KaPosts notification switches (iOS KaPostsNotificationSettingsView), the same prefs
 // Settings > Notifications > KaPosts writes.
@@ -18425,32 +19061,49 @@ const KAPOSTS_NOTIFY_TOGGLES = [
   ["Comments", "kaPostsNotifyComments", "data-pref-kaposts-notify-comments"],
   ["Mentions", "kaPostsNotifyMentions", "data-pref-kaposts-notify-mentions"],
 ];
-// No description under Tipping or Notifications: they explain themselves (iOS 1b7618c).
-// iOS KaPostsSettingsView: "Tipping" (the instant-tip switch, then the amount row: Kaspa logo, the
-// field, KAS), and a Notifications row (bell) opening the "KaPosts" page of six switches.
+// iOS KaPostsSettingsView (4c0d5a8): Cool down before post with what it does under it, then
+// "Tipping" (the instant-tip switch, then the amount row: the Kaspa logo or the currency's symbol,
+// the field, and the unit, tapped to switch between KAS and the app's currency, with what a tip
+// sends under it), and a Notifications row (bell) opening the "KaPost" page of six switches.
+const KAPOSTS_COOLDOWN_ON_FOOTER = "Posts, comments, likes, reposts, votes, edits and deletes wait 5 seconds, with an Undo, before they go on chain.";
+const KAPOSTS_COOLDOWN_OFF_FOOTER = "Posts, comments, likes, reposts, votes, edits and deletes go on chain at once, with no Undo.";
 function openKaPostsSettings() {
   document.querySelector("[data-kaposts-settings-modal]")?.remove();
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.setAttribute("data-kaposts-settings-modal", "");
-  const current = kaPostsDefaultTipKas();
+  const current = kaPostsDefaultTip();
+  const cooldown = kaPostsCooldownEnabled();
+  // The field's unit: the currency the tip was set in, else KAS (the app's currency once tapped).
+  let tipInFiat = Boolean(current?.fiat);
+  let tipCurrency = current?.fiat ? current.currency : selectedCurrency;
+  const initialText = current?.fiat ? kapostsFiatFieldText(current.fiat) : current?.sompi ? kapostsKasFieldText(current.sompi / 1e8) : "";
   const bell = '<svg class="kaposts-settings-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a5.5 5.5 0 0 1 5.5 5.5c0 3.2.8 5 1.8 6.2.4.5.05 1.3-.6 1.3H5.3c-.65 0-1-.8-.6-1.3 1-1.2 1.8-3 1.8-6.2A5.5 5.5 0 0 1 12 4Z"/><path d="M10 19.5a2 2 0 0 0 4 0"/></svg>';
+  // arrow.up.arrow.down
+  const unitArrows = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 20V5M4 9l4-4 4 4M16 4v15M12 15l4 4 4-4"/></svg>';
   backdrop.innerHTML = `
     <section class="contact-modal kaposts-settings-modal" role="dialog" aria-modal="true" aria-labelledby="kaposts-settings-title">
       <div data-kaposts-settings-page="main">
         <div class="modal-header">
-          <div><h2 id="kaposts-settings-title">KaPosts Settings</h2></div>
+          <div><h2 id="kaposts-settings-title">KaPost Settings</h2></div>
           <button class="modal-close" type="button" data-kaposts-settings-close aria-label="Close">×</button>
         </div>
+        <div class="settings-list-card">
+          <div class="settings-page-form">
+            <div class="settings-toggle-row"><span><strong>Cool down before post</strong></span><label class="switch-control"><input type="checkbox" data-kaposts-cooldown ${cooldown ? "checked" : ""}><span></span></label></div>
+          </div>
+        </div>
+        <p class="settings-group-footer" data-kaposts-cooldown-footer>${escapeHtml(cooldown ? KAPOSTS_COOLDOWN_ON_FOOTER : KAPOSTS_COOLDOWN_OFF_FOOTER)}</p>
         <p class="settings-group-label">Tipping</p>
         <div class="settings-list-card">
           <div class="settings-page-form">
-            <div class="settings-toggle-row"><span><strong>Send a default tip instantly</strong></span><label class="switch-control"><input type="checkbox" data-kaposts-instant-tip ${current > 0 ? "checked" : ""}><span></span></label></div>
-            <div class="settings-toggle-row kaposts-tip-amount-row" data-kaposts-tip-amount-row ${current > 0 ? "" : "hidden"}>
-              <span class="kaposts-tip-amount-field"><img src="${kaspaLogoUrl}" alt="" class="kaposts-tip-amount-logo" /><input class="field-input" type="text" inputmode="decimal" placeholder="1" aria-label="Default tip" data-kaposts-tip-amount value="${escapeHtml(current > 0 ? trimKas8(current) : "")}" /><span>${KAS_UNIT}</span></span>
+            <div class="settings-toggle-row"><span><strong>Send a default tip instantly</strong></span><label class="switch-control"><input type="checkbox" data-kaposts-instant-tip ${current ? "checked" : ""}><span></span></label></div>
+            <div class="settings-toggle-row kaposts-tip-amount-row" data-kaposts-tip-amount-row ${current ? "" : "hidden"}>
+              <span class="kaposts-tip-amount-field"><img src="${kaspaLogoUrl}" alt="" class="kaposts-tip-amount-logo" data-kaposts-tip-logo /><span class="kaposts-tip-amount-symbol" data-kaposts-tip-symbol hidden></span><input class="field-input" type="text" inputmode="decimal" placeholder="1" aria-label="Default tip" data-kaposts-tip-amount value="${escapeHtml(initialText)}" /><button type="button" class="kaposts-tip-unit" data-kaposts-tip-unit><span data-kaposts-tip-unit-code></span>${unitArrows}</button></span>
             </div>
           </div>
         </div>
+        <p class="settings-group-footer" data-kaposts-tip-footer ${current ? "" : "hidden"}></p>
         <div class="settings-list-card">
           <button class="settings-list-row" type="button" data-kaposts-open-notifications>${bell}<span class="settings-row-copy"><strong>Notifications</strong></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
         </div>
@@ -18458,7 +19111,7 @@ function openKaPostsSettings() {
       <div data-kaposts-settings-page="notifications" hidden>
         <div class="modal-header kaposts-settings-subheader">
           <button class="create-chat-nav-button" type="button" data-kaposts-settings-back aria-label="Back">‹ Back</button>
-          <h2>KaPosts</h2>
+          <h2>KaPost</h2>
           <button class="modal-close" type="button" data-kaposts-settings-close aria-label="Close">×</button>
         </div>
         <div class="settings-list-card">
@@ -18476,7 +19129,7 @@ function openKaPostsSettings() {
     if (event.key !== "Escape") return;
     event.preventDefault();
     event.stopPropagation();
-    // Back from the KaPosts page first, as the navigation stack would.
+    // Back from the KaPost page first, as the navigation stack would.
     if (!notifyPage.hidden) showPage(false); else close();
   };
   const close = () => { window.removeEventListener("keydown", onKey, true); backdrop.remove(); };
@@ -18486,22 +19139,76 @@ function openKaPostsSettings() {
     if (event.target.closest("[data-kaposts-settings-back]")) { showPage(false); return; }
     if (event.target.closest("[data-kaposts-open-notifications]")) showPage(true);
   });
+  const cooldownToggle = backdrop.querySelector("[data-kaposts-cooldown]");
+  cooldownToggle.addEventListener("change", () => {
+    setKaPostsCooldownEnabled(cooldownToggle.checked);
+    backdrop.querySelector("[data-kaposts-cooldown-footer]").textContent = cooldownToggle.checked ? KAPOSTS_COOLDOWN_ON_FOOTER : KAPOSTS_COOLDOWN_OFF_FOOTER;
+  });
   const toggle = backdrop.querySelector("[data-kaposts-instant-tip]");
   const amountRow = backdrop.querySelector("[data-kaposts-tip-amount-row]");
   const amount = backdrop.querySelector("[data-kaposts-tip-amount]");
+  const footer = backdrop.querySelector("[data-kaposts-tip-footer]");
+  const unitButton = backdrop.querySelector("[data-kaposts-tip-unit]");
+  // 1 KAS in the tip's currency, once fetched: the footer converts with it.
+  let tipPrice = null;
+  const paintUnit = () => {
+    const code = tipCurrency.toUpperCase();
+    backdrop.querySelector("[data-kaposts-tip-logo]").hidden = tipInFiat;
+    const symbol = backdrop.querySelector("[data-kaposts-tip-symbol]");
+    symbol.hidden = !tipInFiat;
+    symbol.textContent = (CURRENCIES[tipCurrency] || currencyMeta()).symbol.trim();
+    backdrop.querySelector("[data-kaposts-tip-unit-code]").textContent = tipInFiat ? code : KAS_UNIT;
+    unitButton.setAttribute("aria-label", tipInFiat ? `Tip in ${code}, switch to ${KAS_UNIT}` : `Tip in ${KAS_UNIT}, switch to ${selectedCurrency.toUpperCase()}`);
+    // What a tip sends: in KAS, or the currency amount with what it comes to in KAS today.
+    const typed = kapostsTipFieldAmount(amount.value);
+    footer.textContent = !tipInFiat
+      ? "Tap the unit to set the tip in your currency instead."
+      : typed && tipPrice
+        ? `Each tip sends ${fiatAmountText(typed, tipCurrency)} worth of KAS at the price of the moment - about ${trimKas8(typed / tipPrice)} ${KAS_UNIT} now.`
+        : "Each tip sends this much worth of KAS at the price of the moment.";
+  };
   const commit = () => {
-    if (!toggle.checked) { setKaPostsDefaultTipKas(0); return; }
+    if (!toggle.checked) { setKaPostsDefaultTip(null); return; }
+    if (tipInFiat) {
+      const value = kapostsTipFieldAmount(amount.value);
+      if (value) setKaPostsDefaultTip({ fiat: value, currency: tipCurrency });
+      return;
+    }
     // The one exact parser (iOS IOS-010): comma or dot, at most 8 decimals, capped at the supply.
     const sompi = sompiFromUserText(String(amount.value || ""));
-    if (sompi != null && sompi > 0n) setKaPostsDefaultTipKas(Number(sompi) / 1e8);
+    if (sompi != null && sompi > 0n) setKaPostsDefaultTip({ sompi: Number(sompi) });
   };
   toggle.addEventListener("change", () => {
     amountRow.hidden = !toggle.checked;
+    footer.hidden = !toggle.checked;
     if (toggle.checked && !String(amount.value || "").trim()) amount.value = "1";
     commit();
   });
-  amount.addEventListener("input", commit);
-  // The same prefs as Settings > Notifications > KaPosts; its switches follow.
+  amount.addEventListener("input", () => { commit(); paintUnit(); });
+  // Flips the tip between KAS and the app's currency, carrying the amount over at today's price
+  // (the number stays as typed while there is no price yet).
+  unitButton.addEventListener("click", async () => {
+    const toFiat = !tipInFiat;
+    const currency = toFiat ? selectedCurrency : tipCurrency;
+    const price = await fetchKasPrice(currency).catch(() => null);
+    if (!backdrop.isConnected) return;
+    amount.value = kapostsSwitchTipText(amount.value, toFiat, price);
+    tipCurrency = currency;
+    tipInFiat = toFiat;
+    tipPrice = price;
+    commit();
+    paintUnit();
+  });
+  paintUnit();
+  if (tipInFiat) {
+    const currency = tipCurrency;
+    fetchKasPrice(currency).then((price) => {
+      if (currency !== tipCurrency || !backdrop.isConnected) return;
+      tipPrice = price;
+      paintUnit();
+    }).catch(() => {});
+  }
+  // The same prefs as Settings > Notifications > KaPost; its switches follow.
   backdrop.querySelectorAll("[data-kaposts-notify-toggle]").forEach((input) => {
     input.addEventListener("change", () => {
       const key = input.getAttribute("data-kaposts-notify-toggle");
@@ -18534,7 +19241,9 @@ function estimateTipPayloadBytes(memo, amountSompi) {
 // The default tip, sent at once: same contact creation, funding source and destination rules
 // as a payment in that person's chat (and as the tip sheet's Send), with a toast and no screen.
 // With `tip` ({ postId, authorPubkey }) it names the post (iOS a6bd60a sendDefaultTip(tip:)).
-async function sendInstantTip(address, name, amountKasNumber, tip = null) {
+// `fiatText`: the currency amount the KAS was worked out from, for a tip set in a currency (iOS
+// 4c0d5a8), which the toast names beside the KAS.
+async function sendInstantTip(address, name, amountKasNumber, tip = null, fiatText = null) {
   const clean = String(address || "").trim();
   if (!clean || !isValidKaspaAddressString(clean) || clean === engine.address) throw new Error("No one to tip.");
   const amountKas = trimKas8(Number(amountKasNumber));
@@ -18591,7 +19300,8 @@ async function sendInstantTip(address, name, amountKasNumber, tip = null) {
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     const finalTxid = verifiedTxid || txid;
     // iOS sendDefaultTip: "Tipped 1.5 KAS to <name>" with View on the explorer.
-    showKaPostsActionToast(`Tipped ${amountKas} ${KAS_UNIT} to ${displayName || shortAddress(clean)}`, finalTxid);
+    const amountText = fiatText ? `${amountKas} ${KAS_UNIT} (${fiatText})` : `${amountKas} ${KAS_UNIT}`;
+    showKaPostsActionToast(`Tipped ${amountText} to ${displayName || shortAddress(clean)}`, finalTxid);
     appendEngineLog(`Instant tip sent: ${explorerTxUrl(finalTxid)}`);
     return finalTxid;
   } catch (error) {
@@ -18635,6 +19345,8 @@ function tipRefreshState() {
   if (tipSlider.busy !== sending) tipSlider.setBusy(sending);
   tipSlider.setEnabled(Boolean(tip) && sompi > 0n && !sending);
   tipFromCtl.setDisabled(sending);
+  paintTipAmountStep();
+  renderTipReview();
 }
 
 function tipSetError(message) {
@@ -18664,6 +19376,8 @@ function tipRenderFee() {
   // A custom fee keeps the speed lit; picking one drops the custom fee (iOS SendFeeControls).
   tipFeeCtl.setTier(tip?.tier || "normal");
   tipFeeCtl.setCoinSummary(coinControlSummaryText(tip?.manualUtxos?.length || 0));
+  tipQ("[data-tip-kas-fee-card]")?.classList.toggle("ss-fee-unknown", total == null);
+  renderTipReview();
 }
 
 // The tip typed on the sheet in sompi, 0n when there is none: KAS through the one exact parser
@@ -18711,12 +19425,15 @@ function tipRenderAvailable() {
   const tip = tipState;
   if (!tip) return;
   tipFromCtl.render({
-    chatting: tip.fundingIndex == null,
+    chatting: tip.fundingIndex == null && !tipChoosingFrom,
     title: tip.fundingIndex == null ? "Chatting Address" : (tip.sourceLabel || spendingSourceLabel(tip.fundingIndex)),
     address: tip.fundingAddress || engine.address || "",
     balanceText: tip.availableSompi != null ? `${formatSompiPlain(tip.availableSompi)} ${KAS_UNIT}` : (tip.availableFailed ? `-- ${KAS_UNIT}` : null),
   });
   tipFromCtl.setDisabled(Boolean(tip.sending));
+  paintTipFromStep();
+  paintTipAmountStep();
+  renderTipReview();
 }
 // The From address's balance (the tip's Available), loaded for the source picked now.
 async function tipLoadAvailable(tip) {
@@ -18979,13 +19696,16 @@ async function openTipModal({ address, name, tip = null, onTipped = null, error 
   const customFeeEl = tipQ("[data-tip-kas-fee-custom]");
   if (customFeeEl) customFeeEl.value = "";
   tipFeeCtl.setEditing(false);
-  tipSlider.reset();
+  tipChoosingFrom = false;
+  tipSlider.busy = false;
+  tipSwipe.reset();
+  tipSwipe.setKasUnit(KAS_UNIT);
   tipRenderFee();
   tipRenderAvailable();
   tipRefreshUnitUi();
   tipModal.hidden = false;
-  // The amount is the first thing to type (iOS focusOnAppear).
-  window.setTimeout(() => { if (tipState === sheet) amountEl?.focus(); }, 60);
+  // A tip that names a post comes from the chatting address: no From step.
+  goTipStep(sheet.tip ? "amount" : "from", { instant: true });
   fetchKasPrice(selectedCurrency).then((price) => {
     if (tipState !== sheet) return;
     sheet.price = price;
@@ -19019,14 +19739,7 @@ async function submitTipSheet() {
     tipSetError(tip.unit === "fiat" && !(tip.price > 0) ? "No live price to convert with." : `Enter a valid ${KAS_UNIT} amount.`);
     return;
   }
-  if (tipSompi < 10_000_001n) {
-    const proceed = await confirmDialog({
-      title: "Small Amount",
-      message: `Sending less than 0.1 ${KAS_UNIT} may fail due to the network dust protection limit.`,
-      confirmLabel: "Send Anyway",
-    });
-    if (!proceed || tipState !== tip) return;
-  }
+  // A small amount is warned about on the review, not asked again (KaChat-iPhone bc3e1ff3).
   await sendTipNow(tipSompi);
 }
 
@@ -19180,16 +19893,16 @@ async function sendTipNow(tipSompi) {
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     tip.sending = false;
-    // The shared Sent sheet over the tip sheet (iOS KaPostTipSheet sentTransaction); Done closes both.
-    if (tipState === tip) tipRefreshState();
-    openSentConfirmation({
-      txid: verifiedTxid || txid,
-      amountSompi: max ? max.amountSompi : requestedSompi,
-      recipient: tip.shownName || tip.displayName || shortAddress(tip.address),
-      explorerUrl: explorerTxUrl(verifiedTxid || txid),
-      kasUnit: KAS_UNIT,
-      onDone: () => { if (tipState === tip) closeTipModal({ force: true }); },
-    });
+    // The swipe-up screen's Sent (KaPosts-iPhone da3e953); its Done closes the sheet.
+    if (tipState === tip) {
+      tipSwipe.setSent({
+        txid: verifiedTxid || txid,
+        amountSompi: max ? max.amountSompi : requestedSompi,
+        recipient: tip.shownName || tip.displayName || shortAddress(tip.address),
+        explorerUrl: explorerTxUrl(verifiedTxid || txid),
+      });
+      tipRefreshState();
+    }
   } catch (error) {
     if (error?.code === "SEND_CANCELLED") {
       // Cancelled at Face ID / the password: nothing was sent, no failed bubble, the sheet stays.
@@ -19197,6 +19910,7 @@ async function sendTipNow(tipSompi) {
       persistState();
       if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
       tip.sending = false;
+      if (tipState === tip) tipSetError(NOT_CONFIRMED_ON_DEVICE);
       return;
     }
     if (error?.code === MAX_AMOUNT_CHANGED) {
@@ -19289,7 +20003,8 @@ tipModal?.querySelectorAll("[data-tip-kas-fee]").forEach((button) => {
 tipQ("[data-tip-kas-fee-edit]")?.addEventListener("click", () => {
   const total = tipTotalFeeSompi();
   if (total == null || tipState?.sending) return;
-  tipFeeCtl.setEditing(true, formatSompiPlain(total));
+  // The fee editor (KaPosts-iPhone da3e953), the base fee its minimum.
+  tipFeeEditor.open({ feeSompi: total, minimumSompi: tipState.baseFeeSompi, kasUnit: KAS_UNIT });
 });
 tipQ("[data-tip-kas-fee-commit]")?.addEventListener("click", commitTipCustomFee);
 tipQ("[data-tip-kas-fee-custom]")?.addEventListener("input", (event) => {
@@ -19798,9 +20513,32 @@ if (IS_TESTNET) {
 function showConnectionTab(name) {
   document.querySelectorAll("[data-connection-tab]").forEach((tab) => tab.classList.toggle("active", tab.dataset.connectionTab === name));
   document.querySelectorAll("[data-connection-panel]").forEach((panel) => { panel.hidden = panel.dataset.connectionPanel !== name; });
+  if (name === "domains") paintKachatNamesSource({ check: true });
+}
+// Connection Settings > Domains: where .kachat names are read from right now (iOS KaPlay 1d23002
+// namesRegistry.source) - the names indexer's address, or the chain when it doesn't serve this
+// network's names or is behind. The source is picked on first use: `check` picks it now if nothing
+// has asked yet. Hidden where names don't run.
+function paintKachatNamesSource({ check = false } = {}) {
+  const row = document.querySelector("[data-kachat-names-source-row]");
+  if (!row) return;
+  let runtime = null;
+  try { runtime = kachatNames(); } catch { /* names not running here */ }
+  row.hidden = !runtime;
+  if (!runtime) return;
+  const source = runtime.registry.source;
+  const value = row.querySelector("[data-kachat-names-source]");
+  value.textContent = source?.kind === "indexer" ? source.base : source?.kind === "chain" ? "Read straight from the chain" : "Checking...";
+  value.classList.toggle("plain", source?.kind !== "indexer");
+  row.querySelector("[data-kachat-names-source-note]").hidden = source?.kind !== "chain";
+  if (check && !source) runtime.registry.prepare().catch(() => {}).finally(() => paintKachatNamesSource());
 }
 document.querySelectorAll("[data-connection-tab]").forEach((tab) => {
   tab.addEventListener("click", () => showConnectionTab(tab.dataset.connectionTab));
+});
+// The tabs swipe too (iOS 4c0d5a8).
+document.querySelectorAll("[data-connection-panel]").forEach((panel) => {
+  attachTabSwipe(panel, () => [...document.querySelectorAll("[data-connection-tab]")]);
 });
 
 function showSettingsSubscreen(name, parentIndex) {
@@ -20166,6 +20904,21 @@ function updateChatSelectionBar() {
   if (markRead) markRead.disabled = disabled;
   if (markUnread) markUnread.disabled = disabled;
   if (deleteButton) deleteButton.disabled = disabled;
+  // Mute acts on the picked rooms (KaPosts-iPhone eec2e30): their bells off, or back on once every
+  // picked room is already off. No rooms in Simple Mode, so no Mute either.
+  const mute = document.querySelector("[data-chat-mute-rooms]");
+  if (mute) {
+    const rooms = selectedRoomsForBulk();
+    const allMuted = rooms.length > 0 && rooms.every((room) => !room.notify);
+    const label = allMuted ? "Unmute" : "Mute";
+    mute.hidden = isChildModeEnabled();
+    mute.disabled = rooms.length === 0;
+    if (mute.getAttribute("aria-label") !== label) {
+      mute.setAttribute("aria-label", label);
+      mute.title = label;
+      mute.innerHTML = allMuted ? ACTION_TILE_ICONS.bell : ACTION_TILE_ICONS.bellSlash;
+    }
+  }
   if (chatSelectAll) {
     chatSelectAll.textContent = isEverythingSelected() ? "Deselect All" : "Select All";
     chatSelectAll.disabled = visibleChatConversations().length === 0 && visibleChatCircles().length === 0;
@@ -20448,6 +21201,8 @@ function chatCircleGroupPhotoUrl(g) {
 }
 
 function renderChatCircles() {
+  // Every change to a group's or a room's unread comes through here: the Chats tab recounts.
+  scheduleChatsTabBadge();
   const strip = document.querySelector("[data-chat-circles]");
   if (!strip) return;
   let items = [];
@@ -20734,6 +21489,21 @@ document.querySelector("[data-chat-mark-unread]")?.addEventListener("click", () 
   setChatSelectionMode(false);
 });
 
+/** The picked rooms still in the row, with their bell state. */
+function selectedRoomsForBulk() {
+  if (!selectedRoomNames.size || isChildModeEnabled()) return [];
+  try { return chatCircleRooms().filter((room) => selectedRoomNames.has(room.name)); } catch { return []; }
+}
+
+document.querySelector("[data-chat-mute-rooms]")?.addEventListener("click", () => {
+  const rooms = selectedRoomsForBulk();
+  if (!rooms.length) return;
+  const unmute = rooms.every((room) => !room.notify);
+  try { setBroadcastRoomsNotify(rooms.map((room) => room.name), unmute); } catch { return; }
+  setChatSelectionMode(false);
+  showCopyToast(unmute ? `Notifications on for ${rooms.length}` : `Notifications off for ${rooms.length}`);
+});
+
 document.querySelector("[data-chat-delete-selected]")?.addEventListener("click", async () => {
   const chats = selectedChatConversationIds.size;
   const groups = selectedGroupIds.size;
@@ -20841,8 +21611,8 @@ async function openChatRowSheet(conversationEntry) {
       // Save this person's address, or edit their saved entry, without leaving the list (iOS
       // 98f3728). Not on your own chat.
       ...(isSelfConversation(conversationEntry) ? [] : [addressBookEntry(contact.address)
-        ? { id: "address-book", title: "Address Book", subtitle: "Edit or remove this saved address.", icon: ADDRESS_BOOK_ICONS.bookFill }
-        : { id: "address-book", title: "Add to Address Book", subtitle: "Save this address with a name you'll recognize.", icon: ADDRESS_BOOK_ICONS.book }]),
+        ? { id: "address-book", title: "Contacts", subtitle: "Edit or remove this saved address.", icon: ADDRESS_BOOK_ICONS.bookFill }
+        : { id: "address-book", title: "Add to Contacts", subtitle: "Save this address with a name you'll recognize.", icon: ADDRESS_BOOK_ICONS.book }]),
       // Your own chat has no Delete (iOS ef4f183).
       ...(isSelfConversation(conversationEntry) ? [] : [{ id: "delete", title: "Delete", subtitle: "Removes this chat and its messages from this device.", destructive: true, icon: ACTION_TILE_ICONS.trash }]),
     ],
@@ -21345,12 +22115,16 @@ function setComposerHint(message) {
 let composerBalanceToken = 0;
 
 function renderPaymentFrom(balanceText = null) {
+  paymentSourceBalanceSompi = balanceText == null ? null : sompiFromUserText(String(balanceText));
   payFromCtl.render({
-    chatting: paymentSourceIndex == null,
+    chatting: paymentSourceIndex == null && !payChoosingFrom,
     title: paymentSourceIndex == null ? "Chatting Address" : (paymentSourceLabel || spendingSourceLabel(paymentSourceIndex)),
     address: paymentFundingAddress() || "",
     balanceText: balanceText == null ? null : `${balanceText} ${KAS_UNIT}`,
   });
+  paintPayFromStep();
+  paintPayAmountStep();
+  renderPayReview();
 }
 
 async function refreshComposerAvailableBalance({ reset = false } = {}) {
@@ -21414,7 +22188,7 @@ mountSendPieces(paySheet, {
   }),
   // iOS 62c2773: the shared SendFeeControls card in place of the fee pill. Prefix "pay-kas" so its
   // data-pay-kas-fee="tier" buttons never collide with the sheet's other data-pay-* lookups.
-  fee: feeControlsHtml({ prefix: "pay-kas" }),
+  fee: feeControlsHtml({ prefix: "pay-kas", editPill: true }),
   action: "",
 });
 const payFeeCtl = feeControls(paySheet, "pay-kas");
@@ -21462,14 +22236,18 @@ const paySlider = {
 let paymentSourceIndex = null;
 let paymentSourceLabel = null;
 const payFromCtl = sendFromControls(paySheet, "pay", {
-  onChatting: () => setPaymentSource(null),
+  onChatting: () => {
+    if (!isPaySheetOpen() || paymentSendInFlight) return;
+    payChoosingFrom = false;
+    setPaymentSource(null);
+    renderPaymentFrom(paymentSourceBalanceSompi == null ? null : formatSompiPlain(paymentSourceBalanceSompi));
+  },
+  // Choose an Address lists your addresses on the From step (KaChat-iPhone bc3e1ff3 OwnAddressList).
   onChoose: () => {
     if (!isPaySheetOpen() || paymentSendInFlight) return;
-    openOwnAddressPickerFor({
-      title: "Send From",
-      selectedAddress: paymentFundingAddress(),
-      onPick: (picked) => setPaymentSource(picked.kind === "spending" ? picked.index : null, picked.label),
-    });
+    payChoosingFrom = true;
+    showPayAddressList();
+    renderPaymentFrom(paymentSourceBalanceSompi == null ? null : formatSompiPlain(paymentSourceBalanceSompi));
   },
 });
 let paymentUnit = "kas";
@@ -21496,6 +22274,156 @@ let paymentMaxToken = 0;
 let paymentMaxTimer = null;
 
 function isPaySheetOpen() { return Boolean(paySheet && !paySheet.hidden); }
+
+// --- Send KAS in steps (KaChat-iPhone bc3e1ff3 paymentSheet, PaymentStep) -----------------------
+// No To step: the recipient is the chat. From ("Where are you sending from?" under a "To <name>"
+// chip, your addresses listed right on the step), the amount on the keypad with the To and From
+// chips, then the swipe-up Review: the amount, To / From / Total, the encrypted memo (it changes
+// the fee, so a Max amount is worked out again), the empty-chatting-address and dust warnings, and
+// the fee - its Edit opens the fee editor.
+const paySteps = createStepFlow(paySheet?.querySelector(".pay-sheet"), { title: `Send ${KAS_UNIT}`, onCancel: () => closePaymentSheet() });
+paySteps.setOrder(["from", "amount", "review", "fee"]);
+let payChoosingFrom = false;
+// The From address's balance (sompi; null while it loads), for Available and its check.
+let paymentSourceBalanceSompi = null;
+
+function goPayStep(step, options = {}) {
+  closeOwnAddressPicker();
+  paySwipe.setBack(() => goPayStep("amount"));
+  paySteps.go(step, options);
+  if (step === "review") renderPayReview();
+}
+function payContactName() {
+  const conversationEntry = state.conversations.find((entry) => entry.id === (paySheetConversationId || activeConversationId));
+  const contact = contactForConversation(conversationEntry);
+  return contact ? { name: displayNameForAddress(contact) || null, address: contact.address } : { name: null, address: "" };
+}
+function paySourceTitle() {
+  return paymentSourceIndex == null ? "Chatting Address" : (paymentSourceLabel || spendingSourceLabel(paymentSourceIndex));
+}
+function payExceedsBalance() {
+  const amount = paymentSompiFromInput();
+  return amount != null && paymentSourceBalanceSompi != null && amount > paymentSourceBalanceSompi;
+}
+function payToChipHtml() {
+  const to = payContactName();
+  return stepChipHtml({ label: "To", value: to.name || to.address, isAddress: !to.name });
+}
+
+// From.
+const payFromBody = paySteps.addStep("from", {
+  className: "ss-from-step",
+  back: () => null,
+  canContinue: () => !(payChoosingFrom && paymentSourceIndex == null),
+  onContinue: () => goPayStep("amount"),
+  onShow: () => { if (payChoosingFrom) showPayAddressList(); },
+});
+payFromBody.innerHTML = `<div class="ss-chips" data-pay-from-chips></div>${stepQuestionHtml("Where are you sending from?")}`;
+const payFromSection = paySheet?.querySelector("[data-pay-from]");
+if (payFromSection) payFromBody.append(payFromSection);
+payFromBody.insertAdjacentHTML("beforeend", `
+  <p class="ss-note" data-pay-from-note hidden>Pick which of your addresses the Kaspa leaves from.</p>
+  <div class="sk-source-list ss-address-list" data-pay-from-list role="listbox" aria-label="Your addresses" hidden></div>`);
+let payFromList = null;
+function showPayAddressList() {
+  payFromList = mountOwnAddressListFor(payFromBody.querySelector("[data-pay-from-list]"), {
+    selectedAddress: paymentSourceIndex == null ? null : paymentFundingAddress(),
+    onPick: (picked) => {
+      if (paymentSendInFlight) return;
+      if (picked.kind === "spending") setPaymentSource(picked.index, picked.label);
+      else { payChoosingFrom = false; setPaymentSource(null); }
+      paintPayFromStep();
+    },
+  });
+  paintPayFromStep();
+}
+function paintPayFromStep() {
+  if (!payFromSection) return;
+  const chips = payFromBody.querySelector("[data-pay-from-chips]");
+  if (chips && isPaySheetOpen()) chips.innerHTML = payToChipHtml();
+  const card = payFromSection.querySelector(".sk-from-card");
+  if (card) card.hidden = payChoosingFrom;
+  const note = payFromBody.querySelector("[data-pay-from-note]");
+  const list = payFromBody.querySelector("[data-pay-from-list]");
+  if (note) note.hidden = !payChoosingFrom;
+  if (list) list.hidden = !payChoosingFrom;
+  payFromList?.setSelected(paymentSourceIndex == null ? null : paymentFundingAddress());
+  paySteps.refresh();
+}
+
+// Amount.
+const payAmountBody = paySteps.addStep("amount", {
+  className: "ss-amount-step",
+  continueTitle: "Review",
+  back: () => "from",
+  canContinue: () => paymentSompiFromInput() != null && !payExceedsBalance() && !paymentMaxTimer,
+  onContinue: () => goPayStep("review"),
+  onShow: () => paintPayAmountStep(),
+});
+payAmountBody.innerHTML = `
+  <div class="ss-chips" data-pay-amount-chips></div>
+  <div class="ss-keypad-stage" data-pay-keypad-stage><p class="ss-footnote" data-pay-amount-note></p></div>
+  ${keypadHtml()}`;
+const payAmountEntry = paySheet?.querySelector("[data-pay-amount-entry]");
+if (payAmountEntry) payAmountBody.querySelector("[data-pay-keypad-stage]").prepend(payAmountEntry);
+if (payAmountInput && window.matchMedia?.("(pointer: coarse)").matches) {
+  payAmountInput.readOnly = true;
+  payAmountInput.inputMode = "none";
+}
+wireKeypad(payAmountBody.querySelector(".ss-keypad"), (key) => {
+  if (!payAmountInput || paymentSendInFlight) return false;
+  const next = applyKeypadKey(key, payAmountInput.value, paymentUnit === "fiat" ? 2 : 8);
+  if (next === payAmountInput.value) return false;
+  paymentMax = null; // a typed amount is no longer Max
+  payAmountInput.value = next;
+  payAmountInput.dispatchEvent(new Event("input"));
+  return true;
+});
+function paintPayAmountStep() {
+  if (!payAmountBody || !isPaySheetOpen()) return;
+  const chips = payAmountBody.querySelector("[data-pay-amount-chips]");
+  if (chips) chips.innerHTML = `${payToChipHtml()}${stepChipHtml({ label: "From", value: paySourceTitle() })}`;
+  const note = payAmountBody.querySelector("[data-pay-amount-note]");
+  if (note) {
+    const exceeds = payExceedsBalance();
+    note.textContent = paySheetError || (exceeds ? "This is more than the address you're sending from holds."
+      : (paymentSourceBalanceSompi != null ? `Available: ${formatSompiPlain(paymentSourceBalanceSompi)} ${KAS_UNIT}` : " "));
+    note.classList.toggle("error", Boolean(paySheetError || exceeds));
+  }
+  paySteps.refresh();
+}
+
+// The review: the swipe-up sheet, its "to <name>" line replaced by the To / From / Total card.
+paySheet?.querySelector(".pay-sheet-head")?.remove();
+paySheet?.querySelector(".sk-swipe-scroll")?.insertAdjacentHTML("afterbegin", '<div class="ss-review-stack" data-pay-review></div>');
+function renderPayReview() {
+  const host = paySheet?.querySelector("[data-pay-review]");
+  if (!host || !isPaySheetOpen()) return;
+  const sompi = paymentSompiFromInput();
+  const fee = paymentTotalFeeSompi();
+  const fiat = sompi != null && paymentPrice > 0 ? formatFiatValue(Number(sompi) / 1e8, paymentPrice) : "";
+  const amount = sompi == null ? '<span class="sk-spinner" aria-hidden="true"></span>'
+    : `<strong class="ss-review-big">${escapeHtml(`${formatSompiPlain(sompi)} ${KAS_UNIT}`)}</strong>${fiat ? `<span class="ss-review-fiat">${escapeHtml(fiat)}</span>` : ""}`;
+  let total = '<span class="ss-review-address">—</span>';
+  if (sompi != null && fee != null && !paymentFeeEstimating) total = `<strong>${escapeHtml(`${formatSompiPlain(sompi + fee)} ${KAS_UNIT}`)}</strong>`;
+  else if (sompi != null) total = '<span class="sk-spinner" aria-hidden="true"></span>';
+  host.innerHTML = `
+    <div class="ss-review-amount"><span class="ss-review-eyebrow">You're sending</span>${amount}</div>
+    <div class="sk-card ss-review-card">
+      ${reviewRowHtml("To", reviewAddressHtml(payContactName()))}
+      ${reviewRowHtml("From", reviewAddressHtml({ name: paySourceTitle(), address: paymentFundingAddress() || "" }))}
+      ${reviewRowHtml("Total", total)}
+    </div>`;
+}
+const payFeeEditor = createFeeEditorStep(paySteps, {
+  onConfirm: (sompi) => {
+    if (paymentBaseFeeSompi == null) return;
+    // never under the network's minimum (iOS commitPaymentCustomFee)
+    paymentCustomExtraFeeSompi = sompi > paymentBaseFeeSompi ? sompi - paymentBaseFeeSompi : 0n;
+    renderPaymentFeeCard();
+    if (activePaymentMax()) schedulePaymentMaxRefill(0); // Max follows the fee at once (DSK-043)
+  },
+});
 
 // The Max pin, while the field still shows what Max wrote.
 function activePaymentMax() {
@@ -21581,6 +22509,8 @@ function refreshPaymentSheetState() {
   paySlider.setEnabled(sompi > 0 && !paymentSendInFlight);
   payFromCtl.setDisabled(Boolean(paymentSendInFlight));
   renderPaymentFromWarning();
+  paintPayAmountStep();
+  renderPayReview();
 }
 
 // From a spending address the chatting address tells them about it (a small message fee); an
@@ -21621,6 +22551,8 @@ function renderPaymentFeeCard() {
   // A custom fee lights no speed; picking one goes back to it.
   payFeeCtl.setTier(paymentCustomExtraFeeSompi != null ? null : paymentFeeTier);
   payFeeCtl.setCoinSummary(coinControlSummaryText(paymentManualUtxos?.length || 0));
+  paySheet?.querySelector("[data-pay-kas-fee-card]")?.classList.toggle("ss-fee-unknown", total == null);
+  renderPayReview();
 }
 // The base fee from the estimate (BigInt sompi, null = unknown); `estimating` keeps the last base
 // behind the spinner, as iOS does.
@@ -21655,7 +22587,8 @@ paySheet?.querySelectorAll("[data-pay-kas-fee]").forEach((button) => {
 paySheet?.querySelector("[data-pay-kas-fee-edit]")?.addEventListener("click", () => {
   const total = paymentTotalFeeSompi();
   if (total == null || paymentSendInFlight) return;
-  payFeeCtl.setEditing(true, formatSompiPlain(total));
+  // The fee editor (KaChat-iPhone bc3e1ff3 SendFeeEditorScreen), the base fee its minimum.
+  payFeeEditor.open({ feeSompi: total, minimumSompi: paymentBaseFeeSompi, kasUnit: KAS_UNIT });
 });
 paySheet?.querySelector("[data-pay-kas-fee-commit]")?.addEventListener("click", commitPaymentCustomFee);
 payFeeCustomInput?.addEventListener("input", () => {
@@ -21849,21 +22782,23 @@ function openPaymentSheet() {
   paySheetConversationId = conversationEntry.id;
   paymentSourceIndex = null;
   paymentSourceLabel = null;
+  payChoosingFrom = false;
+  paymentSourceBalanceSompi = null;
   resetPaymentSheetFields();
   paySwipe.reset();
   paySwipe.setKasUnit(KAS_UNIT);
-  paySwipe.setScreenTitle(`Send ${KAS_UNIT}`);
+  // In steps, the swipe-up screen is the Review (KaChat-iPhone bc3e1ff3).
+  paySwipe.setScreenTitle("Review");
   paySlider.busy = false;
   if (payRecipientEl) payRecipientEl.textContent = `to ${displayNameForAddress(contact) || shortAddress(contact.address)}`;
   paySheet.hidden = false;
+  goPayStep("from", { instant: true });
   refreshPaymentUnitUi();
   fetchKasPrice(selectedCurrency).then((price) => {
     paymentPrice = price;
     if (isPaySheetOpen()) refreshPaymentUnitUi();
   }).catch(() => {});
   refreshComposerAvailableBalance({ reset: true });
-  // The amount is the first thing to type - after anything that was about to take focus back.
-  window.setTimeout(() => { if (isPaySheetOpen()) payAmountInput?.focus(); }, 60);
 }
 
 function closePaymentSheet({ force = false } = {}) {
@@ -28337,6 +29272,8 @@ function chatListConversationsForPush() {
 // ChatService.updateAppBadge - requests and blocked chats never count).
 // (The timer lives on the function: renderChats runs during boot, before a `let` here would exist.)
 function scheduleAppBadgeUpdate() {
+  // The dock's Chats count moves with the icon's (iOS 64d63846: updateAppBadge syncs the dock).
+  scheduleChatsTabBadge();
   if (scheduleAppBadgeUpdate.timer) return;
   scheduleAppBadgeUpdate.timer = window.setTimeout(() => {
     scheduleAppBadgeUpdate.timer = 0;
@@ -28813,19 +29750,39 @@ queueMicrotask(async () => {
       // `tip` = { postId, authorPubkey }: the tip names the post, so the post counts it (iOS
       // a6bd60a, KAPOSTS_INDEXER.md 5.11); null only for something not on the network yet.
       // `onTipped`: the tip went out, so its post counts it at once (iOS 0f241ce).
-      tipUser: (address, name, tip = null, onTipped = null) => {
-        const kas = kaPostsDefaultTipKas();
-        if (kas > 0) {
-          sendInstantTip(address, name, kas, tip)
-            .then(() => { try { onTipped?.(); } catch { /* the feed moved on */ } })
-            // iOS: "Tip didn't send: <why>", then the amount screen so it can go by hand.
-            .catch(async (error) => {
-              if (error?.code === "SEND_CANCELLED") return; // cancelled at Face ID / the password
-              const why = `Tip didn't send: ${userFacingError(error) || "Send failed."}`;
-              await openTipModal({ address, name, tip, onTipped, error: why });
-            });
-        } else openTipModal({ address, name, tip, onTipped });
+      // A default tip set in a currency sends what it is worth in KAS right now (iOS 4c0d5a8); with
+      // no price yet it says so on the amount screen.
+      tipUser: async (address, name, tip = null, onTipped = null) => {
+        const defaultTip = kaPostsDefaultTip();
+        if (!defaultTip) { openTipModal({ address, name, tip, onTipped }); return; }
+        const fiatText = defaultTip.fiat ? fiatAmountText(defaultTip.fiat, defaultTip.currency) : null;
+        const price = defaultTip.fiat ? await fetchKasPrice(defaultTip.currency).catch(() => null) : null;
+        const sompi = kapostsDefaultTipSompi(defaultTip, price);
+        if (!sompi) {
+          await openTipModal({ address, name, tip, onTipped, error: `Tip didn't send: there is no KAS price yet to turn ${fiatText} into KAS.` });
+          return;
+        }
+        sendInstantTip(address, name, sompi / 1e8, tip, fiatText)
+          .then(() => { try { onTipped?.(); } catch { /* the feed moved on */ } })
+          // iOS: "Tip didn't send: <why>", then the amount screen so it can go by hand.
+          .catch(async (error) => {
+            if (error?.code === "SEND_CANCELLED") return; // cancelled at Face ID / the password
+            const why = `Tip didn't send: ${userFacingError(error) || "Send failed."}`;
+            await openTipModal({ address, name, tip, onTipped, error: why });
+          });
       },
+      // KaPost Settings > Cool down before post (iOS 4c0d5a8): off, actions go at once.
+      kaPostsCooldownEnabled,
+      // A payment request link in a post is drawn as a card (iOS 0b9fd28); Pay opens the same
+      // payment-request flow as anywhere else in the app.
+      parsePaymentRequestLink: parsePaymentRequestLinkCached,
+      openPaymentRequest,
+      paymentRequestCardInfo: (request, onPrice) => ({
+        own: isOwnPaymentRequest(request),
+        amountText: `${paymentRequestAmountText(request)} ${KAS_UNIT}`,
+        signer: request.creator ? paymentRequestPersonName(request.creator) : null,
+        fiatText: kasFiatTextNow(Number(request.amountSompi) / 1e8, onPrice),
+      }),
       openKaPostsSettings,
       startChat: (address, name) => openChatWithAddress({ address, name }),
       // Routes to the Profile tab's KNS editor rather than a second copy of it.
@@ -31429,7 +32386,7 @@ function renderGroupSelectedMembers() {
   if (!addrs.length) {
     groupMembersList.innerHTML = `<p class="group-picker-empty">${groupModalMode === "add"
       ? "No members added yet. Open Contacts below to add people."
-      : "No members added yet. Add people from your Address Book or by address below."}</p>`;
+      : "No members added yet. Add people from your contacts or by address below."}</p>`;
     return;
   }
   groupMembersList.innerHTML = addrs.map((addr) => {

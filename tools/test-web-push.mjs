@@ -322,7 +322,7 @@ test("public room, KaPosts, .kachat names, Address Activity: wording, tags and r
   assert.equal(plain(notificationFromPush({ type: "broadcast", channel: "kaspa", body: "A".repeat(400) }, mirror)).options.body, "New message");
   assert.equal(notificationFromPush({ type: "broadcast", channel: "kaspa" }, { ...mirror, childMode: true }).suppress, true);
   const post = plain(notificationFromPush({ type: "kaposts", subtitle: "alice.kas", body: "liked your post", post_id: "p1", tx_id: "k1" }, mirror));
-  assert.equal(post.title, "KaPosts");
+  assert.equal(post.title, "KaPost"); // the feature is KaPost wherever it is read (iOS 4c0d5a8)
   assert.equal(post.options.body, "alice.kas liked your post");
   assert.deepEqual(post.options.data.route, { kind: "kapost", txId: "p1" });
   const name = plain(notificationFromPush({ type: "name_event", title: "New offer on alice.kachat", body: "12 KAS offered for it.", name: "alice", dedup: "offer:alice:1" }, mirror));

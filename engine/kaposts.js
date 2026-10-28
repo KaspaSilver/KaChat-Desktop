@@ -207,7 +207,7 @@ function kapostBaseUrl() {
 
 async function kapostGet(path, query = {}) {
   // Testnet has no KaPost indexer yet: blank means none, never the mainnet one.
-  if (!kapostBaseUrl()) throw new Error("KaPosts isn't available on Testnet yet.");
+  if (!kapostBaseUrl()) throw new Error("KaPost isn't available on Testnet yet.");
   const url = new URL(`${kapostBaseUrl()}/${path}`);
   for (const [key, value] of Object.entries(query)) {
     if (value !== null && value !== undefined && value !== "") url.searchParams.set(key, String(value));

@@ -78,6 +78,7 @@ import {
   kapostsDrawerWidth,
   kapostsDrawerShouldClose,
   kapostsDrawerDim,
+  kapostsPaymentRequestIn,
 } from "./kaposts-format.js";
 // The phone header's hamburger, its slide-out card and the swipeable feeds (iOS 865c9ab).
 import "./kaposts-drawer.css";
@@ -1335,6 +1336,13 @@ async function resolveAndOpenPost(txId, { parentRemoteIdHint = null } = {}) {
 /** `label` overrides the key-derived toast wording (a like and an un-like share one key). */
 function scheduleUndoable(key, action, undo = null, label = null) {
   cancelUndoable(key);
+  // KaPost Settings > Cool down before post off (iOS 4c0d5a8): no window and no Undo toast, the
+  // action goes at once.
+  if (deps.kaPostsCooldownEnabled?.() === false) {
+    renderAll();
+    action();
+    return;
+  }
   const timer = setTimeout(() => {
     pendingActions.delete(key);
     stopTickerIfIdle();
@@ -1694,6 +1702,46 @@ function sameAddress(a, b) {
   return Boolean(a) && String(a).toLowerCase() === String(b || "").toLowerCase();
 }
 
+/// The payment request link in a post's text as shown (a translation included), or null - see
+/// kapostsPaymentRequestIn. Parsed through app.js's cached parser: its signature check would
+/// otherwise run on every render.
+function postPaymentRequestLink(post) {
+  if (!deps.parsePaymentRequestLink) return null;
+  return kapostsPaymentRequestIn(postDisplayText(post), deps.parsePaymentRequestLink);
+}
+
+const PAY_CARD_SEAL_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M12 2.5l2.2 1.6 2.7-.2.9 2.6 2.3 1.4-.7 2.6.7 2.6-2.3 1.4-.9 2.6-2.7-.2L12 19.5l-2.2-1.6-2.7.2-.9-2.6-2.3-1.4.7-2.6-.7-2.6 2.3-1.4.9-2.6 2.7.2Z"/><path d="m8.8 11 2.2 2.2 4.2-4.4"/></svg>`;
+const PAY_CARD_WARNING_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M10.3 3.9a2 2 0 0 1 3.4 0l8 13.6A2 2 0 0 1 20 20.5H4a2 2 0 0 1-1.7-3Z"/><path d="M12 9v4.5M12 16.8v.2"/></svg>`;
+const PAY_CARD_PAY_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="fill" cx="12" cy="12" r="9.5"/><path d="M12 16.5v-9M8 11.5l4-4 4 4"/></svg>`;
+const PAY_CARD_VIEW_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>`;
+
+/// A payment request in a post, as a card instead of the link's long text (iOS 0b9fd28
+/// KaPostPaymentRequestCard): the amount and what it comes to in your currency, the memo, who
+/// signed it, and Pay - or View, for your own. A click opens Desktop's own payment-request flow.
+function paymentRequestCardHtml(request, pid) {
+  // A price that lands later repaints the card with the currency value.
+  const info = deps.paymentRequestCardInfo?.(request, () => renderAll()) || {};
+  const own = Boolean(info.own);
+  const signer = info.signer
+    ? `<span class="kaposts-pay-card-signer">${PAY_CARD_SEAL_SVG}<span>${deps.escapeHtml(info.signer)}</span></span>`
+    : `<span class="kaposts-pay-card-signer unsigned">${PAY_CARD_WARNING_SVG}<span>Not signed</span></span>`;
+  return `
+    <button type="button" class="kaposts-pay-card" data-kaposts-pay-card="${pid}" title="${own ? "Shows your payment request." : "Opens Send Kaspa to pay it."}">
+      <span class="kaposts-pay-card-top">
+        <img class="kaposts-pay-card-logo" src="${kaspaLogoUrl}" alt="" aria-hidden="true" />
+        <span class="kaposts-pay-card-copy">
+          <span class="kaposts-pay-card-eyebrow">Payment Request</span>
+          <span class="kaposts-pay-card-amount"><strong>${deps.escapeHtml(info.amountText || "")}</strong>${info.fiatText ? `<span>${deps.escapeHtml(info.fiatText)}</span>` : ""}</span>
+          ${request.memo ? `<span class="kaposts-pay-card-memo">${deps.escapeHtml(request.memo)}</span>` : ""}
+        </span>
+      </span>
+      <span class="kaposts-pay-card-foot">
+        ${signer}
+        <span class="kaposts-pay-card-pill${own ? " own" : ""}">${own ? PAY_CARD_VIEW_SVG : PAY_CARD_PAY_SVG}${own ? "View" : "Pay"}</span>
+      </span>
+    </button>`;
+}
+
 function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false, showReply = true, profileOf = "" } = {}) {
   const pid = deps.escapeHtml(String(post.id)); // DSK-015: never trust an id inside markup
   const name = posterName(post.posterAddress);
@@ -1710,7 +1758,10 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
   const tips = Math.max(0, Number(post.tips) || 0);
   // Measured on the text on screen (a translation can run longer than the original), with the
   // line count over the first 281 characters, as iOS does.
-  const shownText = postDisplayText(post);
+  // A payment request link is drawn as a card under the text and left out of the text itself
+  // (iOS 0b9fd28 paymentRequestLink / bodyText).
+  const payLink = postPaymentRequestLink(post);
+  const shownText = payLink ? payLink.bodyText : postDisplayText(post);
   const isLong = kapostsCharCount(shownText) > 280 || (shownText.slice(0, 281).match(/\n/g) || []).length >= 8;
   // Show more expands the post IN PLACE now. It used to open the thread, so the only way to read
   // a long post in a feed was to leave the feed - and on an ancestor it did nothing useful at
@@ -1759,8 +1810,9 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
           </button>
         </div>
         ${bellNote ? `<div class="kaposts-bell-note">${deps.escapeHtml(bellNote)}</div>` : ""}
-        <div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(foldText ? kapostsFoldedPrefix(shownText) : shownText)}</div>
+        ${shownText ? `<div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(foldText ? kapostsFoldedPrefix(shownText) : shownText)}</div>` : ""}
         ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${pid}">${foldText ? "Show more" : "Show less"}</button>` : ""}
+        ${payLink ? paymentRequestCardHtml(payLink.request, pid) : ""}
         ${translateAffordanceHtml(post)}
         ${pollCardHtml(post)}
         ${quotedHtml}
@@ -2647,6 +2699,16 @@ async function submitReply(parent, text) {
   // The indexer orders replies newest first, so the new one goes to the TOP straight away
   // rather than out of view at the bottom (iOS 7f82118).
   mutatePost(parent.id, (p) => { p.comments = [comment, ...p.comments]; });
+  // Answering a reply inside an open thread (someone's reply to your post): open its replies, so
+  // yours shows right under it instead of behind "View 1 reply" (iOS da3e953). The page that loads
+  // with it keeps this reply (loadCommentReplies merges by id). Only a reply listed under the
+  // thread's post has replies that open in place.
+  const openThread = findPost(threadStack[threadStack.length - 1]);
+  if (openThread && openThread.id !== parent.id && !expandedCommentIds.has(parent.id)
+    && (openThread.comments || []).some((entry) => entry.id === parent.id)) {
+    expandedCommentIds.add(parent.id);
+    loadCommentReplies(parent);
+  }
   renderThread();
   // Same 5s undo window as every other interaction: the optimistic comment shows
   // immediately, the on-chain submit fires when the toast's countdown runs out,
@@ -3084,7 +3146,7 @@ function scheduleEdit(post, text) {
       mutatePost(post.id, restore);
       deps.appendEngineLog?.(`KaPost edit failed: ${error.message}`);
       // iOS fae6686: a failed edit says so in an alert (it used to be logged and nothing more).
-      deps.alertDialog?.({ title: "KaPosts", message: `Couldn't save the edit: ${actionErrorText(error)}`, confirmLabel: "OK" });
+      deps.alertDialog?.({ title: "KaPost", message: `Couldn't save the edit: ${actionErrorText(error)}`, confirmLabel: "OK" });
     }
     renderAll();
   }, () => {
@@ -3108,7 +3170,7 @@ function scheduleDelete(post) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.pendingDeletion = false; });
       deps.appendEngineLog?.(`KaPost delete failed: ${error.message}`);
-      deps.alertDialog?.({ title: "KaPosts", message: `Couldn't delete the post: ${actionErrorText(error)}`, confirmLabel: "OK" });
+      deps.alertDialog?.({ title: "KaPost", message: `Couldn't delete the post: ${actionErrorText(error)}`, confirmLabel: "OK" });
     }
     renderAll();
   }, () => {
@@ -3277,7 +3339,7 @@ function renderPanel() {
   const restorePanelScroll = () => { panelBodyEl.scrollTop = previousTop; };
   const titles = {
     profile: "Profile", notifications: "Notifications", engagement: "Post Activity", tippers: "Tips", search: "Search",
-    bookmarks: "Bookmarks", drafts: "Drafts", scheduled: "Scheduled", muted: "Muted", blocked: "Blocked", menu: "KaPosts",
+    bookmarks: "Bookmarks", drafts: "Drafts", scheduled: "Scheduled", muted: "Muted", blocked: "Blocked", menu: "KaPost",
   };
   panelTitleEl.textContent = titles[panel.type === "list" ? panel.kind : panel.type] || "Panel";
 
@@ -3308,7 +3370,9 @@ function renderPanel() {
     panelBodyEl.innerHTML = `
       <div class="kaposts-profile-hero">
         <div class="kaposts-profile-banner${kachatBanner ? " has-img" : ""}"${knsBanner ? ` style="background-image:url('${deps.escapeHtml(knsBanner)}')"` : ""}>${kachatBanner}</div>
-        <div class="kaposts-profile-row">
+        ${/* Someone else's: Follow and Chat beside the avatar, above the name, so a long name never
+             squeezes them (iOS 472cb72, .kaposts-profile-row.other). */ ""}
+        <div class="kaposts-profile-row${isMine ? "" : " other"}">
           ${posterAvatarHtml(address)}
           <div class="kaposts-profile-meta">
             ${/* iOS myProfileSheet / posterProfileSheet order: name, counts, bio, then (own
@@ -3702,7 +3766,7 @@ function renderSearchResults(panel) {
     results.innerHTML = `
       <div class="no-results-card kaposts-empty">
         <svg class="kaposts-empty-icon" viewBox="0 0 24 24"><path d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
-        <strong>Search KaPosts</strong>
+        <strong>Search KaPost</strong>
         <span>Find posts by what they say, and people by their name or domain. Only people who have posted appear.</span>
       </div>`;
     return;
@@ -4156,7 +4220,7 @@ async function pollKaPostNotificationsForPings() {
     const target = notificationTargetTxId(n, text);
     if (activePanel?.type === "notifications" && document.hasFocus()) continue; // the screen itself is the notification
     deps.postDesktopNotification?.({
-      title: "KaPosts",
+      title: "KaPost",
       body: `${posterName(actorAddress)} ${kaPostsNotificationAction(n, text)}`,
       tag: `kachat-kaposts-${n.id}`,
       // A tap that comes back after the app was closed has no closure to call: the route opens
@@ -4695,7 +4759,7 @@ function reportPost(post) {
     "",
   ].join("\n");
   const link = document.createElement("a");
-  link.href = `mailto:kaspasilver@gmail.com?subject=${encodeURIComponent("KaPosts report")}&body=${encodeURIComponent(body)}`;
+  link.href = `mailto:kaspasilver@gmail.com?subject=${encodeURIComponent("KaPost report")}&body=${encodeURIComponent(body)}`;
   link.click();
 }
 
@@ -5508,7 +5572,7 @@ function renderKaPostsUnavailable() {
     <div class="no-results-card kaposts-empty">
       ${/* iOS KaPostsUnavailableView's "text.bubble" */ ""}
       <svg class="kaposts-empty-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"/></svg>
-      <strong>KaPosts isn't available on Testnet yet</strong>
+      <strong>KaPost isn't available on Testnet yet</strong>
       <span>There is no KaPost indexer for testnet. Turn off Testnet in Settings > Connection to read and post on mainnet.</span>
     </div>`;
 }
@@ -5809,7 +5873,7 @@ function mountPhoneBar() {
   phoneBarEl.setAttribute("data-kaposts-phone-bar", "");
   phoneBarEl.innerHTML = `
     <button class="kaposts-menu-button" type="button" data-kaposts-menu aria-label="Menu" aria-haspopup="dialog" aria-expanded="false">${MENU_SVG}</button>
-    <h1 class="kaposts-title">KaPosts</h1>
+    <h1 class="kaposts-title">KaPost</h1>
     <span class="kaposts-phone-bar-actions">
       <button class="kaposts-phone-bar-item" type="button" data-kaposts-phone-section="notifications" aria-label="Notifications" title="Notifications"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${PANEL_ICONS.bell}"/></svg></button>
       <button class="kaposts-phone-bar-item" type="button" data-kaposts-phone-section="profile" aria-label="Profile" title="Profile">${PERSON_SVG}</button>
@@ -5830,13 +5894,13 @@ function buildFeedDrawer() {
   drawerEl.hidden = true;
   drawerEl.innerHTML = `
     <div class="kaposts-drawer-dim" data-kaposts-drawer-dim role="button" tabindex="-1" aria-label="Close menu"></div>
-    <section class="kaposts-drawer-card" data-kaposts-drawer-card role="dialog" aria-modal="true" aria-label="KaPosts menu">
+    <section class="kaposts-drawer-card" data-kaposts-drawer-card role="dialog" aria-modal="true" aria-label="KaPost menu">
       <header class="kaposts-drawer-header">
-        <h2 class="kaposts-drawer-title">KaPosts</h2>
+        <h2 class="kaposts-drawer-title">KaPost</h2>
         <button class="kaposts-drawer-close" type="button" data-kaposts-drawer-close aria-label="Close menu">${XMARK_SVG}</button>
       </header>
       <div class="kaposts-drawer-divider" aria-hidden="true"></div>
-      <nav class="kaposts-drawer-rows" aria-label="KaPosts sections">
+      <nav class="kaposts-drawer-rows" aria-label="KaPost sections">
         ${KAPOSTS_FEED_MENU.map(({ key, title }) => `<button class="kaposts-drawer-row" type="button" data-kaposts-drawer-item="${key}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${FEED_MENU_ICONS[key]}"/></svg><span>${title}</span></button>`).join("")}
       </nav>
     </section>`;
@@ -6402,6 +6466,16 @@ export function initKaPosts(dependencies) {
       if (post) scheduleVote(post, Number(vote.dataset.index));
       return;
     }
+    // A post's payment request card (iOS 0b9fd28): Desktop's own payment-request flow - Send
+    // Kaspa filled in (a chat=1 request as an encrypted chat payment), or your own to copy.
+    const payCard = event.target.closest("[data-kaposts-pay-card]");
+    if (payCard) {
+      event.stopPropagation();
+      const post = findPost(payCard.dataset.kapostsPayCard);
+      const link = post ? postPaymentRequestLink(post) : null;
+      if (link) deps.openPaymentRequest?.(link.request);
+      return;
+    }
     const link = event.target.closest("[data-kaposts-link]");
     if (link) {
       event.stopPropagation();
@@ -6660,27 +6734,12 @@ export function initKaPosts(dependencies) {
     if (notificationRow && activePanel?.type === "notifications") {
       const item = (activePanel.items || []).find((row) => String(row.id) === notificationRow.dataset.kapostsNotification);
       if (!item) return;
-      // One tap, two possible destinations - a menu that names both, headed by who did it, so
-      // "open the post" and "open the transaction" never compete for the same row. View in
-      // Explorer only when there is a transaction URL to open (iOS: `if let url = txURL(for:)`).
-      const explorerUrl = txIdOrNull(item.id) && deps.explorerTxUrl ? deps.explorerTxUrl(item.id) : "";
-      openPopover(notificationRow, `
-        <div class="kaposts-pop-title">${deps.escapeHtml(posterName(item.actorAddress))}</div>
-        ${item.targetTxId ? `<button type="button" class="kaposts-pop-row" data-kaposts-notif-open="${deps.escapeHtml(item.targetTxId)}" data-kaposts-notif-parent="${deps.escapeHtml(item.parentTxId || "")}"><strong>Open in KaPosts</strong><small>Goes to the post this is about, in the app.</small></button>` : ""}
-        ${explorerUrl ? `<button type="button" class="kaposts-pop-row" data-kaposts-notif-explorer="${deps.escapeHtml(explorerUrl)}"><strong>View in Explorer</strong><small>Opens the transaction on your chosen block explorer.</small></button>` : ""}`);
       event.stopPropagation();
-      return;
-    }
-    const notifOpen = event.target.closest("[data-kaposts-notif-open]");
-    if (notifOpen) {
-      closePopover();
-      resolveAndOpenPost(notifOpen.dataset.kapostsNotifOpen, { parentRemoteIdHint: notifOpen.dataset.kapostsNotifParent || null });
-      return;
-    }
-    const notifExplorer = event.target.closest("[data-kaposts-notif-explorer]");
-    if (notifExplorer) {
-      closePopover();
-      window.open(notifExplorer.dataset.kapostsNotifExplorer, "_blank", "noopener");
+      // Straight to what it is about (iOS 4c0d5a8): the post (a reply or quote itself, or your
+      // post for a like, repost or tip); a follow has no post, so the follower's profile. No
+      // explorer link and no menu in between.
+      if (item.targetTxId) resolveAndOpenPost(item.targetTxId, { parentRemoteIdHint: item.parentTxId || null });
+      else if (item.actorAddress) openPosterProfile(item.actorAddress, null);
       return;
     }
 

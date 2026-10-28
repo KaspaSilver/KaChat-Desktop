@@ -755,7 +755,7 @@ function renderHome() {
   const mine = myActiveTournament();
   const waiting = mine && T.tournamentStatus(mine) === "open";
   return `
-    ${headerHtml("Chess Online", { home: true })}
+    ${headerHtml("KaPlay", { home: true })}
     <div class="chess-t-body chess-t-home">
       <div class="chess-t-hero">
         <span class="chess-t-hero-icon">${ICON_CHESS}</span>
@@ -1621,10 +1621,11 @@ function onClick(event) {
   if (cancel) { const t = tournaments[cancel.dataset.chessTCancel]; if (t) cancelTournament(t).catch(() => {}); return; }
   const share = event.target.closest("[data-chess-t-share]");
   if (share) {
-    // The tournament screen and the waiting room word the invite differently (iOS ShareLink).
+    // The tournament screen and the waiting room word the invite differently (iOS ShareLink), in
+    // KaPlay, the app's name now (iOS 1d23002).
     const text = share.dataset.invite === "tournament"
-      ? `Join my KaChat chess tournament: open Kaspa Hub > Chess Online > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`
-      : `Play me at chess in KaChat: open Kaspa Hub > Chess Online > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`;
+      ? `Join my chess tournament in KaPlay: open Kaspa Hub > KaPlay > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`
+      : `Play me at chess in KaPlay: open Kaspa Hub > KaPlay > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`;
     if (navigator.share) navigator.share({ text }).catch(() => {});
     else navigator.clipboard?.writeText(text).then(() => deps.showToast?.("Invite copied"), () => {});
     return;

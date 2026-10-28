@@ -6342,6 +6342,40 @@ body.session-logged-out [data-account-rename-modal] {
   display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden;
 }
 .kaposts-show-more { align-self: flex-start; border: 0; background: transparent; padding: 0; color: var(--kaspa-ink); font-weight: 700; font-size: 13px; cursor: pointer; }
+/* A payment request in a post (iOS 0b9fd28 KaPostPaymentRequestCard): the Kaspa logo, the amount
+   with its currency value, the memo, then who signed it and the Pay capsule, on an accent-tinted
+   rounded card. */
+.kaposts-pay-card {
+  display: flex; flex-direction: column; gap: 12px; width: 100%; margin-top: 4px; padding: 14px;
+  border: 1px solid rgba(112,199,186,.35); border-radius: 16px; background: rgba(112,199,186,.08);
+  color: var(--text); font: inherit; text-align: start; cursor: pointer;
+}
+.kaposts-pay-card:hover { background: rgba(112,199,186,.13); }
+.kaposts-pay-card-top { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.kaposts-pay-card-logo { width: 40px; height: 40px; flex: none; }
+.kaposts-pay-card-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kaposts-pay-card-eyebrow { color: var(--kaspa-ink); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .02em; }
+.kaposts-pay-card-amount { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.kaposts-pay-card-amount strong { font-size: 22px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kaposts-pay-card-amount span { color: var(--muted); font-size: 14px; white-space: nowrap; }
+.kaposts-pay-card-memo {
+  margin-top: 2px; font-size: 14px; white-space: pre-wrap; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.kaposts-pay-card-foot { display: flex; align-items: center; gap: 8px; }
+.kaposts-pay-card-signer { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: 12px; font-weight: 650; }
+.kaposts-pay-card-signer > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kaposts-pay-card-signer svg { width: 15px; height: 15px; flex: none; fill: none; stroke: #fff; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-pay-card-signer svg .fill { fill: #34c759; stroke: none; }
+.kaposts-pay-card-signer.unsigned { color: #ff9500; }
+.kaposts-pay-card-signer.unsigned svg .fill { fill: #ff9500; }
+.kaposts-pay-card-pill {
+  margin-inline-start: auto; flex: none; display: inline-flex; align-items: center; gap: 5px;
+  padding: 8px 16px; border-radius: 999px; background: var(--kaspa-ink); color: #fff; font-size: 14px; font-weight: 750;
+}
+.kaposts-pay-card-pill svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.kaposts-pay-card-pill svg .fill { fill: rgba(255,255,255,.25); stroke: none; }
+.kaposts-pay-card-pill.own { background: rgba(112,199,186,.15); color: var(--kaspa-ink); }
 .kaposts-quote-embed {
   display: flex; flex-direction: column; gap: 3px;
   border: 1px solid var(--line); border-radius: 12px; padding: 10px; cursor: pointer;
@@ -6644,6 +6678,11 @@ body.session-logged-out [data-account-rename-modal] {
 .kaposts-profile-row .kaposts-follow { padding-top: 30px; }
 .kaposts-profile-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; padding-top: 30px; }
 .kaposts-profile-actions .kaposts-follow { margin-left: 0; padding-top: 0; }
+/* Someone else's profile at every width (iOS 472cb72): the avatar with Follow and Chat beside it,
+   level with its foot, and the name, counts and bio the full width below. */
+.kaposts-profile-row.other { flex-wrap: wrap; row-gap: 8px; }
+.kaposts-profile-row.other > .kaposts-profile-actions { order: 1; align-self: flex-end; padding-top: 0; flex-wrap: wrap; justify-content: flex-end; }
+.kaposts-profile-row.other > .kaposts-profile-meta { order: 2; flex: 1 1 100%; padding-top: 0; }
 /* "Chat" opens the 1:1 thread; "Edit KNS Profile" routes to the same editor the Profile tab uses. */
 .kaposts-profile-chat, .kaposts-edit-kns {
   display: inline-flex; align-items: center; gap: 6px;
@@ -10455,6 +10494,15 @@ body.call-active .sidebar-tabbar { display: none; }
 .kaposts-tip-amount-field { display: inline-flex; align-items: center; gap: 8px; }
 .kaposts-tip-amount-field .field-input { width: 120px; text-align: right; }
 .kaposts-tip-amount-logo { width: 22px; height: 22px; }
+/* The default tip in the app's currency (iOS 4c0d5a8): its symbol where the logo was, and the unit
+   as an accent capsule with arrow.up.arrow.down that switches between KAS and the currency. */
+.kaposts-tip-amount-symbol { min-width: 22px; color: var(--muted); font-size: 17px; font-weight: 650; text-align: center; }
+.kaposts-tip-unit {
+  flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px;
+  border: 0; border-radius: 999px; background: rgba(112,199,186,.12); color: var(--kaspa-ink);
+  font: inherit; font-size: 14px; cursor: pointer;
+}
+.kaposts-tip-unit svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Portfolio: the eye and a selected span on a chart (iOS 9aa23bb). */
 .kaposts-icon-button.active { color: var(--kaspa-ink); }
@@ -12574,6 +12622,11 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .connection-readonly span { color: var(--muted); font-size: 13px; }
 .connection-readonly code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); user-select: text; word-break: break-all; }
 .connection-readonly em { font-style: normal; color: var(--muted); }
+.connection-names-source { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+.connection-names-source span { color: var(--muted); font-size: 13px; }
+.connection-names-source code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); user-select: text; word-break: break-all; }
+.connection-names-source code.plain { font-family: inherit; }
+.connection-names-source small { color: var(--muted); font-size: 12px; }
 
 /* ==== Profile, 1:1 with iOS ProfileView ==== */
 /* VStack(spacing: 16).padding(): 16pt everywhere, and the large title pinned on a solid
@@ -13012,7 +13065,17 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 @keyframes sk-spin { to { transform: rotate(360deg); } }
 
 /* Recipient */
-.sk-recipient-row { display: flex; align-items: center; gap: 12px; }
+.sk-recipient-row { display: flex; flex-direction: column; align-items: stretch; gap: 12px; }
+.sk-recipient-pills { display: flex; gap: 8px; }
+.sk-recipient-pill {
+  flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 6px;
+  border: 0; border-radius: 999px; background: rgba(112,199,186,.15); color: var(--kaspa-ink); cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap;
+}
+.sk-recipient-pill span { overflow: hidden; text-overflow: ellipsis; }
+.sk-recipient-pill svg { flex: 0 0 16px; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.sk-recipient-pill:hover { background: rgba(112,199,186,.24); }
+.sk-recipient-pill:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
 .sk-recipient-field { position: relative; flex: 1; min-width: 0; display: block; }
 .sk-recipient-input {
   width: 100%; padding: 4px 30px 4px 0; border: 0; outline: none; background: transparent; color: var(--text);
@@ -13421,8 +13484,8 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
    passphrase explainer's headline-and-text sections, a little taller since it is the whole step. */
 .create-account-flow .seed-explainer-page { max-height: min(60vh, 560px); margin: 4px 0 8px; }
 
-/* ==== Address Book (iOS AddressBookView, 00767a4 / cda0d99 / 1be4f6e) ====
-   Kaspa Hub > Address Book (ui/address-book.js), its add / edit sheet and the full-screen picker,
+/* ==== Contacts, the Address Book in code (iOS AddressBookView, 00767a4 / cda0d99 / 1be4f6e; KaPay 8118f09) ====
+   Kaspa Hub > Contacts (ui/address-book.js), its add / edit sheet and the full-screen picker,
    the recipient card's saved name, and User Info's row. Built on the theme's tokens. */
 .ab-screen { display: flex; flex-direction: column; min-height: 0; }
 .ab-header { width: 100%; gap: 10px; flex-shrink: 0; }
@@ -13535,7 +13598,7 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 /* User Info's row: its glyph is swapped between book.closed and book.closed.fill. */
 .chat-info-row-icon-slot { display: contents; }
 
-/* New Group's "Add Members" heading over the Address Book / by-address tools. */
+/* New Group's "Add Members" heading over the Contacts / by-address tools. */
 .group-add-members-title { margin: 0 0 6px; color: var(--muted); font-size: 13px; font-weight: 600; text-transform: uppercase; }
 .group-add-members-title[hidden] { display: none; }
 
@@ -14988,8 +15051,8 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
 .chatting-address-qr-frame canvas,
 .cold-qr-frame canvas { margin-left: auto; margin-right: auto; }
 
-/* Address Book's + (owner, 2026-10-24): the same glass button as Chats, bottom-right above the
-   dock, opening the Address Book sheet (Add Address, Import, Export). The screen scrolls, so it is
+/* Contacts' + (owner, 2026-10-24): the same glass button as Chats, bottom-right above the
+   dock, opening the Contacts sheet (Add Contact, Import, Export). The screen scrolls, so it is
    fixed to the window rather than riding the list. */
 .ab-fab { position: fixed; right: calc(20px + env(safe-area-inset-right, 0px)); bottom: calc(var(--dock-inset, 124px) + 16px); }
 .ab-fab svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }
@@ -15102,7 +15165,7 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
 .pay-sheet .sk-swipe-scroll { display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
 .pay-sheet.sk-swipe-host .pay-sheet-head { padding: 0 12px; }
 .pay-sheet.sk-swipe-host .pay-sheet-head p { margin: 0; text-align: center; }
-/* Profile's Send and Receive (iOS 7abc06e8): the up/down arrow in Address Book's + spot, and room
+/* Profile's Send and Receive (iOS 7abc06e8): the up/down arrow in Contacts' + spot, and room
    under the screen so its last row clears it. */
 .profile-send-receive-fab svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .profile-screen[data-app-tab-screen="profile"] { padding-bottom: calc(var(--dock-inset, 124px) + 96px); }

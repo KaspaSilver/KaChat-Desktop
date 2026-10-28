@@ -1,0 +1,166 @@
+/* Step-by-step sends (KaPay 05db583, KaChat-iPhone bc3e1ff3; ui/send-steps.js): the To / From /
+   Amount / fee screens drawn over a swipe-up sheet, which is itself the Review. */
+
+.ss-layer { position: absolute; inset: 0; z-index: 3; overflow: hidden; background: var(--sheet-bg, var(--panel)); }
+.ss-layer[hidden], .ss-step[hidden] { display: none !important; }
+.ss-layer, .ss-step { transition: transform .32s cubic-bezier(.2,.9,.25,1); }
+.ss-layer[data-entering="right"], .ss-step[data-entering="right"] { transform: translateX(100%); transition: none; }
+.ss-layer[data-entering="left"], .ss-step[data-entering="left"] { transform: translateX(-100%); transition: none; }
+.ss-layer[data-leaving="left"], .ss-step[data-leaving="left"] { transform: translateX(-100%); }
+.ss-layer[data-leaving="right"], .ss-step[data-leaving="right"] { transform: translateX(100%); }
+.ss-step {
+  position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--sheet-bg, var(--panel)); color: var(--text);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ss-layer, .ss-step { transition-duration: .01s; }
+}
+
+/* iOS SendStepHeader: Back on the left, the title, Cancel on the right; a first step only the title. */
+.ss-head {
+  flex: 0 0 auto; position: relative; display: flex; align-items: center; justify-content: space-between;
+  min-height: 40px; padding: 14px 16px 6px;
+}
+.ss-title {
+  position: absolute; left: 96px; right: 96px; margin: 0; text-align: center; font-size: 17px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+}
+.ss-first .ss-title { left: 16px; right: 16px; }
+.ss-back, .ss-cancel, .sk-swipe-back {
+  border: 0; cursor: pointer; color: var(--kaspa-ink); font: inherit; background: var(--glass-fill, var(--fill-tertiary));
+}
+.ss-back, .sk-swipe-back { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; padding: 0; }
+.ss-back svg, .sk-swipe-back svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.ss-cancel { margin-left: auto; padding: 9px 16px; border-radius: 999px; font-size: 16px; }
+.ss-back[hidden], .ss-cancel[hidden], .ss-bar-cancel[hidden] { display: none; }
+.ss-back:focus-visible, .ss-cancel:focus-visible, .sk-swipe-back:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
+
+.ss-body {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 16px;
+  padding: 12px 20px 24px;
+}
+.ss-question { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.25; text-align: left; }
+.ss-question.ss-center { text-align: center; font-size: 20px; }
+.ss-note { margin: -6px 0 0; font-size: 13px; line-height: 1.4; color: var(--muted); }
+
+/* iOS SendContinueButton: a teal capsule pinned at the bottom, beside Cancel on a first step. */
+.ss-bar {
+  flex: 0 0 auto; display: flex; gap: 12px; padding: 8px 20px calc(8px + var(--sk-swipe-safe-bottom, 0px));
+  background: color-mix(in srgb, var(--sheet-bg, var(--panel)) 82%, transparent); backdrop-filter: blur(20px);
+}
+.ss-continue, .ss-bar-cancel {
+  flex: 1 1 0; height: 56px; border-radius: 999px; font: inherit; font-size: 17px; font-weight: 600; cursor: pointer;
+}
+.ss-continue { border: 0; background: var(--kaspa); color: #000; }
+.ss-continue:disabled { opacity: .4; cursor: default; }
+.ss-bar-cancel { border: 1px solid rgba(112,199,186,.35); background: var(--glass-fill, var(--fill-tertiary)); color: var(--text); }
+.ss-continue:focus-visible, .ss-bar-cancel:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 3px; }
+
+/* "To alice.kachat", "From Chatting Address" (iOS SendStepChip). */
+.ss-chips { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.ss-chip {
+  display: inline-flex; align-items: baseline; gap: 8px; max-width: 100%; box-sizing: border-box; padding: 9px 14px; border-radius: 18px;
+  background: var(--material, var(--surface-1)); border: 1px solid var(--glass-stroke, var(--line)); font-size: 14px;
+}
+.ss-chip-label { color: var(--muted); flex: 0 0 auto; }
+.ss-chip-value { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-chip-value.mono { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-weight: 400; font-size: 13px; }
+
+/* The amount step: the chips, the big number and its switches, then the keypad at the bottom. */
+.ss-amount-step .ss-body { gap: 0; padding-bottom: 8px; }
+.ss-amount-step .ss-question { margin-bottom: 8px; }
+.ss-keypad-stage { flex: 1 1 auto; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; }
+.ss-amount { display: flex; align-items: baseline; justify-content: center; gap: 8px; max-width: 100%; padding: 0 12px; box-sizing: border-box; }
+.ss-amount-number { font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; white-space: nowrap; font-family: ui-rounded, -apple-system, system-ui, sans-serif; }
+.ss-amount.empty .ss-amount-number { color: var(--muted); }
+.ss-amount-unit { font-weight: 600; color: var(--muted); font-family: ui-rounded, -apple-system, system-ui, sans-serif; }
+.ss-footnote { margin: 10px 0 0; min-height: 1.4em; padding: 0 20px; font-size: 13px; line-height: 1.4; text-align: center; color: var(--muted); }
+.ss-footnote.error { color: var(--ios-red); }
+.ss-footnote.warn { color: #ff9f0a; }
+/* The Send Kaspa amount entry moved onto the amount step: its number drawn by the keypad. */
+.ss-amount-step .sk-amount { margin: 0; }
+.ss-amount-step .sk-amount-actions { margin-top: 12px; }
+.ss-amount-step .sk-amount-input { caret-color: transparent; }
+
+/* iOS KaspaKeypad: 1-9, the point, 0 and delete; a soft round highlight while pressed. */
+.ss-keypad { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 0 12px; margin-top: 8px; }
+.ss-key {
+  height: 58px; border: 0; border-radius: 16px; background: transparent; color: var(--text); cursor: pointer;
+  font: inherit; font-size: 30px; font-weight: 500; font-family: ui-rounded, -apple-system, system-ui, sans-serif;
+  display: grid; place-items: center; touch-action: manipulation; user-select: none; -webkit-user-select: none;
+  transition: transform .12s ease, background-color .12s ease;
+}
+@media (hover: hover) { .ss-key:hover { background: color-mix(in srgb, var(--text) 5%, transparent); } }
+.ss-key:active { background: color-mix(in srgb, var(--text) 8%, transparent); transform: scale(.94); }
+.ss-key:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: -2px; }
+.ss-key svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
+.ss-key-refused { animation: ss-refuse .25s ease; }
+@keyframes ss-refuse { 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
+@media (max-height: 700px) { .ss-key { height: 50px; } }
+
+/* From: the chatting address card, or your addresses listed right on the step (iOS OwnAddressList). */
+.ss-from-step .sk-from-label { display: none; }
+.ss-address-list { gap: 8px; overflow: visible; }
+.ss-address-list .sk-source-section { margin: 0; }
+.ss-address-list .sk-source-section:not(:first-child) { margin-top: 8px; }
+.ss-address-list .sk-source-row {
+  padding: 14px; border-radius: 16px; background: var(--material, var(--surface-1)); border: 1.5px solid var(--glass-stroke, var(--line));
+}
+.ss-address-list .sk-source-row.current { border-color: var(--kaspa); background: var(--material, var(--surface-1)); }
+.ss-address-list .sk-source-check { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid var(--muted); color: #000; }
+.ss-address-list .sk-source-row.current .sk-source-check { background: var(--kaspa); border-color: var(--kaspa); }
+.ss-address-list .sk-source-check { flex-basis: 22px; }
+.ss-address-list .sk-source-check svg { width: 13px; height: 13px; stroke-width: 3.2; }
+
+/* The review (the swipe-up screen): the amount, To / From / Total, then the fee. */
+.ss-review-amount { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 8px; text-align: center; }
+.ss-review-eyebrow { font-size: 15px; color: var(--muted); }
+.ss-review-big {
+  font-size: 40px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: ui-rounded, -apple-system, system-ui, sans-serif;
+}
+.ss-review-fiat { font-size: 15px; color: var(--muted); }
+.ss-review-card { gap: 14px; font-size: 15px; }
+.ss-review-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.ss-review-row + .ss-review-row { padding-top: 14px; border-top: 1px solid var(--separator, var(--line)); }
+.ss-review-label { color: var(--muted); flex: 0 0 auto; }
+.ss-review-value { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.ss-review-value strong { font-weight: 600; }
+.ss-review-address { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.ss-review-stack { display: flex; flex-direction: column; gap: 18px; }
+
+/* The fee row's Edit (iOS SendFeeControls onEditFee): the fee, then an Edit capsule. */
+.sk-fee-edit-pill {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: 10px; padding: 6px 12px; border-radius: 999px;
+  background: rgba(112,199,186,.15); color: var(--kaspa-ink); font-size: 14px; font-weight: 600;
+}
+.sk-fee-edit-pill svg { width: 13px; height: 13px; }
+.sk-fee.ss-fee-edit .sk-fee-text, .sk-fee.ss-fee-edit .sk-fee-text * { text-decoration: none; }
+.sk-fee.ss-fee-edit .sk-fee-text { color: var(--text); }
+.sk-fee.ss-fee-edit.ss-fee-unknown .sk-fee-edit-pill { opacity: .5; }
+.sk-fee.ss-fee-edit .sk-fee-text > svg { display: none; }
+
+/* The swipe-up review's Back (iOS SwipeUpToSendScrollView onBack): Back left, Cancel right. */
+.sk-swipe-header-row .sk-swipe-back { position: absolute; left: 0; top: 50%; transform: translateY(-50%); }
+.sk-swipe-header-row.has-back .sk-swipe-cancel { left: auto; right: 0; }
+.sk-swipe-back[hidden] { display: none; }
+
+@media (max-width: 859px) {
+  .ss-head { padding-top: calc(14px + var(--safe-top, env(safe-area-inset-top, 0px))); }
+}
+
+/* A sheet that is all steps, no swipe-up (Request Payment): the steps fill a fixed-height frame. */
+.contact-modal.ss-host {
+  position: relative; display: block; padding: 0; overflow: hidden;
+  height: min(780px, calc(100dvh - 44px)); max-height: none; width: min(100%, 460px);
+}
+.contact-modal.ss-host > .ss-layer { display: block; }
+.ss-chips.start { align-items: flex-start; }
+.payment-request-paid-to { display: flex; flex-direction: column; gap: 8px; }
+.payment-request-share { align-self: center; border: 0; cursor: pointer; font: inherit; font-size: 15px; margin: 0; padding: 10px 18px; }
+.payment-request-share svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.payment-request-share:disabled { opacity: .5; cursor: default; }
+.ss-review-big + .ss-review-fiat { margin-top: -2px; }
+@media (max-width: 859px) {
+  .modal-backdrop:has(> .ss-host) { padding: 0; }
+  .contact-modal.ss-host { width: 100%; height: 100dvh; border: 0; border-radius: 0; box-shadow: none; --sk-swipe-safe-bottom: var(--safe-bottom, env(safe-area-inset-bottom, 0px)); }
+}

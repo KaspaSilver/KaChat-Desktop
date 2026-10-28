@@ -259,7 +259,7 @@ test("restore: the winning entry decides the photo; deletions and newer local ed
   assert.equal(importAddressBookArchive([], []), false);
 });
 
-test("Remove Address Book Photos: every wallet, entries marked edited", () => {
+test("Remove Contact Photos: every wallet, entries marked edited", () => {
   fresh();
   saveAddressBookEntry({ address: ALICE, name: "Alice", photo: PHOTO });
   saveAddressBookEntry({ address: BOB, name: "Bob" });
@@ -289,8 +289,9 @@ test("Remove Address Book Photos: every wallet, entries marked edited", () => {
 
 test("export file: name, format, photo attached", () => {
   fresh({ start: Date.parse("2026-10-08T18:37:50.123Z") });
-  assert.equal(addressBookExportFileName(), "KaChat Address Book 2026-10-08T18-37-50Z.json", "iOS's ISO8601DateFormatter time, \":\" made \"-\"");
-  assert.equal(addressBookExportFileName(Date.parse("2026-01-02T03:04:05Z")), "KaChat Address Book 2026-01-02T03-04-05Z.json");
+  // "KaChat Contacts …" since KaChat bc3e1ff3 / KaPay 8118f09 ("KaChat Address Book …" before).
+  assert.equal(addressBookExportFileName(), "KaChat Contacts 2026-10-08T18-37-50Z.json", "iOS's ISO8601DateFormatter time, \":\" made \"-\"");
+  assert.equal(addressBookExportFileName(Date.parse("2026-01-02T03:04:05Z")), "KaChat Contacts 2026-01-02T03-04-05Z.json");
   saveAddressBookEntry({ address: BOB, name: "Bob", note: "work" });
   saveAddressBookEntry({ address: ALICE, name: "Alice", photo: PHOTO });
   const text = addressBookExportJson();
@@ -372,7 +373,7 @@ test("import: adds, updates only from a newer edit, lifts a tombstone, brings th
 
 test("import refuses: not an export, wrong type or version, no addresses, no wallet", () => {
   fresh();
-  const NOT = /: That file isn't a KaChat Address Book export\.$/;
+  const NOT = /: That file isn't a KaChat contacts export\.$/;
   const ok = { type: "kachat-address-book", version: 1, exportedAt: iso(clock), entries: [{ address: ALICE, name: "Alice", createdAt: iso(clock), updatedAt: iso(clock) }] };
   assert.throws(() => importAddressBookExport("not json"), NOT);
   assert.throws(() => importAddressBookExport("[]"), NOT);
@@ -386,8 +387,8 @@ test("import refuses: not an export, wrong type or version, no addresses, no wal
   assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, entries: {} })), NOT);
   // A chat backup carries addressBook, not an Address Book export.
   assert.throws(() => importAddressBookExport(JSON.stringify(archiveAddressBook())), NOT);
-  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, entries: [] })), /: That Address Book export has no addresses\.$/);
-  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, entries: [{ address: "kaspa:nope", name: "X" }] })), /no addresses/);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, entries: [] })), /: That contacts export has no contacts\.$/);
+  assert.throws(() => importAddressBookExport(JSON.stringify({ ...ok, entries: [{ address: "kaspa:nope", name: "X" }] })), /no contacts/);
   assert.equal(addressBookEntries().length, 0, "nothing imported by a refused file");
   wallet = "";
   assert.throws(() => importAddressBookExport(JSON.stringify(ok)), /: Open a wallet first\.$/);
@@ -396,7 +397,7 @@ test("import refuses: not an export, wrong type or version, no addresses, no wal
 });
 
 test("Nextcloud: manual exports keep their spaces in the KaChat folder", () => {
-  assert.equal(kaChatFolderFileName("KaChat Address Book 2026-10-08T18-37-50Z.json", { keepSpaces: true }), "KaChat Address Book 2026-10-08T18-37-50Z.json");
+  assert.equal(kaChatFolderFileName("KaChat Contacts 2026-10-08T18-37-50Z.json", { keepSpaces: true }), "KaChat Contacts 2026-10-08T18-37-50Z.json");
   assert.equal(kaChatFolderFileName("Long Term 2026-10-08T18-37-50Z.csv", { keepSpaces: true }), "Long Term 2026-10-08T18-37-50Z.csv");
   assert.equal(kaChatFolderFileName("Größe: 1/2.csv", { keepSpaces: true }), "Größe_ 1_2.csv", "letters survive; each other character becomes _");
   assert.equal(kaChatFolderFileName("Long Term.csv"), "Long_Term.csv", "other uploads unchanged");

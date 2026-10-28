@@ -55,20 +55,18 @@ export const SEND_ICONS = {
   chevronRight: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
   arrows: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 20V5m0 0L3.5 8.5M7 5l3.5 3.5M17 4v15m0 0-3.5-3.5M17 19l3.5-3.5"/></svg>',
   slide: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 6 6-6 6M13 6l6 6-6 6"/></svg>',
-  book: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/></svg>',
-  bookFill: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z" style="fill:currentColor"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/></svg>',
+  // person.text.rectangle(.fill), KaChat's contact card (KaPay 8118f09; was book.closed).
+  book: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><circle cx="8.5" cy="9.9" r="2.2"/><path d="M5.1 16.4c.5-1.9 1.8-2.9 3.4-2.9s2.9 1 3.4 2.9"/><path d="M14.5 10h4M14.5 14h4"/></svg>',
+  bookFill: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" style="fill:currentColor;stroke:none" d="M4.5 4h15A2.5 2.5 0 0 1 22 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-15A2.5 2.5 0 0 1 2 17.5v-11A2.5 2.5 0 0 1 4.5 4ZM10.8 9.9a2.3 2.3 0 1 0-4.6 0a2.3 2.3 0 1 0 4.6 0ZM4.9 16.6h7.2c-.5-2.1-1.9-3.3-3.6-3.3s-3.1 1.2-3.6 3.3ZM14.4 9.1h4.2a.9.9 0 0 1 0 1.8h-4.2a.9.9 0 0 1 0-1.8ZM14.4 13.1h4.2a.9.9 0 0 1 0 1.8h-4.2a.9.9 0 0 1 0-1.8Z"/></svg>',
 };
 
-// The Address Book on every recipient card (iOS 00767a4 SendRecipientCard): a button beside Scan
-// QR (only while the book has entries) that picks a saved address, and the saved name under the
-// address card. The host app supplies the book: { hasEntries() -> bool, nameFor(address) ->
-// string|null }. Unset, the card has neither.
+// Contacts on every recipient card (iOS 00767a4 SendRecipientCard): a button beside Scan QR that
+// picks a saved address - always there, even with no contacts yet, when the picker says so (KaPay
+// 8118f09) - and the saved name under the address card. The host app supplies the book:
+// { hasEntries() -> bool, nameFor(address) -> string|null }; only nameFor is read now.
 let addressBookHooks = null;
 export function configureSendAddressBook(hooks) {
   addressBookHooks = hooks && typeof hooks === "object" ? hooks : null;
-}
-function addressBookHasEntries() {
-  try { return Boolean(addressBookHooks?.hasEntries?.()); } catch { return false; }
 }
 function addressBookNameFor(address) {
   const trimmed = String(address || "").trim();
@@ -79,13 +77,11 @@ function savedNameInnerHtml(name) {
   return name ? `${SEND_ICONS.bookFill}<span>${esc(name)}</span>` : "";
 }
 
-/** Re-reads the Address Book for a mounted card: the button's visibility and the saved name for
- *  `address` (the resolved address, else what is typed). */
+/** Re-reads Contacts for a mounted card: the saved name for `address` (the resolved address, else
+ *  what is typed). The button always shows (KaPay 8118f09). */
 export function refreshRecipientAddressBook(root, prefix, address) {
   if (!root) return;
   const p = attrName(prefix);
-  const button = root.querySelector(`[data-${p}-address-book]`);
-  if (button) button.hidden = !addressBookHasEntries();
   const line = root.querySelector(`[data-${p}-saved-name]`);
   if (line) {
     const name = addressBookNameFor(address);
@@ -195,7 +191,7 @@ export function recipientStatusHtml({ input = "", resolving = false, error = nul
  * P-scan (no tick in the field: the status line says it, as iOS), P-resolution (the address card's host, inside
  * P-resolution-wrap),
  * P-status (the status line), P-locked / P-locked-address / P-locked-note (Compound UTXOs) and
- * P-recipient-row (the editable row, hidden while locked), P-address-book (the Address Book
+ * P-recipient-row (the editable row, hidden while locked), P-address-book (the Contacts
  * button) and P-saved-name (the saved name under the card, for `savedNameAddress` or the value).
  */
 export function recipientCardHtml({
@@ -217,9 +213,12 @@ export function recipientCardHtml({
           <input class="sk-recipient-input" type="text" data-${p}-recipient placeholder="${esc(placeholder)}"
             autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Recipient address or name" value="${esc(value)}" />
         </span>
-        <button type="button" class="sk-icon-button" data-${p}-paste aria-label="Paste" title="Paste">${SEND_ICONS.paste}</button>
-        <button type="button" class="sk-icon-button" data-${p}-scan aria-label="Scan QR" title="Scan QR">${SEND_ICONS.scan}</button>
-        <button type="button" class="sk-icon-button" data-${p}-address-book aria-label="Address Book" title="Address Book" ${addressBookHasEntries() ? "" : "hidden"}>${SEND_ICONS.book}</button>
+        <!-- Paste, Scan QR and Contacts as labelled pills under the field, one row (KaPay 05db583 / 8118f09). -->
+        <span class="sk-recipient-pills">
+          <button type="button" class="sk-recipient-pill" data-${p}-paste>${SEND_ICONS.paste}<span>Paste</span></button>
+          <button type="button" class="sk-recipient-pill" data-${p}-scan>${SEND_ICONS.scan}<span>Scan QR</span></button>
+          <button type="button" class="sk-recipient-pill" data-${p}-address-book>${SEND_ICONS.book}<span>Contacts</span></button>
+        </span>
       </div>
       <div class="sk-recipient-resolution" data-${p}-resolution-wrap ${locked ? "hidden" : ""}><div data-${p}-resolution>${cardHtml}</div></div>
       <p class="sk-saved-name" data-${p}-saved-name ${!locked && savedName ? "" : "hidden"}>${savedNameInnerHtml(locked ? null : savedName)}</p>
@@ -340,16 +339,17 @@ export const SEND_FEE_TIERS = [
  * Attributes: P-fee="tier" (the speed buttons), P-fee-edit (the fee amount button, its text in
  * P-fee-summary), P-fee-editor / P-fee-custom / P-fee-commit (the custom fee field),
  * P-fee-estimating, P-coin-toggle (the Coin Control row, its value in P-coin-summary) and
- * P-coin-list (an inline UTXO list under it, when `coinList` is set).
+ * P-coin-list (an inline UTXO list under it, when `coinList` is set). `editPill`: the fee shows with
+ * an Edit capsule, for a review whose Edit opens the fee editor (KaPay 05db583 onEditFee).
  */
 export function feeControlsHtml({
   prefix, feeText = null, estimating = false, editing = false, customValue = "", tier = "normal",
-  showCoinControl = true, coinSummary = "Automatic", coinList = false, coinListHtml = "",
+  showCoinControl = true, coinSummary = "Automatic", coinList = false, coinListHtml = "", editPill = false,
 } = {}) {
   const p = attrName(prefix);
   const showButton = !editing && !estimating;
   return `
-    <div class="sk-card sk-fee" data-${p}-fee-card>
+    <div class="sk-card sk-fee${editPill ? " ss-fee-edit" : ""}" data-${p}-fee-card>
       <div class="sk-fee-row">
         <span class="sk-fee-title">Network Fee</span>
         <span class="sk-fee-value">
@@ -360,14 +360,14 @@ export function feeControlsHtml({
           </span>
           <span class="sk-fee-estimating" data-${p}-fee-estimating ${estimating && !editing ? "" : "hidden"} aria-label="Estimating fee"><span class="sk-spinner" aria-hidden="true"></span></span>
           <button type="button" class="sk-fee-text" data-${p}-fee-edit ${showButton ? "" : "hidden"} title="Set a custom fee">
-            <span data-${p}-fee-summary>${esc(feeText ?? "--")}</span>${SEND_ICONS.pencil}
+            <span data-${p}-fee-summary>${esc(feeText ?? "--")}</span>${SEND_ICONS.pencil}${editPill ? `<span class="sk-fee-edit-pill">${SEND_ICONS.pencil}Edit</span>` : ""}
           </button>
         </span>
       </div>
       <div class="settings-segmented full sk-fee-tiers" role="group" aria-label="Network fee speed">
         ${SEND_FEE_TIERS.map((t) => `<button type="button" class="settings-segmented-option${tier === t.id ? " active" : ""}" data-${p}-fee="${t.id}" aria-pressed="${tier === t.id ? "true" : "false"}">${esc(t.label)}</button>`).join("")}
       </div>
-      <p class="sk-caption">If the network is busy, Fast or Priority pays a higher fee to help this confirm sooner. Click the fee amount to set a custom fee.</p>
+      <p class="sk-caption">If the network is busy, Fast or Priority pays a higher fee to help this confirm sooner. ${editPill ? "Edit sets a fee of your own." : "Click the fee amount to set a custom fee."}</p>
       ${showCoinControl ? `
       <div class="sk-divider" aria-hidden="true"></div>
       <button type="button" class="sk-coin-row" data-${p}-coin-toggle aria-expanded="false">
@@ -713,8 +713,6 @@ export function openOwnAddressPicker({ title = "Choose an Address", selectedAddr
       </div>
     </section>`;
   const list = backdrop.querySelector("[data-sk-source-list]");
-  let rows = [];
-  const used = new Map();
 
   const onKey = (event) => {
     if (event.key !== "Escape") return;
@@ -733,21 +731,50 @@ export function openOwnAddressPicker({ title = "Choose an Address", selectedAddr
   window.addEventListener("keydown", onKey, true);
 
   backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
-  backdrop.addEventListener("click", (event) => {
-    if (event.target.closest("[data-sk-source-cancel]")) { close(); return; }
-    const row = event.target.closest("[data-sk-source-key]");
-    if (!row) return;
-    const picked = rows.find((r) => r.key === row.getAttribute("data-sk-source-key"));
-    close();
-    if (picked) { try { onPick?.(picked.source); } catch { /* the screen reports its own errors */ } }
-  });
+  backdrop.addEventListener("click", (event) => { if (event.target.closest("[data-sk-source-cancel]")) close(); });
   document.body.appendChild(backdrop);
+  mountOwnAddressList(list, {
+    selectedAddress, loadEntries, cachedUsed, probeUsed, kasUnit, excludeQuantum,
+    onPick: (source) => { close(); try { onPick?.(source); } catch { /* the screen reports its own errors */ } },
+  });
+  list.querySelector(".sk-source-row.current")?.focus?.();
+  return close;
+}
+
+/**
+ * The address list itself (iOS OwnAddressList), in `list`: on a screen (a send's "Where are you
+ * sending from?", Request Payment's "Where do you want to be paid?") or in the picker's sheet. The
+ * options are `openOwnAddressPicker`'s; a row's click calls `onPick(source)`. Returns
+ * { setSelected(address) } to move the check without loading again.
+ */
+export function mountOwnAddressList(list, { selectedAddress = null, loadEntries, cachedUsed, probeUsed, kasUnit = "KAS", onPick, excludeQuantum = false } = {}) {
+  if (!list) return { setSelected() {} };
+  let rows = [];
+  let selected = selectedAddress;
+  const used = new Map();
+  // A list loaded again (the step shown once more) drops the answers of the one before.
+  const generation = (Number(list.dataset.skListGeneration) || 0) + 1;
+  list.dataset.skListGeneration = String(generation);
+  const alive = () => list.isConnected && list.dataset.skListGeneration === String(generation);
+  list.innerHTML = '<p class="sk-source-empty"><span class="sk-spinner" aria-hidden="true"></span>Loading addresses…</p>';
+  if (!list.dataset.skListWired) {
+    list.dataset.skListWired = "1";
+    list.addEventListener("click", (event) => {
+      const row = event.target.closest("[data-sk-source-key]");
+      if (!row) return;
+      list.skPick?.(row.getAttribute("data-sk-source-key"));
+    });
+  }
+  list.skPick = (key) => {
+    const picked = rows.find((r) => r.key === key);
+    if (picked) onPick?.(picked.source);
+  };
 
   const rowHtml = (r) => {
     const funded = BigInt(r.balanceSompi || 0) > 0n;
-    const current = selectedAddress != null && r.address === selectedAddress;
+    const current = selected != null && r.address === selected;
     return `
-      <button type="button" class="sk-source-row${current ? " current" : ""}" role="option" aria-selected="${current ? "true" : "false"}" data-sk-source-key="${esc(r.key)}">
+      <button type="button" class="sk-source-row${current ? " current" : ""}" role="option" aria-selected="${current ? "true" : "false"}" data-sk-source-key="${esc(r.key)}" data-sk-source-address="${esc(r.address)}">
         <span class="sk-source-copy">
           <span class="sk-source-name">${esc(r.title)}<span data-sk-used="${esc(r.key)}">${usedTagHtml(used.get(r.address))}</span></span>
           <code class="sk-source-address">${esc(shortSendAddress(r.address))}</code>
@@ -764,7 +791,7 @@ export function openOwnAddressPicker({ title = "Choose an Address", selectedAddr
   Promise.resolve()
     .then(() => loadEntries?.())
     .then(async (loaded) => {
-      if (!backdrop.isConnected) return;
+      if (!alive()) return;
       const chatting = loaded?.chatting?.address ? [{
         key: "chatting", title: "Chatting Address", address: loaded.chatting.address,
         balanceSompi: loaded.chatting.balanceSompi || 0, source: { kind: "chatting", address: loaded.chatting.address },
@@ -790,25 +817,35 @@ export function openOwnAddressPicker({ title = "Choose an Address", selectedAddr
         ${chatting.length ? `<p class="sk-source-section">Chatting Address</p>${chatting.map(rowHtml).join("")}` : ""}
         <p class="sk-source-section">Spending Addresses</p>
         ${spending.length ? spending.map(rowHtml).join("") : '<p class="sk-source-empty">No spending addresses yet.</p>'}`;
-      list.querySelector(".sk-source-row.current")?.focus?.();
       // A few at a time, like Manage Addresses (a burst gets rate-limited).
       let next = 0;
       const worker = async () => {
-        while (next < toProbe.length && backdrop.isConnected) {
+        while (next < toProbe.length && alive()) {
           const r = toProbe[next++];
           let answer = null;
           try { answer = await probeUsed?.(r.address); } catch { answer = null; }
-          if (!backdrop.isConnected) return;
+          if (!alive()) return;
           if (answer === true || answer === false) { used.set(r.address, answer); paintUsed(r); }
         }
       };
       await Promise.all(Array.from({ length: Math.min(8, toProbe.length) }, worker));
     })
     .catch((error) => {
-      if (!backdrop.isConnected) return;
+      if (!alive()) return;
       list.innerHTML = `<p class="sk-source-empty bad">${esc(error?.message || "Couldn't load your addresses.")}</p>`;
     });
-  return close;
+  return {
+    setSelected(address) {
+      selected = address ?? null;
+      list.querySelectorAll("[data-sk-source-key]").forEach((row) => {
+        const on = selected != null && row.getAttribute("data-sk-source-address") === selected;
+        row.classList.toggle("current", on);
+        row.setAttribute("aria-selected", on ? "true" : "false");
+        const check = row.querySelector(".sk-source-check");
+        if (check) check.innerHTML = on ? SEND_ICONS.check : "";
+      });
+    },
+  };
 }
 
 export function closeOwnAddressPicker() {
@@ -1119,14 +1156,15 @@ export function createSwipeUpScreen(card, {
   screenTitle = "Send Kaspa", barTitle = "Swipe up to Send", labels = SWIPE_UP_LABELS.send, kasUnit = "KAS",
   getPreview, getFailureMessage, onCancel, onDone, onAction,
 } = {}) {
-  const noop = { setBusy() {}, setEnabled() {}, setSent() {}, setOutcome() {}, setSucceeded() {}, setScreenTitle() {}, setBarTitle() {}, setLabels() {}, setKasUnit() {}, reset() {}, get sending() { return false; } };
+  const noop = { setBusy() {}, setEnabled() {}, setSent() {}, setOutcome() {}, setSucceeded() {}, setScreenTitle() {}, setBack() {}, setBarTitle() {}, setLabels() {}, setKasUnit() {}, reset() {}, get sending() { return false; } };
   if (!card) return noop;
   card.querySelector(":scope > .modal-header")?.remove();
   card.classList.add("sk-swipe-host");
   const form = document.createElement("div");
   form.className = "sk-swipe-form";
   form.innerHTML = `
-    <div class="sk-swipe-header"><div class="sk-swipe-header-row">
+    <div class="sk-swipe-header"><div class="sk-swipe-header-row" data-sk-swipe-header-row>
+      <button type="button" class="sk-swipe-back" data-sk-swipe-back aria-label="Back" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5.5 8.5 12l6.5 6.5"/></svg></button>
       <button type="button" class="sk-swipe-cancel" data-sk-swipe-cancel>Cancel</button>
       <h2 class="sk-swipe-title" data-sk-swipe-title></h2>
     </div></div>
@@ -1330,6 +1368,10 @@ export function createSwipeUpScreen(card, {
     startSending();
   });
   form.querySelector("[data-sk-swipe-cancel]").addEventListener("click", () => { if (phase === "form") onCancel?.(); });
+  // A step-by-step send's review (KaPay 05db583): Back on the left, Cancel moves to the right.
+  let onBack = null;
+  const backButton = form.querySelector("[data-sk-swipe-back]");
+  backButton.addEventListener("click", () => { if (phase === "form") onBack?.(); });
   els.final.addEventListener("click", () => {
     if (els.final.dataset.kind === "done") { try { onDone?.(); } catch { /* the screen tidies up on its own */ } }
     else returnToForm();
@@ -1344,6 +1386,12 @@ export function createSwipeUpScreen(card, {
 
   const api = {
     setScreenTitle(text) { titleEl.textContent = String(text || ""); },
+    /** `fn` (or null): the header's Back, for the review of a send in steps. */
+    setBack(fn) {
+      onBack = typeof fn === "function" ? fn : null;
+      backButton.hidden = !onBack;
+      q(form, "sk-swipe-header-row").classList.toggle("has-back", Boolean(onBack));
+    },
     setBarTitle(text) { title = String(text || ""); paintBar(); },
     setLabels(next) { words = next || SWIPE_UP_LABELS.send; paintBar(); paintProgress(); },
     setKasUnit(next) { unit = String(next || "KAS"); },

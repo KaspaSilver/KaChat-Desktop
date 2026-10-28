@@ -1,5 +1,6 @@
-// The Address Book screens (iOS AddressBookView, 00767a4 / cda0d99 / 98f3728 / 1be4f6e): Kaspa Hub >
-// Address Book (also dockable), the add / edit sheet User Info and the chat-row menu open, and the
+// The Address Book screens, shown as Contacts (iOS AddressBookView, 00767a4 / cda0d99 / 98f3728 /
+// 1be4f6e; renamed in KaPay 8118f09 / KaChat bc3e1ff3): Kaspa Hub > Contacts (also dockable), the
+// add / edit sheet User Info and the chat-row menu open, and the
 // full-screen picker New Chat, New Group and every Send screen use. The data is
 // ui/address-book-store.js; this file only draws it. Every value interpolated is escaped.
 //
@@ -23,11 +24,14 @@ import { isNextcloudConnected, nextcloudUnavailableReason, uploadToKaChatFolder,
 import { otherDomainsHtml, pickOtherDomain, nameNotFoundText } from "./send-kaspa-components.js";
 
 const svg = (body, extra = "") => `<svg viewBox="0 0 24 24" aria-hidden="true"${extra}>${body}</svg>`;
-const BOOK_PATH = '<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/>';
-/** book.closed / book.closed.fill (stroke glyphs, currentColor). Trusted markup. */
+/** person.text.rectangle / person.text.rectangle.fill, KaChat's contact card (KaPay 8118f09; was
+ *  book.closed): a stroke glyph, and a filled card with the person and lines cut out (even-odd, so
+ *  no mask ids). currentColor. Trusted markup; the key names stay. */
+export const CONTACT_CARD_PATH = '<rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><circle cx="8.5" cy="9.9" r="2.2"/><path d="M5.1 16.4c.5-1.9 1.8-2.9 3.4-2.9s2.9 1 3.4 2.9"/><path d="M14.5 10h4M14.5 14h4"/>';
+export const CONTACT_CARD_FILL_PATH = '<path fill-rule="evenodd" style="fill:currentColor;stroke:none" d="M4.5 4h15A2.5 2.5 0 0 1 22 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-15A2.5 2.5 0 0 1 2 17.5v-11A2.5 2.5 0 0 1 4.5 4ZM10.8 9.9a2.3 2.3 0 1 0-4.6 0a2.3 2.3 0 1 0 4.6 0ZM4.9 16.6h7.2c-.5-2.1-1.9-3.3-3.6-3.3s-3.1 1.2-3.6 3.3ZM14.4 9.1h4.2a.9.9 0 0 1 0 1.8h-4.2a.9.9 0 0 1 0-1.8ZM14.4 13.1h4.2a.9.9 0 0 1 0 1.8h-4.2a.9.9 0 0 1 0-1.8Z"/>';
 export const ADDRESS_BOOK_ICONS = {
-  book: svg(BOOK_PATH),
-  bookFill: svg('<path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z" style="fill:currentColor"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/>'),
+  book: svg(CONTACT_CARD_PATH),
+  bookFill: svg(CONTACT_CARD_FILL_PATH),
 };
 const ICONS = {
   plus: svg('<path d="M12 5v14M5 12h14"/>'),
@@ -106,7 +110,7 @@ function entryName(entry) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Kaspa Hub > Address Book
+// Kaspa Hub > Contacts
 // ---------------------------------------------------------------------------------------------
 
 function rowHtml(entry) {
@@ -129,9 +133,9 @@ function emptyStateHtml() {
   return `
     <div class="ab-empty">
       <span class="ab-empty-icon">${ADDRESS_BOOK_ICONS.book}</span>
-      <strong>No saved addresses</strong>
-      <p>Save the Kaspa addresses you use with a name you'll recognize. They stay in KaChat, for this wallet only, and never go into your phone's Contacts.</p>
-      <button type="button" class="primary-button ab-empty-add" data-ab-add>${ICONS.plus}<span>Add Address</span></button>
+      <strong>No contacts yet</strong>
+      <p>Save the Kaspa addresses you use with a name you'll recognize. They stay in KaChat, for this wallet only, and never go into your phone's Contacts app.</p>
+      <button type="button" class="primary-button ab-empty-add" data-ab-add>${ICONS.plus}<span>Add Contact</span></button>
     </div>`;
 }
 
@@ -139,9 +143,9 @@ function listHtml() {
   const empty = addressBookIsEmpty();
   return `
     <div class="kaposts-header ab-header ab-list-header">
-      <h1 class="kaposts-title">Address Book</h1>
+      <h1 class="kaposts-title">Contacts</h1>
     </div>
-    <button class="new-chat-fab ab-fab" type="button" data-ab-import-export aria-label="Address Book actions" title="Address Book actions">${ICONS.plus}</button>
+    <button class="new-chat-fab ab-fab" type="button" data-ab-import-export aria-label="Contacts actions" title="Contacts actions">${ICONS.plus}</button>
     ${empty ? emptyStateHtml() : `
       <div class="ab-body">
         <input class="ab-search" type="search" data-ab-search placeholder="Search names and addresses" autocomplete="off" spellcheck="false" value="${esc(searchText)}" aria-label="Search names and addresses" />
@@ -158,13 +162,13 @@ function detailHtml(address) {
   const entry = addressBookEntry(address);
   const header = `
     <div class="kaposts-header ab-header">
-      <button class="kaposts-icon-button ab-back" type="button" data-ab-back aria-label="Address Book" title="Address Book">${ICONS.back}</button>
+      <button class="kaposts-icon-button ab-back" type="button" data-ab-back aria-label="Contacts" title="Contacts">${ICONS.back}</button>
       <h1 class="kaposts-title ab-detail-title">${esc(entry ? entryName(entry) : "")}</h1>
       <span class="ab-header-spacer" aria-hidden="true"></span>
     </div>`;
   if (!entry) {
     // Deleted (here or by a backup restore) while open.
-    return `${header}<p class="ab-empty-line ab-gone">Not in your Address Book</p>`;
+    return `${header}<p class="ab-empty-line ab-gone">Not in your contacts</p>`;
   }
   const canSend = Boolean(deps?.canSend?.());
   // The other network's address (saved before IOS-063, or restored from a backup) can't be paid or
@@ -190,7 +194,7 @@ function detailHtml(address) {
       ${otherNetwork ? `<p class="ab-section-foot">${esc(otherNetwork)}</p>` : ""}
       <div class="ab-card">
         ${actionRow({ attr: "data-ab-edit", icon: ICONS.pencil, label: "Edit" })}
-        ${actionRow({ attr: "data-ab-delete", icon: ICONS.trash, label: "Delete from Address Book", danger: true })}
+        ${actionRow({ attr: "data-ab-delete", icon: ICONS.trash, label: "Delete Contact", danger: true })}
       </div>
     </div>`;
 }
@@ -215,7 +219,7 @@ function renderListRowsOnly() {
 async function confirmDelete(entry) {
   if (!entry) return false;
   const ok = await deps?.confirmDialog?.({
-    title: `Delete ${entryName(entry)} from your Address Book?`,
+    title: `Delete ${entryName(entry)} from your contacts?`,
     confirmLabel: "Delete",
     destructive: true,
   });
@@ -297,7 +301,7 @@ function attachScreen() {
 export function initAddressBook(dependencies) {
   deps = dependencies;
   attachScreen();
-  // Every change - an edit here, a restore, Remove Address Book Photos - repaints the screens on
+  // Every change - an edit here, a restore, Remove Contact Photos - repaints the screens on
   // show and lets the host repaint names and owe a backup.
   onAddressBookChange((kind) => { refreshAddressBookScreens(); changed(kind); });
   document.querySelector("[data-address-book-photos-remove]")?.addEventListener("click", confirmRemoveAllPhotos);
@@ -334,10 +338,10 @@ export function resetAddressBookForAccount() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Address Book + sheet (was iOS AddressBookView importExportSheet, 87b2a0b, behind a toolbar button)
+// Contacts + sheet (was iOS AddressBookView importExportSheet, 87b2a0b, behind a toolbar button)
 // ---------------------------------------------------------------------------------------------
 //
-// The list's glass + opens it, as the Chats + opens New (owner, 2026-10-24): Add Address, Import File / Export File, and with Nextcloud connected Import from Nextcloud / Export to
+// The list's glass + opens it, as the Chats + opens New (owner, 2026-10-24): Add Contact, Import File / Export File, and with Nextcloud connected Import from Nextcloud / Export to
 // Nextcloud (else a line saying where to connect it). The file is the store's export JSON; Export
 // to Nextcloud puts it in the KaChat folder with its spaces kept, one new file per tap
 // (NEXTCLOUD_SYNC.md §1), and Import from Nextcloud picks a .json starting in that folder.
@@ -350,7 +354,7 @@ function ensureImportExportSheet() {
   ioSheetEl = document.createElement("div");
   ioSheetEl.className = "modal-backdrop ab-backdrop ab-io-backdrop";
   ioSheetEl.hidden = true;
-  ioSheetEl.innerHTML = `<div class="contact-modal portfolio-editor-modal ab-io-sheet" role="dialog" aria-modal="true" aria-label="Address Book" data-ab-io-body></div>`;
+  ioSheetEl.innerHTML = `<div class="contact-modal portfolio-editor-modal ab-io-sheet" role="dialog" aria-modal="true" aria-label="Contacts" data-ab-io-body></div>`;
   document.body.appendChild(ioSheetEl);
   ioSheetEl.addEventListener("mousedown", (event) => { if (event.target === ioSheetEl) closeImportExportSheet(); });
   ioSheetEl.addEventListener("keydown", (event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeImportExportSheet(); } });
@@ -378,17 +382,17 @@ function renderImportExportSheet() {
   if (!body) return;
   const connected = isNextcloudConnected();
   const rows = [
-    { action: "add", icon: ICONS.plus, title: "Add Address", subtitle: "Save a Kaspa address with a name you'll recognize." },
-    { action: "import", icon: ICONS.fileIn, title: "Import File", subtitle: "Add addresses from an Address Book export." },
-    { action: "export", icon: ICONS.fileOut, title: "Export File", subtitle: "Save this Address Book, with its photos, to a file." },
+    { action: "add", icon: ICONS.plus, title: "Add Contact", subtitle: "Save a Kaspa address with a name you'll recognize." },
+    { action: "import", icon: ICONS.fileIn, title: "Import File", subtitle: "Add contacts from a contacts export." },
+    { action: "export", icon: ICONS.fileOut, title: "Export File", subtitle: "Save your contacts, with their photos, to a file." },
     ...(connected ? [
-      { action: "nc-import", icon: ICONS.cloudIn, title: "Import from Nextcloud", subtitle: "Pick an Address Book export from your Nextcloud." },
+      { action: "nc-import", icon: ICONS.cloudIn, title: "Import from Nextcloud", subtitle: "Pick a contacts export from your Nextcloud." },
       { action: "nc-export", icon: ICONS.cloudOut, title: "Export to Nextcloud", subtitle: "Save it to the KaChat folder in your Nextcloud, to import on any device." },
     ] : []),
   ];
   body.innerHTML = `
     <div class="modal-header">
-      <div><h2>Address Book</h2></div>
+      <div><h2>Contacts</h2></div>
       <button class="modal-close" type="button" data-ab-io-close aria-label="Close">×</button>
     </div>
     <div class="cold-action-rows">${rows.map(ioRowHtml).join("")}</div>
@@ -431,7 +435,7 @@ const errorText = (error) => userFacingError(error);
 
 /** The export as { filename, json }, or null (with the toast said) when there is nothing to write. */
 function buildExport() {
-  if (addressBookIsEmpty()) { errorToast("Nothing to export yet. Add an address first."); return null; }
+  if (addressBookIsEmpty()) { errorToast("Nothing to export yet. Add a contact first."); return null; }
   try {
     return { filename: addressBookExportFileName(), json: addressBookExportJson() };
   } catch {
@@ -532,7 +536,7 @@ function editorEffectiveAddress() {
   return normalizeAddressBookAddress(editorState.address ?? editorState.resolvedAddress ?? editorState.addressInput);
 }
 
-// The Address Book editor takes a domain too (iOS 6ac48a7): a typed name resolves on every
+// The Contacts editor takes a domain too (iOS 6ac48a7): a typed name resolves on every
 // service, .kachat first, with Other domains under the resolved name; the entry saves the address.
 function editorResolutionHtml() {
   const s = editorState;
@@ -645,16 +649,16 @@ function renderEditor() {
     </section>
     <section class="create-chat-section">
       <textarea class="create-chat-name-input ab-note-input" rows="2" data-ab-editor-note placeholder="Note (optional)" aria-label="Note (optional)">${esc(s.note)}</textarea>
-      <p class="create-chat-help">Saved in KaChat for this wallet only. Never added to your phone's Contacts.</p>
+      <p class="create-chat-help">Saved in KaChat for this wallet only. Never added to your phone's Contacts app.</p>
     </section>
     ${s.error ? `<p class="create-chat-error ab-editor-error">${ICONS.warn}<span>${esc(s.error)}</span></p>` : ""}
     ${s.address && existing ? `
       <section class="create-chat-section">
-        <button type="button" class="ab-remove-button" data-ab-editor-remove>${ICONS.trash}<span>Remove from Address Book</span></button>
+        <button type="button" class="ab-remove-button" data-ab-editor-remove>${ICONS.trash}<span>Delete Contact</span></button>
       </section>` : ""}`;
 }
 
-const editorTitle = (existing) => (existing ? "Edit Address" : "Add to Address Book");
+const editorTitle = (existing) => (existing ? "Edit Contact" : "Add Contact");
 
 function editorPhotoButtonsHtml() {
   const assigned = editorShowsAssignedPhoto();
@@ -814,7 +818,7 @@ function closeEditor(result) {
 
 /**
  * Add or edit one entry. With an `address` it edits that address's entry (or adds it, with
- * `suggestedName` filled in - User Info's and the chat row's "Add to Address Book"); without one
+ * `suggestedName` filled in - User Info's and the chat row's "Add to Contacts"); without one
  * the address is typed, pasted or scanned. Resolves "saved", "removed" or null (cancelled).
  */
 export function openAddressBookEditor({ address = null, suggestedName = "" } = {}) {
@@ -861,10 +865,10 @@ function ensurePicker() {
   pickerEl = document.createElement("div");
   pickerEl.className = "modal-backdrop ab-backdrop ab-picker-backdrop";
   pickerEl.hidden = true;
-  pickerEl.innerHTML = `<div class="contact-modal create-chat-modal ab-sheet ab-picker" role="dialog" aria-modal="true" aria-label="Address Book">
+  pickerEl.innerHTML = `<div class="contact-modal create-chat-modal ab-sheet ab-picker" role="dialog" aria-modal="true" aria-label="Contacts">
     <header class="create-chat-header">
       <button class="create-chat-nav-button" type="button" data-ab-picker-cancel>Cancel</button>
-      <h2>Address Book</h2>
+      <h2>Contacts</h2>
       <button class="create-chat-nav-button" type="button" data-ab-picker-done hidden></button>
     </header>
     <div data-ab-picker-body></div>
@@ -924,8 +928,8 @@ function renderPicker() {
     body.innerHTML = `
       <div class="ab-empty ab-picker-empty">
         <span class="ab-empty-icon muted">${ADDRESS_BOOK_ICONS.book}</span>
-        <strong>No saved addresses</strong>
-        <p>Add addresses in Kaspa Hub &gt; Address Book.</p>
+        <strong>No contacts yet</strong>
+        <p>Add contacts in Kaspa Hub &gt; Contacts.</p>
       </div>`;
     return;
   }
@@ -999,7 +1003,7 @@ export function pickManyFromAddressBook({ preselected = [], excluding = [] } = {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Settings > Storage > Address Book Photos
+// Settings > Storage > Contact Photos
 // ---------------------------------------------------------------------------------------------
 
 function formatBytes(bytes) {
@@ -1023,7 +1027,7 @@ async function confirmRemoveAllPhotos() {
   let bytes = 0;
   try { bytes = addressBookPhotoBytes(); } catch { bytes = 0; }
   const ok = await deps?.confirmDialog?.({
-    title: "Remove Address Book Photos?",
+    title: "Remove Contact Photos?",
     message: `Frees ${formatBytes(bytes)}. Saved addresses keep their names; they show the avatar their owner set instead.`,
     confirmLabel: "Remove",
     destructive: true,

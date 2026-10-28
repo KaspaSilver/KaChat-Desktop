@@ -28,9 +28,16 @@ import { closeActiveScanner, scanKaspaAddress, scanQrCode } from "./qr-scan.js";
 import { transactionBelongsInHistory } from "../engine/sync.js";
 import {
   recipientCardHtml, recipientStatusHtml, amountEntryHtml, layoutAmountEntry, sanitizeAmountText,
-  availablePillInnerHtml, infoPillHtml, feeControlsHtml, coinControlSummaryText, sendActionButtonHtml,
-  shortSendAddress, refreshRecipientAddressBook, pickOtherDomain, nameNotFoundText,
+  feeControlsHtml, coinControlSummaryText, refreshRecipientAddressBook, pickOtherDomain, nameNotFoundText,
+  createSwipeUpScreen, formatSompiPlain,
 } from "./send-kaspa-components.js";
+// Cold Storage's send in steps (KaPay 05db583): the shared step pieces and their look.
+import {
+  keypadHtml, wireKeypad, applyKeypadKey, stepChipHtml, stepQuestionHtml, reviewRowHtml, reviewAddressHtml,
+  keypadAmountTextHtml, paintKeypadAmount,
+} from "./send-steps.js";
+import "./send-steps.css";
+import "./coldstorage-steps.css";
 import { listPortfolios, addTransactionToPortfolio, portfolioIdsContainingTx, historicalKasPrice, parsePortfolioNumber, formatPortfolioCurrency } from "./portfolio.js";
 
 const COLD_ACCOUNTS_KEY = "kachat-cold-accounts-v1"; // account-scoped: [{ id, label, kpub, addedAt, maxIndex, labels, hidden }]
@@ -1166,9 +1173,19 @@ function refreshAddressScreen() {
 }
 
 // ---------------------------------------------------------------------------
-// KSPT send flow (iOS ColdSendFlowView): form -> build unsigned tx -> animated
-// KSPT QR for the KasSigner device -> scan the signed response back with the
-// webcam -> verify it matches what was sent for signing -> broadcast.
+// KSPT send flow (iOS ColdSendFlowView, KaPay 05db583): the steps every send has, one question a
+// screen - To ("Who are you sending to?"), the Amount on the app's own keypad ("To" / "From Cold
+// Storage" chips), then the Review (the amount, To / From / Total, the fee with Edit opening the
+// fee editor, Coin Control) ending in Build Unsigned Transaction. Then Sign with KasSigner (the
+// animated KSPT QR; Scan Signed Transaction opens the scanner and closing it returns to the QR)
+// and the signed screen: "Signed by KasSigner", the summary, and swipe up to send - the BlockDAG,
+// then Sent, or Failed with Try Again (still signed, so it goes out again without signing again).
+// Compound opens on the review. The signed transaction is checked against what was sent for
+// signing as it goes out (kspt.js broadcastSigned).
+//
+// The step screens re-render into [data-cold-send-body] with send-steps.js's markup and classes;
+// the signed screen is its own card ([data-cold-send-signed]), a createSwipeUpScreen that keeps its
+// DOM. The keypad is one element, wired once, moved into whichever step shows it.
 // ---------------------------------------------------------------------------
 
 let send = null;              // null = closed; see openSendFlow for the state shape
@@ -1177,8 +1194,17 @@ let sendScanStream = null;    // webcam MediaStream while scanning the signed re
 let sendScanRunning = false;
 let sendPreviewTimer = null;
 let sendResolveToken = 0;
+let sendSwipe = null;         // the signed screen's swipe up (createSwipeUpScreen)
+let sendKeypadEl = null;      // the keypad the Amount and fee editor steps share
+let sendShownStep = null;     // the step on screen, for which way the next one slides in
 
 const TIER_MULTIPLIER = { normal: 1n, fast: 2n, priority: 5n };
+// The order screens slide in by: a later one comes in from the right, an earlier from the left.
+const SEND_STEP_ORDER = ["to", "amount", "review", "fee", "coincontrol", "qr", "scanning", "signed", "failed"];
+// The steps before Build, where the fee preview still matters.
+const SEND_FORM_STEPS = new Set(["to", "amount", "review", "fee", "coincontrol"]);
+const STEP_BACK_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5.5 8.5 12l6.5 6.5"/></svg>';
+const SEAL_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path class="cold-send-seal" d="M12 2.4l2.3 1.7 2.8-.2 1 2.7 2.4 1.6-.8 2.7.8 2.7-2.4 1.6-1 2.7-2.8-.2L12 21.6l-2.3-1.7-2.8.2-1-2.7-2.4-1.6.8-2.7-.8-2.7 2.4-1.6 1-2.7 2.8.2z"/><path class="cold-send-seal-check" d="m8.4 12.2 2.5 2.5 4.7-4.9"/></svg>';
 
 function fmtKasBig(sompi) {
   const value = BigInt(sompi ?? 0);
@@ -1229,6 +1255,12 @@ function sendHasValidRecipient() {
   return send.validAddress && !send.resolvingKns;
 }
 
+/** More than the address being sent from holds (iOS exceedsBalance). */
+function sendExceedsBalance() {
+  const amount = sendAmountSompi();
+  return amount !== null && amount > send.availableSompi;
+}
+
 /** Reference mass: fixed 1-input/2-output guess until the input count is known; the
  *  compound flow's fixed UTXO set uses its exact count (iOS referenceMass). */
 function sendReferenceMass() {
@@ -1265,14 +1297,55 @@ function sendFeeRateOverride() {
   return (fee + mass - 1n) / mass; // ceil division
 }
 
+function sendScreenTitle() {
+  return send?.isCompound ? "Compound UTXOs" : "Send from Cold Storage";
+}
+
+/** The fee typed in the fee editor, as sompi (null while there is none). */
+function sendFeeDraftSompi() {
+  const sompi = sompiFromUserText(String(send?.feeDraft || ""));
+  return sompi != null && sompi > 0n ? sompi : null;
+}
+
+/** Whether a step's Continue can be pressed (iOS SendStepScreen canContinue). */
+function sendCanContinue(step) {
+  if (!send) return false;
+  switch (step) {
+    case "to": return sendHasValidRecipient();
+    case "amount": return sendHasValidRecipient() && sendAmountSompi() !== null && !sendExceedsBalance() && !send.estimatingMax;
+    case "review": return sendHasValidRecipient() && sendAmountSompi() !== null && !send.building && !send.estimatingMax;
+    case "fee": return sendFeeDraftSompi() !== null;
+    case "coincontrol": return !send.coinControlLoading;
+    default: return true;
+  }
+}
+
+/** Where a step's Back goes (null: a first step, which has Cancel at the bottom instead). */
+function sendBackTarget(step) {
+  if (step === "amount") return "to";
+  if (step === "review") return send?.isCompound ? null : "amount";
+  if (step === "qr") return "review";
+  return null;
+}
+
+function sendAvailableSompi(entry) {
+  if (addrUtxos.state === "ready") {
+    try { return addrUtxos.entries.reduce((sum, u) => sum + BigInt(u.amount ?? 0), 0n); } catch { /* the listed balance */ }
+  }
+  try { return BigInt(entry.balanceSompi || 0); } catch { return 0n; }
+}
+
 async function openSendFlow({ compound = false } = {}) {
   const entry = detailEntries.find((e) => e.index === activeAddressIndex);
   if (!entry) return;
   send = {
-    step: "form",
+    // "to" | "amount" | "review" | "fee" | "coincontrol" | "qr" | "scanning" | "signed" | "failed"
+    step: compound ? "review" : "to",
     isCompound: compound,
     fromAddress: entry.address,
-    availableSompi: BigInt(entry.balanceSompi || 0),
+    // What the address screen shows: its UTXOs' total once loaded, else the listed balance. The
+    // Amount step says when the amount is more than this.
+    availableSompi: sendAvailableSompi(entry),
     toInput: compound ? entry.address : "",
     resolvedAddress: null,
     resolvedDomain: null,
@@ -1282,9 +1355,12 @@ async function openSendFlow({ compound = false } = {}) {
     amountText: "",
     amountUnit: "kas", // "kas" | "fiat" — which unit the amount field is typed in
     price: null,       // live KAS price in the user's selected currency
+    // True while the amount is an untouched Max: a fee or coin control change works it out again.
+    maxMode: false,
+    maxAgain: false,
     feeTier: "normal",
     customExtraFeeSompi: null,
-    editingFee: false,
+    feeDraft: "",      // the fee editor's typed fee
     liveFeeRate: null,
     preview: null,
     manualUtxoKeys: null,
@@ -1296,48 +1372,67 @@ async function openSendFlow({ compound = false } = {}) {
     coinControlSelection: [],
     compoundHasMore: false,
     estimatingMax: false,
+    building: false,
     error: null,
     unsigned: null,
+    // What was built: the amount and recipient the QR, the signed screen and Sent show.
+    builtAmountSompi: null,
+    builtRecipient: null,
     frames: [],
     frameIndex: 0,
     playing: true,
     scanProgress: null,
+    // The scanned signed transaction, kept so a failed broadcast can go out again unsigned-again.
+    decoded: null,
+    broadcasting: false,
+    broadcastError: null,
+    sent: false,
     txId: null,
   };
+  sendShownStep = null;
+  sendSwipe?.reset();
   const modal = modalsEl.querySelector("[data-cold-send-modal]");
   if (modal) modal.hidden = false;
   renderSendFlow();
+  const flow = send;
 
-  // Fetched once and reused everywhere the fee needs computing (form preview, QR screen,
+  // Fetched once and reused everywhere the fee needs computing (review preview, QR screen,
   // real build) so all three show the same number — iOS liveFeeRateSompiPerGram.
   fetchQuotedFeeRateSompiPerGram().then((rate) => {
-    if (!send) return;
-    send.liveFeeRate = rate;
+    if (send !== flow) return;
+    flow.liveFeeRate = rate;
     scheduleSendPreview();
-    renderSendFlow();
+    if (flow.step === "review") renderSendFlow();
+    else if (flow.step === "fee") paintSendFeeEditor();
   });
 
   // Live KAS price for the fiat toggle + conversion hint (best-effort — the flow works
   // KAS-only without it, the toggle just explains the price is unavailable).
   deps.fetchKasPrice?.().then((price) => {
-    if (!send) return;
-    send.price = Number(price) || null;
+    if (send !== flow) return;
+    flow.price = Number(price) || null;
     updateSendConversionHint();
   }).catch(() => { /* KAS-only is fine */ });
 
-  if (compound) {
-    try {
-      const { utxoKeys, hasMore } = await compoundInputs({ engine: deps.engine, fromAddress: entry.address });
-      if (!send) return;
-      send.manualUtxoKeys = utxoKeys;
-      send.compoundHasMore = hasMore;
-      await sendSetMax();
-    } catch (error) {
-      if (!send) return;
-      send.step = "failed";
-      send.error = error.message;
-      renderSendFlow();
-    }
+  if (compound) await setupSendCompound();
+}
+
+/** Compound UTXOs: the largest set one KasSigner transaction can hold, then Max for exactly it
+ *  (iOS setupCompoundInputs). */
+async function setupSendCompound() {
+  const flow = send;
+  if (!flow) return;
+  try {
+    const { utxoKeys, hasMore } = await compoundInputs({ engine: deps.engine, fromAddress: flow.fromAddress });
+    if (send !== flow) return;
+    flow.manualUtxoKeys = utxoKeys;
+    flow.compoundHasMore = hasMore;
+    await sendSetMax();
+  } catch (error) {
+    if (send !== flow) return;
+    flow.step = "failed";
+    flow.error = error.message;
+    renderSendFlow();
   }
 }
 
@@ -1347,8 +1442,23 @@ function closeSendFlow() {
   closeActiveScanner(); // a recipient scan opened from this sheet must not outlive it
   if (sendPreviewTimer) { clearTimeout(sendPreviewTimer); sendPreviewTimer = null; }
   send = null;
+  sendShownStep = null;
+  sendSwipe?.reset();
   const modal = modalsEl?.querySelector("[data-cold-send-modal]");
   if (modal) modal.hidden = true;
+}
+
+/** Done on Sent: close, and open the address again so its balance, history and UTXOs refresh. */
+function finishSendFlow() {
+  const reopenIndex = activeAddressIndex;
+  closeSendFlow();
+  if (reopenIndex !== null) openAddressScreen(reopenIndex);
+}
+
+function goSendStep(step) {
+  if (!send) return;
+  send.step = step;
+  renderSendFlow();
 }
 
 function scheduleSendPreview() {
@@ -1358,16 +1468,24 @@ function scheduleSendPreview() {
   const amountSompi = sendAmountSompi();
   if (send.manualUtxoKeys || amountSompi === null) return;
   const rate = sendFeeRateOverride();
+  const flow = send;
   sendPreviewTimer = window.setTimeout(async () => {
-    if (!send) return;
+    if (send !== flow) return;
     const preview = await previewAutomaticSelection({
-      engine: deps.engine, fromAddress: send.fromAddress, amountSompi, feeRateSompiPerGram: rate,
+      engine: deps.engine, fromAddress: flow.fromAddress, amountSompi, feeRateSompiPerGram: rate,
     });
-    if (!send || send.step !== "form") return;
+    if (send !== flow || !SEND_FORM_STEPS.has(flow.step)) return;
     if (sendAmountSompi() !== amountSompi) return; // superseded by newer input
-    send.preview = preview;
-    renderSendFlow();
+    flow.preview = preview;
+    // Only the review shows the fee; re-rendering another step would take a field's focus.
+    if (flow.step === "review") renderSendFlow();
   }, 400);
+}
+
+/** The fee or the coins changed: the preview again, and a Max amount worked out again. */
+function afterSendFeeChange() {
+  scheduleSendPreview();
+  if (send?.maxMode) sendSetMax({ refill: true });
 }
 
 function handleSendRecipientInput(raw) {
@@ -1425,27 +1543,37 @@ function handleSendRecipientInput(raw) {
   }
 }
 
-async function sendSetMax() {
-  if (!send || !sendHasValidRecipient() || send.estimatingMax) return;
-  send.estimatingMax = true;
+/** Max (iOS setMaxAmount). `refill`: the fee or coins changed under a Max amount, so it is worked
+ *  out again - after the one already running, if one is. */
+async function sendSetMax({ refill = false } = {}) {
+  if (!send || !sendHasValidRecipient()) return;
+  if (send.estimatingMax) { if (refill) send.maxAgain = true; return; }
+  const flow = send;
+  flow.estimatingMax = true;
   renderSendFlow();
   try {
     const maxSompi = await estimateMaxAmount({
       engine: deps.engine,
-      fromAddress: send.fromAddress,
+      fromAddress: flow.fromAddress,
       feeRateOverride: sendFeeRateOverride(),
-      manualUtxoKeys: send.manualUtxoKeys,
+      manualUtxoKeys: flow.manualUtxoKeys,
     });
-    if (!send) return;
+    if (send !== flow) return;
     const maxKas = Number(maxSompi) / 1e8;
     // Reflect Max into whichever unit is currently being typed (iOS setMaxKas). A currency amount
     // is rounded DOWN, so it never converts back to more than Max (audit DSK-042).
-    send.amountText = send.amountUnit === "fiat" && send.price > 0
-      ? fiatTextFloorFromSompi(maxSompi, send.price, (deps.currencyCode?.() || "") === "BTC" ? 8 : 2)
+    flow.amountText = flow.amountUnit === "fiat" && flow.price > 0
+      ? fiatTextFloorFromSompi(maxSompi, flow.price, (deps.currencyCode?.() || "") === "BTC" ? 8 : 2)
       : maxKas.toFixed(8);
+    flow.maxMode = true;
   } catch { /* leave amount as-is */ }
-  if (!send) return;
-  send.estimatingMax = false;
+  if (send !== flow) return;
+  flow.estimatingMax = false;
+  if (flow.maxAgain) {
+    flow.maxAgain = false;
+    sendSetMax({ refill: true });
+    return;
+  }
   scheduleSendPreview();
   renderSendFlow();
 }
@@ -1457,28 +1585,29 @@ async function sendSetMax() {
 /// last look must not still be tickable.
 async function openCoinControl() {
   if (!send) return;
-  send.step = "coincontrol";
-  send.coinControlLoading = true;
-  send.coinControlSelection = send.manualUtxoKeys ? [...send.manualUtxoKeys] : [];
-  send.coinControlError = null;
+  const flow = send;
+  flow.step = "coincontrol";
+  flow.coinControlLoading = true;
+  flow.coinControlSelection = flow.manualUtxoKeys ? [...flow.manualUtxoKeys] : [];
+  flow.coinControlError = null;
   renderSendFlow();
   let utxos = [];
   try {
-    utxos = await fetchSpendableUtxos(deps.engine, send.fromAddress);
+    utxos = await fetchSpendableUtxos(deps.engine, flow.fromAddress);
   } catch (error) {
-    if (!send) return;
+    if (send !== flow) return;
     // Said in place of "no coins" (iOS CoinControlView.loadError): an outage must never read as
     // an empty address when the coins here are about to be spent.
-    send.coinControlError = userFacingError(error);
+    flow.coinControlError = userFacingError(error);
   }
-  if (!send || send.step !== "coincontrol") return;
+  if (send !== flow || flow.step !== "coincontrol") return;
   // In the node's order, as iOS lists them.
-  send.coinControlUtxos = [...utxos];
+  flow.coinControlUtxos = [...utxos];
   // Drop anything that has been spent since the selection was made, rather than carrying a key
   // the build would fail on.
-  const live = new Set(send.coinControlUtxos.map(utxoKey));
-  send.coinControlSelection = send.coinControlSelection.filter((k) => live.has(k));
-  send.coinControlLoading = false;
+  const live = new Set(flow.coinControlUtxos.map(utxoKey));
+  flow.coinControlSelection = flow.coinControlSelection.filter((k) => live.has(k));
+  flow.coinControlLoading = false;
   renderSendFlow();
 }
 
@@ -1487,43 +1616,69 @@ async function openCoinControl() {
 function commitCoinControl() {
   if (!send) return;
   send.manualUtxoKeys = send.coinControlSelection.length ? [...send.coinControlSelection] : null;
-  send.step = "form";
+  send.step = "review";
   // The fee depends on the input count, and the automatic preview is only meaningful without a
   // manual set, so both have to be recomputed rather than left showing the previous answer.
-  scheduleSendPreview();
+  afterSendFeeChange();
+  renderSendFlow();
+}
+
+/** The review's fee Edit (iOS onEditFee): the fee editor, holding the fee shown now. */
+function openSendFeeEditor() {
+  if (!send || send.building) return;
+  send.feeDraft = formatSompiPlain(sendEffectiveFee());
+  goSendStep("fee");
+}
+
+/** Confirm in the fee editor: the typed total, never under the network's minimum (iOS feeStep). */
+function confirmSendFee() {
+  if (!send) return;
+  const typed = sendFeeDraftSompi();
+  if (typed === null) return;
+  const base = sendDefaultFee();
+  send.customExtraFeeSompi = typed > base ? typed - base : 0n;
+  send.step = "review";
+  afterSendFeeChange();
   renderSendFlow();
 }
 
 async function sendBuild() {
   const amountSompi = sendAmountSompi();
-  if (!send || !sendHasValidRecipient() || amountSompi === null) return;
-  send.step = "building";
-  send.error = null;
+  if (!send || send.building || !sendHasValidRecipient() || amountSompi === null) return;
+  const flow = send;
+  const toAddress = sendEffectiveAddress();
+  flow.building = true;
+  flow.error = null;
   renderSendFlow();
   try {
     // Real coin control (compound's fixed set) wins; else a fresh automatic preview's
     // exact set passes through so the shown fee and the built fee are the same number.
     const unsigned = await buildUnsignedTransaction({
       engine: deps.engine,
-      fromAddress: send.fromAddress,
-      toAddress: sendEffectiveAddress(),
+      fromAddress: flow.fromAddress,
+      toAddress,
       amountSompi,
       feeRateOverride: sendFeeRateOverride(),
-      manualUtxoKeys: send.manualUtxoKeys ?? send.preview?.utxoKeys ?? null,
+      manualUtxoKeys: flow.manualUtxoKeys ?? flow.preview?.utxoKeys ?? null,
     });
-    if (!send) return;
-    send.unsigned = unsigned;
-    send.frames = chunkQrFrames(unsignedToKsptBytes(unsigned));
-    send.frameIndex = 0;
-    send.playing = true;
-    send.step = "qr";
+    if (send !== flow) return;
+    flow.unsigned = unsigned;
+    flow.frames = chunkQrFrames(unsignedToKsptBytes(unsigned));
+    flow.frameIndex = 0;
+    flow.playing = true;
+    flow.builtAmountSompi = amountSompi;
+    flow.builtRecipient = { address: toAddress, name: flow.resolvedDomain || null };
+    flow.decoded = null;
+    flow.building = false;
+    flow.step = "qr";
     renderSendFlow();
     startSendFrameTimer();
   } catch (error) {
     // A build that fails goes to the failed screen with Try Again (iOS buildTransaction).
-    if (!send) return;
-    send.step = "failed";
-    send.error = error.message;
+    if (send !== flow) return;
+    flow.building = false;
+    flow.step = "failed";
+    flow.error = error.message;
     renderSendFlow();
   }
 }
@@ -1569,11 +1724,23 @@ async function drawSendFrame() {
   if (playBtn) playBtn.textContent = send.playing ? "⏸" : "▶";
 }
 
+/** Back on the QR (the scanner closed, or Back from the signed screen), its frames running again. */
+function returnToSendQr() {
+  if (!send?.unsigned) return;
+  stopSendScan();
+  send.cameraDenied = false;
+  send.decoded = null;
+  send.step = "qr";
+  renderSendFlow();
+  startSendFrameTimer();
+}
+
 // --- Signed-response scanning: webcam + jsQR (BarcodeDetector only returns strings,
 // which corrupts the binary signature bytes — jsQR's binaryData preserves them) -----
 
 async function startSendScan() {
   if (!send) return;
+  stopSendFrameTimer();
   send.step = "scanning";
   send.scanProgress = null;
   send.cameraDenied = false;
@@ -1588,6 +1755,8 @@ async function startSendScan() {
     renderSendFlow();
     return;
   }
+  // Closed (or back on the QR) while the camera was being asked for: let it go at once.
+  if (!send || send.step !== "scanning" || !video.isConnected) { stopSendScan(); return; }
   video.srcObject = sendScanStream;
   sendScanRunning = true;
 
@@ -1628,22 +1797,64 @@ function stopSendScan() {
   sendScanStream = null;
 }
 
-async function handleSignedResponse(bytes) {
+/** The signed transaction scanned back (iOS handleScannedSignedResponse): decoded, then the signed
+ *  screen with swipe up to send. Nothing goes out until the swipe. */
+function handleSignedResponse(bytes) {
   if (!send) return;
-  send.step = "broadcasting";
-  renderSendFlow();
+  let decoded;
   try {
-    const decoded = decodeKspt(bytes);
-    const txId = await broadcastSigned({ engine: deps.engine, unsigned: send.unsigned, decoded });
-    if (!send) return;
-    send.txId = txId;
-    send.step = "success";
+    decoded = decodeKspt(bytes);
+    // The unsigned QR scanned back is not "Signed by KasSigner".
+    if (!decoded.signed) throw new Error("Scanned transaction is not signed");
   } catch (error) {
-    if (!send) return;
     send.step = "failed";
     send.error = error.message;
+    renderSendFlow();
+    return;
   }
+  send.decoded = decoded;
+  send.broadcastError = null;
+  send.broadcasting = false;
+  send.sent = false;
+  send.txId = null;
+  sendSwipe?.reset();
+  send.step = "signed";
   renderSendFlow();
+}
+
+/** The swipe let go (iOS broadcast): the signed transaction goes out - checked against what was
+ *  sent for signing first. A failure leaves it signed: Try Again sends the same one again. */
+async function sendBroadcast() {
+  const flow = send;
+  if (!flow?.decoded || !flow.unsigned || flow.broadcasting || flow.sent) return;
+  flow.broadcasting = true;
+  flow.broadcastError = null;
+  sendSwipe?.setBusy(true);
+  try {
+    const txId = await broadcastSigned({ engine: deps.engine, unsigned: flow.unsigned, decoded: flow.decoded });
+    if (send !== flow) return;
+    flow.txId = txId;
+    flow.sent = true;
+    flow.broadcasting = false;
+    sendSwipe?.setSent({
+      txid: txId,
+      amountSompi: flow.isCompound ? null : flow.builtAmountSompi,
+      recipient: flow.isCompound ? null : sendBuiltRecipientText(),
+      explorerUrl: txId ? deps.explorerTxUrl(txId) : null,
+    });
+    sendSwipe?.setBusy(false);
+    sendSwipe?.setEnabled(false);
+  } catch (error) {
+    if (send !== flow) return;
+    flow.broadcasting = false;
+    flow.broadcastError = error?.message || String(error || "");
+    sendSwipe?.setBusy(false);
+  }
+}
+
+/** Who the built transaction pays: the name it resolved from, else the address. */
+function sendBuiltRecipientText() {
+  return send?.builtRecipient?.name || send?.builtRecipient?.address || null;
 }
 
 // --- Send flow rendering ----------------------------------------------------
@@ -1687,21 +1898,52 @@ function updateSendConversionHint() {
   layoutAmountEntry(modalsEl?.querySelector("[data-cold-send-amount]"), modalsEl?.querySelector("[data-cold-send-unit-code]"));
 }
 
+/** Under the amount: more than the address holds, else what it holds (iOS footnote). */
+function paintSendAmountNote() {
+  const note = modalsEl?.querySelector("[data-cold-send-amount-note]");
+  if (!note || !send) return;
+  const exceeds = sendExceedsBalance();
+  note.textContent = exceeds
+    ? "This is more than the address you're sending from holds."
+    : `Available: ${fmtKasBig(send.availableSompi)} ${KAS_UNIT}`;
+  note.classList.toggle("error", exceeds);
+}
+
+function paintSendContinue() {
+  const button = modalsEl?.querySelector("[data-cold-send-body] [data-cold-send-continue]");
+  if (button && send) button.disabled = !sendCanContinue(send.step);
+}
+
+/** The fee editor's number and what it says under it (iOS SendFeeEditorScreen): the network's
+ *  minimum, and a warning past ten times it. */
+function paintSendFeeEditor() {
+  if (!send || send.step !== "fee") return;
+  paintKeypadAmount(modalsEl?.querySelector("[data-cold-send-fee-amount]"), send.feeDraft, KAS_UNIT);
+  const note = modalsEl?.querySelector("[data-cold-send-fee-note]");
+  if (note) {
+    const typed = sendFeeDraftSompi();
+    const minimum = sendDefaultFee();
+    const high = typed !== null && minimum > 0n && typed > minimum * 10n;
+    const minimumText = `The network needs at least ${formatSompiPlain(minimum)} ${KAS_UNIT}. A lower fee is raised to that.`;
+    note.textContent = high ? `This is much more than the network needs. ${minimumText}` : minimumText;
+    note.classList.toggle("warn", high);
+  }
+  paintSendContinue();
+}
+
 function renderSendStatusOnly() {
   if (!send) return;
   const holder = modalsEl?.querySelector("[data-cold-send-status]");
   if (holder) holder.innerHTML = sendRecipientStatusHtml();
   const cardHost = modalsEl?.querySelector("[data-cold-send-resolution]");
   if (cardHost) cardHost.innerHTML = sendRecipientCardHtml();
-  const check = modalsEl?.querySelector("[data-cold-send-check]");
-  if (check) check.hidden = !(send.toInput.trim() && sendHasValidRecipient());
-  // The saved Address Book name for what the recipient resolved to (iOS 00767a4).
+  // The saved contact name for what the recipient resolved to (iOS 00767a4).
   if (!send.isCompound) refreshRecipientAddressBook(modalsEl, "cold-send", send.resolvedAddress || send.toInput.trim());
-  const buildBtn = modalsEl?.querySelector("[data-cold-send-build]");
-  if (buildBtn && send.step === "form") buildBtn.disabled = !(sendHasValidRecipient() && sendAmountSompi() !== null);
   const maxBtn = modalsEl?.querySelector("[data-cold-send-max]");
   if (maxBtn && !send.estimatingMax) maxBtn.disabled = !(send.validAddress || send.resolvedAddress);
   updateSendConversionHint();
+  paintSendAmountNote();
+  paintSendContinue();
   scheduleSendPreview();
 }
 
@@ -1716,251 +1958,392 @@ function renderSendScanProgress() {
     <p class="cold-send-scan-count">${received} / ${total} frames</p>`;
 }
 
-function renderSendFlow() {
-  const body = modalsEl?.querySelector("[data-cold-send-body]");
-  if (!body || !send) return;
-  // The signed-response scanner is its own screen on iOS (MultiFrameQRScannerView), titled for it.
-  const title = send.step === "scanning" ? "Scan Signed Transaction" : send.isCompound ? "Compound UTXOs" : "Send from Cold Storage";
-  const shortFrom = `${send.fromAddress.slice(0, 14)}...${send.fromAddress.slice(-6)}`;
+/**
+ * One step screen in send-steps.js's markup (iOS SendStepScreen): the header (Back, the title and
+ * Cancel; a first step only the title), the body, and the bar - Continue, beside Cancel on a first
+ * step. `cancelAttr` is the bottom Cancel's action (closing the send unless a step says otherwise);
+ * `continueTitle: null` leaves Continue out.
+ */
+function sendStepScreenHtml({ step, title, bodyHtml, className = "", continueTitle = "Continue", cancelAttr = "data-cold-send-close", cancelTitle = "Cancel" }) {
+  const back = sendBackTarget(step) != null;
+  const esc = deps.escapeHtml;
+  return `
+    <section class="ss-step${back ? "" : " ss-first"}${className ? ` ${className}` : ""}" data-cold-send-step="${esc(step)}">
+      <header class="ss-head">
+        ${back ? `<button type="button" class="ss-back" data-cold-send-back aria-label="Back">${STEP_BACK_ICON}</button>` : ""}
+        <h2 class="ss-title">${esc(title)}</h2>
+        ${back ? `<button type="button" class="ss-cancel" data-cold-send-close>Cancel</button>` : ""}
+      </header>
+      <div class="ss-body">${bodyHtml}</div>
+      <div class="ss-bar">
+        ${back ? "" : `<button type="button" class="ss-bar-cancel" ${cancelAttr}>${esc(cancelTitle)}</button>`}
+        ${continueTitle == null ? "" : `<button type="button" class="ss-continue" data-cold-send-continue ${sendCanContinue(step) ? "" : "disabled"}>${esc(continueTitle)}</button>`}
+      </div>
+    </section>`;
+}
 
-  const header = `
-    <div class="modal-header">
-      <div><h2>${title}</h2></div>
-      <button class="modal-close" type="button" data-cold-send-close aria-label="Close">×</button>
+/** "You're sending" / "Consolidating" over the big amount (iOS review). */
+function sendReviewAmountHtml(amountSompi) {
+  const eyebrow = `<span class="ss-review-eyebrow">${send.isCompound ? "Consolidating" : "You're sending"}</span>`;
+  if (amountSompi == null) return `<div class="ss-review-amount">${eyebrow}<span class="sk-spinner" aria-hidden="true"></span></div>`;
+  return `<div class="ss-review-amount">${eyebrow}<strong class="ss-review-big">${deps.escapeHtml(`${formatSompiPlain(amountSompi)} ${KAS_UNIT}`)}</strong></div>`;
+}
+
+function sendToRowValueHtml(recipient) {
+  if (send.isCompound) return deps.escapeHtml("This address (consolidating)");
+  return reviewAddressHtml({ name: recipient?.name || null, address: recipient?.address || "" });
+}
+
+/** To, From, the fee and the total, as built (iOS summaryCard). */
+function sendSummaryCardHtml() {
+  const fee = BigInt(send.unsigned?.feeSompi ?? 0);
+  const amount = send.builtAmountSompi;
+  return `
+    <div class="sk-card ss-review-card">
+      ${reviewRowHtml("To", sendToRowValueHtml(send.builtRecipient))}
+      ${reviewRowHtml("From", reviewAddressHtml({ name: "Cold Storage", address: send.fromAddress }))}
+      ${reviewRowHtml("Network Fee", deps.escapeHtml(`${formatSompiPlain(fee)} ${KAS_UNIT}`))}
+      ${amount != null ? reviewRowHtml("Total", `<strong>${deps.escapeHtml(`${formatSompiPlain(amount + fee)} ${KAS_UNIT}`)}</strong>`) : ""}
     </div>`;
+}
 
-  if (send.step === "form" || send.step === "building") {
-    const building = send.step === "building";
-    const canBuild = sendHasValidRecipient() && sendAmountSompi() !== null;
-    const feeText = `~${fmtKasBig(sendEffectiveFee())} ${KAS_UNIT}`;
-    // The same pieces as every Send Kaspa screen (send-kaspa-components.js, iOS 4d0324f): the
-    // recipient card (locked to this address for Compound UTXOs), the amount entry, the
-    // Available / From pills, the fee card with Coin Control, and - KasSigner signs, so nothing
-    // moves here - a plain Build Unsigned Transaction button instead of slide to send.
-    body.innerHTML = `
-      ${header}
-      <div class="sk-screen">
-        <div class="sk-pills">
-          ${infoPillHtml({ innerHtml: `From <code class="sk-pill-mono">${deps.escapeHtml(shortFrom)}</code>` })}
-          ${infoPillHtml({ innerHtml: availablePillInnerHtml({ text: `Available ${fmtKasBig(send.availableSompi)} ${KAS_UNIT}` }) })}
-        </div>
-        ${recipientCardHtml({
-          prefix: "cold-send",
-          value: send.toInput,
-          lockedAddress: send.isCompound ? send.fromAddress : null,
-          valid: Boolean(send.toInput.trim()) && sendHasValidRecipient(),
-          statusHtml: send.isCompound ? "" : sendRecipientStatusHtml(),
-          cardHtml: send.isCompound ? "" : sendRecipientCardHtml(),
-          savedNameAddress: send.resolvedAddress || send.toInput.trim(),
-        })}
-        ${send.isCompound ? `<p class="sk-caption">${send.compoundHasMore
-          ? `This address has more than ${KSPT_MAX_INPUTS} UTXOs. KasSigner can sign at most ${KSPT_MAX_INPUTS} inputs per transaction, so this merges the largest ${KSPT_MAX_INPUTS} into one. Run Compound again afterward to keep combining the rest.`
-          : "Merges all of this address's UTXOs into a single one, so future sends need fewer inputs."}</p>` : ""}
-        ${amountEntryHtml({
-          prefix: "cold-send",
-          value: send.amountText,
-          unitText: send.amountUnit === "kas" ? KAS_UNIT : (deps.currencyCode?.() || "USD"),
-          conversionText: sendConversionLabel(),
-          showToggle: send.price > 0,
-          maxDisabled: !(send.validAddress || send.resolvedAddress),
-          maxBusy: send.estimatingMax,
-          ariaLabel: send.amountUnit === "kas" ? `Amount (${KAS_UNIT})` : `Amount (${deps.currencyCode?.() || "USD"})`,
-        })}
-        ${feeControlsHtml({
-          prefix: "cold-send",
-          feeText,
-          editing: send.editingFee,
-          customValue: fmtKasBig(sendEffectiveFee()),
-          tier: send.customExtraFeeSompi !== null ? null : send.feeTier,
-          showCoinControl: !send.isCompound,
-          coinSummary: coinControlSummaryText(send.manualUtxoKeys?.length || 0),
-        })}
-        ${send.error ? `<p class="field-error sk-error">${deps.escapeHtml(send.error)}</p>` : ""}
-        ${sendActionButtonHtml({
-          attr: "cold-send-build",
-          title: "Build Unsigned Transaction",
-          requiresSlide: false,
-          disabled: !canBuild,
-          busy: building,
-          busyLabel: "",
-        })}
-      </div>`;
-    if (send.editingFee) {
-      const feeInput = body.querySelector("[data-cold-send-fee-custom]");
-      feeInput?.focus();
-      feeInput?.select?.();
+function sendStepHtml() {
+  const esc = deps.escapeHtml;
+  const title = sendScreenTitle();
+  switch (send.step) {
+    case "to":
+      return sendStepScreenHtml({
+        step: "to", title,
+        bodyHtml: `
+          ${stepQuestionHtml("Who are you sending to?")}
+          ${recipientCardHtml({
+            prefix: "cold-send",
+            value: send.toInput,
+            lockedAddress: send.isCompound ? send.fromAddress : null,
+            valid: Boolean(send.toInput.trim()) && sendHasValidRecipient(),
+            statusHtml: send.isCompound ? "" : sendRecipientStatusHtml(),
+            cardHtml: send.isCompound ? "" : sendRecipientCardHtml(),
+            savedNameAddress: send.resolvedAddress || send.toInput.trim(),
+          })}`,
+      });
+
+    case "amount": {
+      const unitCode = deps.currencyCode?.() || "USD";
+      return sendStepScreenHtml({
+        step: "amount", title, className: "ss-amount-step", continueTitle: "Review",
+        bodyHtml: `
+          <div class="ss-chips">
+            ${stepChipHtml({ label: "To", value: send.resolvedDomain || sendEffectiveAddress(), isAddress: !send.resolvedDomain })}
+            ${stepChipHtml({ label: "From", value: "Cold Storage" })}
+          </div>
+          <div class="ss-keypad-stage">
+            ${amountEntryHtml({
+              prefix: "cold-send",
+              value: send.amountText,
+              unitText: send.amountUnit === "kas" ? KAS_UNIT : unitCode,
+              conversionText: sendConversionLabel(),
+              showToggle: send.price > 0,
+              maxDisabled: !(send.validAddress || send.resolvedAddress),
+              maxBusy: send.estimatingMax,
+              ariaLabel: send.amountUnit === "kas" ? `Amount (${KAS_UNIT})` : `Amount (${unitCode})`,
+            })}
+            <p class="ss-footnote" data-cold-send-amount-note></p>
+          </div>
+          <div data-cold-send-keypad-slot></div>`,
+      });
     }
-    return;
-  }
 
-  if (send.step === "coincontrol") {
-    const labels = coldUtxoLabels(send.fromAddress);
-    const selected = new Set(send.coinControlSelection);
-    const utxos = send.coinControlUtxos || [];
-    const selectedTotal = utxos
-      .filter((u) => selected.has(utxoKey(u)))
-      .reduce((sum, u) => sum + BigInt(u.amountSompi), 0n);
-    body.innerHTML = `
-      <div class="modal-head">
-        <div><h2>Coin Control</h2></div>
-        <button class="modal-close" type="button" data-cold-coincontrol-cancel aria-label="Close">×</button>
-      </div>
-      ${send.coinControlLoading
-        ? COLD_LIST_SPINNER
-        : utxos.length === 0
-          ? (send.coinControlError
-            ? utxoLoadFailureHtml(send.coinControlError, "data-cold-coincontrol-retry")
-            : `<p class="field-hint">No UTXOs found at this address.</p>`)
+    case "review": {
+      const amount = sendAmountSompi();
+      const fee = sendEffectiveFee();
+      const total = amount != null
+        ? `<strong>${esc(`~${formatSompiPlain(amount + fee)} ${KAS_UNIT}`)}</strong>`
+        : '<span class="ss-review-address">—</span>';
+      return sendStepScreenHtml({
+        step: "review",
+        title: send.isCompound ? "Compound UTXOs" : "Review",
+        // A tap, not a swipe: this only builds the transaction for KasSigner to sign.
+        continueTitle: send.building ? "Building..." : "Build Unsigned Transaction",
+        bodyHtml: `
+          <div class="ss-review-stack">
+            ${sendReviewAmountHtml(amount)}
+            <div class="sk-card ss-review-card">
+              ${reviewRowHtml("To", sendToRowValueHtml({ name: send.resolvedDomain, address: sendEffectiveAddress() }))}
+              ${reviewRowHtml("From", reviewAddressHtml({ name: "Cold Storage", address: send.fromAddress }))}
+              ${reviewRowHtml("Total", total)}
+            </div>
+            ${send.isCompound ? `<p class="sk-caption cold-send-center">${send.compoundHasMore
+              ? `This address has more than ${KSPT_MAX_INPUTS} UTXOs. KasSigner can sign at most ${KSPT_MAX_INPUTS} inputs per transaction, so this merges the largest ${KSPT_MAX_INPUTS} into one. Run Compound again afterward to keep combining the rest.`
+              : "Merges all of this address's UTXOs into a single one, so future sends need fewer inputs."}</p>` : ""}
+            ${feeControlsHtml({
+              prefix: "cold-send",
+              feeText: `~${formatSompiPlain(fee)} ${KAS_UNIT}`,
+              tier: send.customExtraFeeSompi !== null ? null : send.feeTier,
+              // Compound manages its own input set (the largest KasSigner can sign at once).
+              showCoinControl: !send.isCompound,
+              coinSummary: coinControlSummaryText(send.manualUtxoKeys?.length || 0),
+              editPill: true,
+            })}
+            ${send.error ? `<p class="field-error sk-error">${esc(send.error)}</p>` : ""}
+          </div>`,
+      });
+    }
+
+    case "fee":
+      // iOS SendFeeEditorScreen (send-steps.js createFeeEditorStep): Cancel goes back to the review.
+      return sendStepScreenHtml({
+        step: "fee", title: "Network Fee", className: "ss-fee-step", continueTitle: "Confirm",
+        cancelAttr: "data-cold-send-fee-cancel",
+        bodyHtml: `
+          <h3 class="ss-question ss-center">Set your network fee</h3>
+          <div class="ss-keypad-stage">
+            ${keypadAmountTextHtml({ typed: send.feeDraft, unit: KAS_UNIT, attr: "cold-send-fee-amount" })}
+            <p class="ss-footnote" data-cold-send-fee-note>&nbsp;</p>
+          </div>
+          <div data-cold-send-keypad-slot></div>`,
+      });
+
+    case "coincontrol": {
+      const labels = coldUtxoLabels(send.fromAddress);
+      const selected = new Set(send.coinControlSelection);
+      const utxos = send.coinControlUtxos || [];
+      const selectedTotal = utxos
+        .filter((u) => selected.has(utxoKey(u)))
+        .reduce((sum, u) => sum + BigInt(u.amountSompi), 0n);
+      return sendStepScreenHtml({
+        step: "coincontrol", title: "Coin Control", className: "cold-send-coin-step",
+        continueTitle: selected.size ? "Confirm Selection" : "Use Automatic Selection",
+        // Cancel leaves the existing selection alone - a way out of the picker, not a reset.
+        cancelAttr: "data-cold-coincontrol-cancel",
+        bodyHtml: send.coinControlLoading
+          ? COLD_LIST_SPINNER
+          : utxos.length === 0
+            ? (send.coinControlError
+              ? utxoLoadFailureHtml(send.coinControlError, "data-cold-coincontrol-retry")
+              : `<p class="field-hint">No UTXOs found at this address.</p>`)
+            : `
+          <div class="cold-coincontrol-actions">
+            <button type="button" class="cold-inline-link" data-cold-coincontrol-all>Select All</button>
+            <button type="button" class="cold-inline-link" data-cold-coincontrol-none>Automatic (Clear Selection)</button>
+          </div>
+          <div class="cold-coincontrol-list">
+            ${utxos.map((utxo) => {
+              const key = utxoKey(utxo);
+              const isOn = selected.has(key);
+              const label = labels[key];
+              return `
+              <button type="button" class="cold-coincontrol-row${isOn ? " selected" : ""}" data-cold-coincontrol-toggle="${esc(key)}">
+                <span class="cold-coincontrol-check" aria-hidden="true">${isOn ? CHECK_ICON : CIRCLE_ICON}</span>
+                <span class="cold-coincontrol-copy">
+                  ${label ? `<span class="cold-coincontrol-label">${esc(label)}</span>` : ""}
+                  <span class="cold-coincontrol-amount">${fmtKasExact(utxo.amountSompi)} ${KAS_UNIT}</span>
+                  <span class="cold-coincontrol-outpoint">${esc(String(utxo.transactionId).slice(0, 10))}...:${utxo.index}</span>
+                </span>
+              </button>`;
+            }).join("")}
+          </div>
+          ${selected.size ? `<p class="field-hint cold-coincontrol-total">Selected: ${fmtKasExact(selectedTotal)} ${KAS_UNIT} (${selected.size} UTXO${selected.size === 1 ? "" : "s"})</p>` : ""}`,
+      });
+    }
+
+    case "qr":
+      // Sign with KasSigner (iOS qrStep): the animated QR on its own white card (a camera needs
+      // the contrast in dark mode too), its frame controls, what KasSigner will show, the summary.
+      return sendStepScreenHtml({
+        step: "qr", title: "Sign with KasSigner", className: "cold-send-qr-step", continueTitle: "Scan Signed Transaction",
+        bodyHtml: `
+          ${stepQuestionHtml("Scan this on your KasSigner")}
+          <div class="cold-send-qr-panel">
+            <div class="cold-qr-frame"><canvas width="480" height="480" data-cold-send-qr-canvas></canvas></div>
+            ${send.frames.length > 1 ? `
+              <div class="cold-send-frame-dots">${send.frames.map((_, i) =>
+                `<span data-cold-send-frame-dot class="${i === send.frameIndex ? "active" : ""}"></span>`).join("")}</div>
+              <div class="cold-send-frame-controls">
+                <button type="button" data-cold-send-frame-prev aria-label="Previous frame">⏮</button>
+                <button type="button" data-cold-send-frame-play aria-label="Play/pause">${send.playing ? "⏸" : "▶"}</button>
+                <button type="button" data-cold-send-frame-next aria-label="Next frame">⏭</button>
+              </div>
+              <p class="cold-send-frame-counter" data-cold-send-frame-counter>Frame ${send.frameIndex + 1} / ${send.frames.length}</p>` : ""}
+          </div>
+          <p class="cold-send-footnote">KasSigner shows what it is signing. Check it matches, sign, then scan the signed transaction it shows.</p>
+          ${sendSummaryCardHtml()}`,
+      });
+
+    case "scanning":
+      // iOS MultiFrameQRScannerView, over the QR: its Cancel goes back to the QR. Without a camera
+      // it says so here, as iOS does, rather than dropping back with a toast.
+      return sendStepScreenHtml({
+        step: "scanning", title: "Scan Signed Transaction", className: "cold-send-scan-step", continueTitle: null,
+        cancelAttr: "data-cold-send-cancel-scan",
+        bodyHtml: send.cameraDenied
+          ? `
+          <div class="cold-send-camera-denied">
+            <span class="cold-send-camera-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.1l1.3-2h6.2l1.3 2h2.1A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5Z"/><circle cx="12" cy="12.8" r="3.4"/></svg></span>
+            <p class="cold-send-result-title">Camera Access Required</p>
+            <p class="field-hint cold-send-fail-message">Please enable camera access in Settings to scan the signed transaction.</p>
+          </div>`
           : `
-      <div class="cold-coincontrol-actions">
-        <button type="button" class="cold-inline-link" data-cold-coincontrol-all>Select All</button>
-        <button type="button" class="cold-inline-link" data-cold-coincontrol-none>Automatic (Clear Selection)</button>
-      </div>
-      <div class="cold-coincontrol-list">
-        ${utxos.map((utxo) => {
-          const key = utxoKey(utxo);
-          const isOn = selected.has(key);
-          const label = labels[key];
-          return `
-          <button type="button" class="cold-coincontrol-row${isOn ? " selected" : ""}" data-cold-coincontrol-toggle="${deps.escapeHtml(key)}">
-            <span class="cold-coincontrol-check" aria-hidden="true">${isOn ? CHECK_ICON : CIRCLE_ICON}</span>
-            <span class="cold-coincontrol-copy">
-              ${label ? `<span class="cold-coincontrol-label">${deps.escapeHtml(label)}</span>` : ""}
-              <span class="cold-coincontrol-amount">${fmtKasExact(utxo.amountSompi)} ${KAS_UNIT}</span>
-              <span class="cold-coincontrol-outpoint">${deps.escapeHtml(String(utxo.transactionId).slice(0, 10))}...:${utxo.index}</span>
-            </span>
-          </button>`;
-        }).join("")}
-      </div>
-      ${selected.size ? `<p class="field-hint cold-coincontrol-total">Selected: ${fmtKasExact(selectedTotal)} ${KAS_UNIT} (${selected.size} UTXO${selected.size === 1 ? "" : "s"})</p>` : ""}`}
-      <div class="modal-actions">
-        <button class="secondary-button" type="button" data-cold-coincontrol-cancel>Cancel</button>
-        <button class="primary-button" type="button" data-cold-coincontrol-done ${send.coinControlLoading ? "disabled" : ""}>
-          ${selected.size ? "Confirm Selection" : "Use Automatic Selection"}
-        </button>
-      </div>`;
-    return;
-  }
+          <div class="cold-send-scan-wrap">
+            <div class="cold-send-scan-frame">
+              <video data-cold-send-scan-video autoplay playsinline muted></video>
+              <div class="cold-scan-target" aria-hidden="true">
+                <span></span><span></span><span></span><span></span>
+              </div>
+            </div>
+            <div class="cold-send-scan-progress" data-cold-send-scan-progress></div>
+          </div>`,
+      });
 
-  if (send.step === "qr") {
-    // iOS qrView: From / Available / Network Fee, the hint, the animated QR (dots, the frame
-    // controls, then "Frame N / M"), and Scan Signed Transaction. Cancel is the only way back.
-    body.innerHTML = `
-      ${header}
-      <div class="cold-send-qr-panel">
-        <div class="cold-send-rows dark">
-          <div class="cold-send-row"><span>From</span><code>${deps.escapeHtml(shortFrom)}</code></div>
-          <div class="cold-send-row"><span>Available</span><span>${fmtKasBig(send.availableSompi)} ${KAS_UNIT}</span></div>
-          <div class="cold-send-row"><span>Network Fee</span><span>${deps.escapeHtml(fmtKasBig(send.unsigned.feeSompi))} ${KAS_UNIT}</span></div>
-        </div>
-        <p class="cold-send-qr-hint">Scan this on your KasSigner device</p>
-        <div class="cold-qr-frame"><canvas width="480" height="480" data-cold-send-qr-canvas></canvas></div>
-        ${send.frames.length > 1 ? `
-          <div class="cold-send-frame-dots">${send.frames.map((_, i) =>
-            `<span data-cold-send-frame-dot class="${i === send.frameIndex ? "active" : ""}"></span>`).join("")}</div>
-          <div class="cold-send-frame-controls">
-            <button type="button" data-cold-send-frame-prev aria-label="Previous frame">⏮</button>
-            <button type="button" data-cold-send-frame-play aria-label="Play/pause">${send.playing ? "⏸" : "▶"}</button>
-            <button type="button" data-cold-send-frame-next aria-label="Next frame">⏭</button>
-          </div>
-          <p class="cold-send-frame-counter" data-cold-send-frame-counter>Frame ${send.frameIndex + 1} / ${send.frames.length}</p>` : ""}
-        <button class="primary-button cold-capsule cold-send-start-scan" type="button" data-cold-send-start-scan>Scan Signed Transaction</button>
-      </div>`;
-    drawSendFrame();
-    return;
-  }
-
-  if (send.step === "scanning") {
-    // iOS MultiFrameQRScannerView. Without a camera it says so here, as iOS does, rather than
-    // dropping back to the QR with a toast.
-    body.innerHTML = send.cameraDenied
-      ? `
-      ${header}
-      <div class="cold-send-camera-denied">
-        <span class="cold-send-camera-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.1l1.3-2h6.2l1.3 2h2.1A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5Z"/><circle cx="12" cy="12.8" r="3.4"/></svg></span>
-        <p class="cold-send-result-title">Camera Access Required</p>
-        <p class="field-hint cold-send-fail-message">Please enable camera access in Settings to scan the signed transaction.</p>
-      </div>
-      <div class="modal-actions">
-        <button class="secondary-button" type="button" data-cold-send-cancel-scan>Cancel</button>
-      </div>`
-      : `
-      ${header}
-      <div class="cold-send-scan-wrap">
-        <div class="cold-send-scan-frame">
-          <video data-cold-send-scan-video autoplay playsinline muted></video>
-          <div class="cold-scan-target" aria-hidden="true">
-            <span></span><span></span><span></span><span></span>
-          </div>
-        </div>
-        <div class="cold-send-scan-progress" data-cold-send-scan-progress></div>
-      </div>
-      <div class="modal-actions">
-        <button class="secondary-button" type="button" data-cold-send-cancel-scan>Cancel</button>
-      </div>`;
-    renderSendScanProgress();
-    return;
-  }
-
-  if (send.step === "broadcasting") {
-    body.innerHTML = `${header}
-      <div class="cold-send-wait">
-        <span class="initial-sync-spinner" aria-hidden="true"></span>
-        <p>Broadcasting...</p>
-      </div>`;
-    return;
-  }
-
-  if (send.step === "success") {
-    // iOS successView: the From card (full address and what was available), the check and
-    // "Sent", the To card (what was typed), and the transaction ID opening the chosen explorer.
-    const toText = send.isCompound ? send.fromAddress : send.toInput.trim();
-    const explorerName = deps.explorerDisplayName?.() || "the explorer";
-    body.innerHTML = `
-      ${header}
-      <div class="cold-send-card">
-        <span class="cold-send-card-label">From</span>
-        <code>${deps.escapeHtml(send.fromAddress)}</code>
-        <span class="cold-send-card-sub">Available: ${fmtKasBig(send.availableSompi)} ${KAS_UNIT}</span>
-      </div>
-      <div class="cold-send-result-icon good">✓</div>
-      <p class="cold-send-result-title">Sent</p>
-      <div class="cold-send-card">
-        <span class="cold-send-card-label">To</span>
-        <code>${deps.escapeHtml(toText)}</code>
-      </div>
-      <a class="cold-send-txid" href="${deps.escapeHtml(deps.explorerTxUrl(send.txId))}" target="_blank" rel="noopener">
-        <span>Transaction ID · tap to view in ${deps.escapeHtml(explorerName)} <span class="cold-send-txid-icon" aria-hidden="true">${EXTERNAL_ICON}</span></span><code>${deps.escapeHtml(send.txId)}</code>
-      </a>
-      <div class="modal-actions">
-        <button class="primary-button" type="button" data-cold-send-done>Done</button>
-      </div>`;
-    return;
-  }
-
-  if (send.step === "failed") {
-    body.innerHTML = `
-      ${header}
-      <div class="cold-send-result-icon bad">✕</div>
-      <p class="cold-send-result-title">Something Went Wrong</p>
-      <p class="field-hint cold-send-fail-message">${deps.escapeHtml(send.error || "")}</p>
-      <div class="modal-actions">
-        <button class="primary-button" type="button" data-cold-send-try-again>Try Again</button>
-      </div>`;
+    case "failed":
+    default:
+      // Building failed, the compound inputs couldn't be read, or the scan wasn't a signed
+      // transaction (iOS failedView): what went wrong, and Try Again back on the review as it was.
+      return sendStepScreenHtml({
+        step: "failed", title, className: "cold-send-failed-step", continueTitle: "Try Again",
+        bodyHtml: `
+          <div class="cold-send-failed">
+            <div class="cold-send-result-icon bad">✕</div>
+            <p class="cold-send-result-title">Something Went Wrong</p>
+            <p class="field-hint cold-send-fail-message">${esc(send.error || "")}</p>
+          </div>`,
+      });
   }
 }
 
-function commitCustomSendFee(text) {
+/** The signed screen's content (iOS signedStep): the badge, the amount and the summary. Its
+ *  header, bar and the sending screen are the swipe-up's own. */
+function renderSendSigned() {
+  const body = modalsEl?.querySelector("[data-cold-send-signed-body]");
+  if (!body || !send) return;
+  body.innerHTML = `
+    <div class="cold-send-signed-badge">${SEAL_ICON}<span>Signed by KasSigner</span></div>
+    ${sendReviewAmountHtml(send.builtAmountSompi)}
+    ${sendSummaryCardHtml()}
+    <p class="cold-send-footnote">Nothing can change now: this is the transaction KasSigner signed.</p>`;
+  sendSwipe?.setScreenTitle(sendScreenTitle());
+  sendSwipe?.setBarTitle(send.isCompound ? "Swipe up to Consolidate" : "Swipe up to Send");
+  sendSwipe?.setBack(() => returnToSendQr());
+  sendSwipe?.setEnabled(Boolean(send.decoded) && !send.broadcasting && !send.sent);
+}
+
+/** Slides a screen in from the side it comes from (iOS move(edge:) transitions). */
+function slideSendScreenIn(el, from) {
+  if (!el || !from) return;
+  el.classList.remove("cold-send-in-right", "cold-send-in-left");
+  void el.offsetWidth;
+  el.classList.add(`cold-send-in-${from}`);
+  el.addEventListener("animationend", () => el.classList.remove(`cold-send-in-${from}`), { once: true });
+}
+
+function renderSendFlow() {
+  const layer = modalsEl?.querySelector("[data-cold-send-body]");
+  const signedCard = modalsEl?.querySelector("[data-cold-send-signed]");
+  if (!layer || !send) return;
+  const previous = sendShownStep;
+  const fresh = previous !== send.step;
+  sendShownStep = send.step;
+  const from = previous && fresh
+    ? (SEND_STEP_ORDER.indexOf(send.step) >= SEND_STEP_ORDER.indexOf(previous) ? "right" : "left")
+    : null;
+
+  if (send.step === "signed") {
+    layer.hidden = true;
+    if (signedCard) {
+      signedCard.hidden = false;
+      renderSendSigned();
+      slideSendScreenIn(signedCard, from);
+    }
+    return;
+  }
+  if (signedCard) signedCard.hidden = true;
+  layer.hidden = false;
+  // The same step drawn again (a coin ticked, Max worked out) keeps where it was scrolled to.
+  const scrolled = fresh ? 0 : (layer.querySelector(".ss-body")?.scrollTop || 0);
+  layer.innerHTML = sendStepHtml();
+  if (scrolled) { const body = layer.querySelector(".ss-body"); if (body) body.scrollTop = scrolled; }
+  slideSendScreenIn(layer.querySelector(".ss-step"), from);
+
+  // The Amount and fee editor share one keypad, wired once (send-steps.js wireKeypad).
+  const slot = layer.querySelector("[data-cold-send-keypad-slot]");
+  if (slot && sendKeypadEl) slot.replaceWith(sendKeypadEl);
+
+  if (send.step === "to") {
+    if (fresh) layer.querySelector("[data-cold-send-recipient]")?.focus({ preventScroll: true });
+  } else if (send.step === "amount") {
+    // The keypad stands in for a phone's keyboard, which would cover the screen; a desktop's
+    // keyboard still types into the field (or into the keypad while nothing has focus).
+    const input = layer.querySelector("[data-cold-send-amount]");
+    if (input && window.matchMedia?.("(pointer: coarse)").matches) {
+      input.readOnly = true;
+      input.inputMode = "none";
+    }
+    updateSendConversionHint();
+    paintSendAmountNote();
+  } else if (send.step === "fee") {
+    paintSendFeeEditor();
+  } else if (send.step === "qr") {
+    drawSendFrame();
+  } else if (send.step === "scanning") {
+    renderSendScanProgress();
+  }
+  paintSendContinue();
+}
+
+/** A keypad press, on the Amount or the fee editor (iOS KaspaKeypad). False: nothing changed. */
+function handleSendKeypadKey(key) {
+  if (!send) return false;
+  if (send.step === "amount") {
+    if (send.estimatingMax) return false;
+    // Digits and one point: 8 decimals for KAS, 2 for a currency (8 for BTC) - the shared rule.
+    const decimals = send.amountUnit === "fiat" && (deps.currencyCode?.() || "") !== "BTC" ? 2 : 8;
+    const next = applyKeypadKey(key, send.amountText, decimals);
+    if (next === send.amountText) return false;
+    const input = modalsEl?.querySelector("[data-cold-send-amount]");
+    if (input) {
+      // Through the field's own input handler, so it is sanitized and painted like typing.
+      input.value = next;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    } else {
+      send.amountText = next;
+      send.maxMode = false;
+      renderSendStatusOnly();
+    }
+    return true;
+  }
+  if (send.step === "fee") {
+    const next = applyKeypadKey(key, send.feeDraft, 8);
+    if (next === send.feeDraft) return false;
+    send.feeDraft = next;
+    paintSendFeeEditor();
+    return true;
+  }
+  return false;
+}
+
+/** What Continue does on each step. */
+function continueSendStep() {
+  if (!send || !sendCanContinue(send.step)) return;
+  switch (send.step) {
+    case "to": goSendStep("amount"); break;
+    case "amount": goSendStep("review"); break;
+    case "review": sendBuild(); break;
+    case "fee": confirmSendFee(); break;
+    case "coincontrol": commitCoinControl(); break;
+    case "qr": startSendScan(); break;
+    case "failed": retrySendFlow(); break;
+    default: break;
+  }
+}
+
+/** Try Again after a failure: back on the review as it was (iOS step = .form); a compound whose
+ *  inputs never loaded asks for them again. */
+function retrySendFlow() {
   if (!send) return;
-  send.editingFee = false;
-  // The one exact parser (iOS IOS-010): parseFloat read "0,002" as 0.
-  const totalSompi = sompiFromUserText(String(text ?? ""));
-  if (totalSompi == null) { renderSendFlow(); return; }
-  const base = sendDefaultFee();
-  // Values below the tier-computed baseline clamp to zero extra, matching iOS.
-  send.customExtraFeeSompi = totalSompi > base ? totalSompi - base : 0n;
-  scheduleSendPreview();
+  send.error = null;
+  send.building = false;
+  send.step = "review";
   renderSendFlow();
+  if (send.isCompound && !send.manualUtxoKeys) setupSendCompound();
 }
 
 function closeAllColdMenus() {
@@ -2026,7 +2409,11 @@ function buildModals() {
       <div class="contact-modal cold-actions-modal" role="dialog" aria-modal="true" aria-label="Address Actions" data-cold-actions-body></div>
     </div>
     <div class="modal-backdrop" data-cold-send-modal hidden>
-      <div class="contact-modal cold-send-modal" role="dialog" aria-modal="true" aria-label="Cold Storage send" data-cold-send-body></div>
+      <div class="contact-modal cold-send-modal ss-host" role="dialog" aria-modal="true" aria-label="Cold Storage send">
+        <!-- The step screens (re-rendered per step), and the signed screen: a swipe-up that keeps its DOM. -->
+        <div class="ss-layer cold-send-layer" data-cold-send-body></div>
+        <div class="cold-send-signed" data-cold-send-signed hidden><div class="ss-review-stack" data-cold-send-signed-body></div></div>
+      </div>
     </div>
 `;
   document.body.appendChild(modalsEl);
@@ -2136,11 +2523,42 @@ function buildModals() {
     deps.showToast?.(qrModal.dataset.copyToast || "Copied to clipboard.");
   });
 
-  // --- KSPT send flow (delegated — the body re-renders per step) ---
+  // --- KSPT send flow (delegated — the step screens re-render; the signed screen is the swipe-up's) ---
   const sendBody = modalsEl.querySelector("[data-cold-send-body]");
+  // The keypad the Amount and the fee editor share: one element, wired once, moved into the step
+  // that shows it (wireKeypad also types a desktop keyboard's digits into it).
+  const keypadHolder = document.createElement("div");
+  keypadHolder.innerHTML = keypadHtml();
+  sendKeypadEl = keypadHolder.firstElementChild;
+  wireKeypad(sendKeypadEl, handleSendKeypadKey);
+  // Signed by KasSigner, then swipe up to send (iOS SwipeUpToSendScrollView): the BlockDAG, then
+  // Sent with Done, or Failed with Try Again - back on this screen, still signed.
+  sendSwipe = createSwipeUpScreen(modalsEl.querySelector("[data-cold-send-signed]"), {
+    screenTitle: "Send from Cold Storage",
+    barTitle: "Swipe up to Send",
+    kasUnit: KAS_UNIT,
+    getPreview: () => ({
+      amountSompi: send?.builtAmountSompi ?? null,
+      recipient: send?.isCompound ? null : sendBuiltRecipientText(),
+    }),
+    getFailureMessage: () => send?.broadcastError || null,
+    onCancel: () => closeSendFlow(),
+    onDone: () => finishSendFlow(),
+    onAction: () => { sendBroadcast(); },
+  });
+
   sendBody.addEventListener("click", async (event) => {
     if (!send) return;
     if (event.target.closest("[data-cold-send-close]")) { closeSendFlow(); return; }
+    if (event.target.closest("[data-cold-send-back]")) {
+      if (send.building) return;
+      const target = sendBackTarget(send.step);
+      if (!target) return;
+      if (send.step === "qr") stopSendFrameTimer();
+      goSendStep(target);
+      return;
+    }
+    if (event.target.closest("[data-cold-send-continue]:not([disabled])")) { continueSendStep(); return; }
     // A pick under Other domains switches the recipient to that service's answer (iOS 6ac48a7).
     const otherDomain = pickOtherDomain(event, send.nameResolutions);
     if (otherDomain) {
@@ -2174,16 +2592,16 @@ function buildModals() {
         return;
       }
       // The send sheet may have closed or moved on while the scanner was up.
-      if (!scanned || !send || send.step !== "form") return;
+      if (!scanned || !send || send.step !== "to") return;
       const input = sendBody.querySelector("[data-cold-send-recipient]");
       if (input) input.value = scanned;
       handleSendRecipientInput(scanned);
       return;
     }
-    // The recipient card's Address Book button (iOS 00767a4): pick a saved address.
+    // The recipient card's Contacts button (iOS 00767a4): pick a saved address.
     if (event.target.closest("[data-cold-send-address-book]")) {
       const entry = await deps.pickAddressBookEntry?.();
-      if (!entry?.address || !send || send.step !== "form" || send.isCompound) return;
+      if (!entry?.address || !send || send.step !== "to" || send.isCompound) return;
       const input = sendBody.querySelector("[data-cold-send-recipient]");
       if (input) input.value = entry.address;
       handleSendRecipientInput(entry.address);
@@ -2192,11 +2610,10 @@ function buildModals() {
     if (event.target.closest("[data-cold-send-max]")) { sendSetMax(); return; }
 
     // --- Coin Control -------------------------------------------------------
-    if (event.target.closest("[data-cold-send-coin-toggle]")) { openCoinControl(); return; }
+    if (event.target.closest("[data-cold-send-coin-toggle]")) { if (!send.building) openCoinControl(); return; }
     if (event.target.closest("[data-cold-coincontrol-cancel]")) {
       // Cancel leaves the existing selection alone - it is a way out of the picker, not a reset.
-      send.step = "form";
-      renderSendFlow();
+      goSendStep("review");
       return;
     }
     if (event.target.closest("[data-cold-coincontrol-all]")) {
@@ -2218,7 +2635,6 @@ function buildModals() {
       renderSendFlow();
       return;
     }
-    if (event.target.closest("[data-cold-coincontrol-done]")) { commitCoinControl(); return; }
     if (event.target.closest("[data-cold-coincontrol-retry]")) { openCoinControl(); return; }
     if (event.target.closest("[data-cold-send-unit]")) {
       if (!send.price || send.price <= 0) { deps.showToast?.("KAS price unavailable right now."); return; }
@@ -2231,33 +2647,25 @@ function buildModals() {
           ? (kas * send.price).toFixed((deps.currencyCode?.() || "") === "BTC" ? 8 : 2)
           : kas.toFixed(8);
       }
+      // Converted, it is no longer exactly Max.
+      send.maxMode = false;
       renderSendFlow();
       return;
     }
+    // --- The review's fee: the speed, and Edit opening the fee editor --------
     const tier = event.target.closest("[data-cold-send-fee]");
     if (tier) {
+      if (send.building) return;
       send.feeTier = tier.dataset.coldSendFee;
       send.customExtraFeeSompi = null;
-      send.editingFee = false;
-      scheduleSendPreview();
+      afterSendFeeChange();
       renderSendFlow();
       return;
     }
-    if (event.target.closest("[data-cold-send-fee-edit]")) { send.editingFee = true; renderSendFlow(); return; }
-    if (event.target.closest("[data-cold-send-fee-commit]")) {
-      commitCustomSendFee(sendBody.querySelector("[data-cold-send-fee-custom]")?.value || "");
-      return;
-    }
-    if (event.target.closest("[data-cold-send-build]")) { sendBuild(); return; }
-    if (event.target.closest("[data-cold-send-start-scan]")) { stopSendFrameTimer(); startSendScan(); return; }
-    // Cancelling the scanner goes back to the form (iOS isScanningSignedResponse's setter).
-    if (event.target.closest("[data-cold-send-cancel-scan]")) {
-      stopSendScan();
-      send.step = "form";
-      send.cameraDenied = false;
-      renderSendFlow();
-      return;
-    }
+    if (event.target.closest("[data-cold-send-fee-edit]")) { openSendFeeEditor(); return; }
+    if (event.target.closest("[data-cold-send-fee-cancel]")) { goSendStep("review"); return; }
+    // Closing the scanner goes back to the QR (iOS isScanningSignedResponse's setter).
+    if (event.target.closest("[data-cold-send-cancel-scan]")) { returnToSendQr(); return; }
     if (event.target.closest("[data-cold-send-frame-prev]")) {
       send.frameIndex = (send.frameIndex - 1 + send.frames.length) % send.frames.length;
       drawSendFrame();
@@ -2269,13 +2677,6 @@ function buildModals() {
       return;
     }
     if (event.target.closest("[data-cold-send-frame-play]")) { send.playing = !send.playing; drawSendFrame(); return; }
-    if (event.target.closest("[data-cold-send-try-again]")) { send.step = "form"; send.error = null; renderSendFlow(); return; }
-    if (event.target.closest("[data-cold-send-done]")) {
-      const reopenIndex = activeAddressIndex;
-      closeSendFlow();
-      if (reopenIndex !== null) openAddressScreen(reopenIndex); // refresh balance/txs/utxos
-      return;
-    }
   });
   sendBody.addEventListener("input", (event) => {
     if (!send) return;
@@ -2285,20 +2686,30 @@ function buildModals() {
       const decimals = send.amountUnit === "fiat" && (deps.currencyCode?.() || "") !== "BTC" ? 2 : 8;
       const sanitized = sanitizeAmountText(event.target.value, decimals);
       if (sanitized !== event.target.value) event.target.value = sanitized;
+      // Typing over a Max amount makes it an amount of the person's own (iOS onKeyTyped).
+      if (sanitized !== send.amountText) send.maxMode = false;
       send.amountText = sanitized;
       renderSendStatusOnly();
     }
   });
+  // Enter goes on, as Continue does, from the recipient and the amount fields.
   sendBody.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && event.target.matches("[data-cold-send-fee-custom]")) {
-      event.preventDefault();
-      commitCustomSendFee(event.target.value);
-    }
+    if (event.key !== "Enter" || event.isComposing || !send) return;
+    if (!event.target.matches("[data-cold-send-recipient], [data-cold-send-amount]")) return;
+    event.preventDefault();
+    continueSendStep();
   });
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    if (send) { closeSendFlow(); return; }
+    if (send) {
+      // The fee editor, Coin Control and the scanner are over the review or the QR: Escape goes
+      // back to it, as closing that sheet does on iOS. Anywhere else it closes the send.
+      if (send.step === "fee" || send.step === "coincontrol") { goSendStep("review"); return; }
+      if (send.step === "scanning") { returnToSendQr(); return; }
+      closeSendFlow();
+      return;
+    }
     if (!qrModal.hidden) { closeQrModal(); return; }
     if (!inputModal.hidden) { finishInputModal(null); return; }
     if (!confirmModal.hidden) { finishConfirmModal(false); return; }

@@ -1,15 +1,15 @@
 /* Portfolio's floating + and its sheet (iOS 59593af PortfolioTransactionsView actionsButton /
-   actionsSheet). The button itself is the Address Book's glass + (.new-chat-fab.ab-fab in
+   actionsSheet). The button itself is Contacts' glass + (.new-chat-fab.ab-fab in
    ui/styles.css): fixed bottom-right above the dock, on a wide window at the 560px column's right
    edge. It is only drawn on the main Portfolio screen, and not while selecting. */
 
 /* iOS gives the list 72px of bottom inset so the last row scrolls out from under the +; here, as
-   on the Address Book, the screen's own bottom padding makes that room above the dock. */
+   on Contacts, the screen's own bottom padding makes that room above the dock. */
 .profile-screen[data-app-tab-screen="portfolio"]:has(.portfolio-fab) {
   padding-bottom: calc(var(--dock-inset, 124px) + 96px);
 }
 
 /* The sheet: "Portfolio", then the Add and Import & Export sections, uppercase captions as in
-   the Address Book sheet. */
+   the Contacts sheet. */
 .portfolio-actions-sheet .portfolio-actions-section { margin: 4px 4px 8px; }
 .portfolio-actions-sheet .cold-action-rows + .portfolio-actions-section { margin-top: 20px; }

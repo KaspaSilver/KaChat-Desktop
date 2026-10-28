@@ -60,10 +60,10 @@ const CATEGORIES = [
   { key: "groupMessages", title: "Group Messages", detail: "Messages in group chats", icon: "people3", color: "indigo" },
   { key: "groupUpdates", title: "Group Updates", detail: "Creating groups, invites and other changes", icon: "personPlus", color: "teal" },
   { key: "publicChats", title: "Public Chats", detail: "Messages in public rooms", icon: "radio", color: "orange" },
-  { key: "kaposts", title: "KaPosts", detail: "Posts, replies, quotes and polls", icon: "textBubble", color: "pink" },
+  { key: "kaposts", title: "KaPost", detail: "Posts, replies, quotes and polls", icon: "textBubble", color: "pink" },
   { key: "kapostActions", title: "KaPost Activity", detail: "Votes, follows, edits and deletes", icon: "thumbsUp", color: "purple" },
-  { key: "chessMoves", title: "Chess Moves", detail: "Moves played in Chess Online", icon: "board", color: "brown" },
-  { key: "chessGames", title: "Chess Games", detail: "Games started in Chess Online", icon: "trophy", color: "yellow" },
+  { key: "chessMoves", title: "Chess Moves", detail: "Moves played in KaPlay", icon: "board", color: "brown" },
+  { key: "chessGames", title: "Chess Games", detail: "Games started in KaPlay", icon: "trophy", color: "yellow" },
   // .kachat names (registry transactions, iOS b2d108b). An indexer reports them only where names
   // are live, so on a network without the registry yet (mainnet before launch) they stay hidden.
   { key: "kachatRegistrations", title: "Names Registered", detail: ".kachat names claimed", icon: "atPlus", color: "mint" },

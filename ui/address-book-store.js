@@ -396,7 +396,7 @@ export function removeAddressBookForWallet(wallet) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Export / import (Address Book > Import or Export; iOS AddressBookManager 87b2a0b)
+// Export / import (Contacts > Import or Export; iOS AddressBookManager 87b2a0b)
 // ---------------------------------------------------------------------------------------------
 //
 // The file is plain JSON any KaChat (iOS, Android, Desktop) and any wallet can read
@@ -407,8 +407,9 @@ export function removeAddressBookForWallet(wallet) {
 
 export const ADDRESS_BOOK_EXPORT_TYPE = "kachat-address-book";
 export const ADDRESS_BOOK_EXPORT_VERSION = 1;
-export const ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT = "That file isn't a KaChat Address Book export.";
-export const ADDRESS_BOOK_IMPORT_EMPTY = "That Address Book export has no addresses.";
+// Contacts in the text since KaChat bc3e1ff3 (the Address Book until then).
+export const ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT = "That file isn't a KaChat contacts export.";
+export const ADDRESS_BOOK_IMPORT_EMPTY = "That contacts export has no contacts.";
 
 /** iOS's file-name time: ISO8601DateFormatter (UTC, whole seconds, "Z") with ":" made "-",
  *  e.g. "2026-10-08T18-37-50Z". */
@@ -416,10 +417,11 @@ export function addressBookFileStamp(ms) {
   return addressBookIso(ms).replace(/:/g, "-");
 }
 
-/** "KaChat Address Book 2026-10-08T18-37-50Z.json" - the time keeps exports from overwriting
- *  each other. */
+/** "KaChat Contacts 2026-10-08T18-37-50Z.json" - the time keeps exports from overwriting each
+ *  other. "KaChat Address Book …" until KaChat bc3e1ff3 / KaPay 8118f09; an import goes by the
+ *  file's `type`, never its name, so those old files still import. */
 export function addressBookExportFileName(ms = config.now()) {
-  return `KaChat Address Book ${addressBookFileStamp(ms)}.json`;
+  return `KaChat Contacts ${addressBookFileStamp(ms)}.json`;
 }
 
 /** This wallet's book as the export object (keys in sorted order). */

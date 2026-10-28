@@ -256,18 +256,30 @@ export function removeBroadcastRooms(names) {
 /** The room's notifications on or off, as the room's bell sets them. */
 export function setBroadcastRoomNotify(name, on) {
   if (!deps) return;
-  if (isCuratedBroadcastChannel(name) && !joinedChannels.includes(name)) { joinedChannels.push(name); saveChannels(); }
-  if (on) { notifyByChannel[name] = true; deps.ensureNotificationPermission?.(); }
-  else delete notifyByChannel[name];
-  saveNotify();
-  syncScanWanted();
-  renderChannelList();
-  if (activeChannel === name) syncRoomBell();
+  setBroadcastRoomsNotify([name], on);
   deps.showToast?.(!on
     ? "Notifications are off for this public chat"
     : (isIndexerTrackedBroadcastChannel(name)
       ? "You'll get notifications for new messages in this public chat, even when the app is closed"
       : "You'll get a notification for new messages in this public chat as long as your app remains open"));
+}
+/** Mute / Unmute for several rooms at once (the Chats Select bar; KaPosts-iPhone eec2e30): each
+ *  room's bell as setBroadcastRoomNotify sets it, without its per-room toast - the bar says it once. */
+export function setBroadcastRoomsNotify(names, on) {
+  if (!deps) return;
+  const list = [...names];
+  let joined = false;
+  for (const name of list) {
+    if (isCuratedBroadcastChannel(name) && !joinedChannels.includes(name)) { joinedChannels.push(name); joined = true; }
+    if (on) notifyByChannel[name] = true;
+    else delete notifyByChannel[name];
+  }
+  if (joined) saveChannels();
+  if (on && list.length) deps.ensureNotificationPermission?.();
+  saveNotify();
+  syncScanWanted();
+  renderChannelList();
+  if (activeChannel && list.includes(activeChannel)) syncRoomBell();
 }
 /** Copies the room's kachat.app link. */
 export function copyBroadcastRoomLink(name) {

@@ -135,6 +135,11 @@
           <button type="button" class="chat-selection-action" data-chat-mark-unread aria-label="Mark as Unread" title="Mark as Unread">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h16v11a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5v-11Z"/><path d="m4.5 6.8 7.5 6 7.5-6"/><circle cx="18.5" cy="5.5" r="3.4" fill="currentColor" stroke="none"/></svg>
           </button>
+          <!-- Mute / Unmute the picked public rooms' bells (KaPosts-iPhone eec2e30); the glyph and
+               label follow the pick (app.js updateChatSelectionBar). -->
+          <button type="button" class="chat-selection-action" data-chat-mute-rooms aria-label="Mute" title="Mute">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.2 5.9A6 6 0 0 1 18 11v4.2M18 18.5H4.5l1.5-2V11c0-.9.2-1.8.6-2.6"/><path d="M10 20.5a2 2 0 0 0 4 0"/><path d="m3.5 3.5 17 17"/></svg>
+          </button>
           <button type="button" class="chat-selection-action danger" data-chat-delete-selected aria-label="Delete" title="Delete">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m-8 0 .8 12.1A2 2 0 0 0 8.8 21h6.4a2 2 0 0 0 2-1.9L18 7"/></svg>
           </button>
@@ -518,7 +523,7 @@
           <div class="hub-empty" data-hub-empty hidden>
             <img src="./ui/assets/kaspa-logo.png" alt="" class="hub-empty-logo" />
             <h3>Nothing here right now</h3>
-            <p>KaPosts, Public Chats, ChangeNOW Swap and Kaspa Websites appear here when they are not in your dock. Manage them in Settings &gt; Customization &gt; Customize Dock.</p>
+            <p>KaPost, Public Chats, ChangeNOW Swap and Kaspa Websites appear here when they are not in your dock. Manage them in Settings &gt; Customization &gt; Customize Dock.</p>
           </div>
         </div>
 
@@ -540,7 +545,7 @@
         <!-- Kaspa Hub, 5.2: the .kachat name marketplace (UI only until names launch) and KaChat Stats. -->
         <div class="profile-screen" data-app-tab-screen="kachat-names" data-kachat-market hidden></div>
         <div class="profile-screen" data-app-tab-screen="kachat-stats" data-kachat-stats hidden></div>
-        <!-- Kaspa Hub > Address Book (iOS 00767a4): saved addresses, per wallet (ui/address-book.js). -->
+        <!-- Kaspa Hub > Contacts (iOS 00767a4; the Address Book until KaPay 8118f09): saved addresses, per wallet (ui/address-book.js). -->
         <div class="profile-screen" data-app-tab-screen="address-book" data-address-book hidden></div>
         <!-- Kaspa Hub > KaChat Bots (iOS 82ab31d): the four bots as cards (ui/kachat-bots.js). -->
         <div class="profile-screen" data-app-tab-screen="kachat-bots" data-kachat-bots hidden></div>
@@ -574,8 +579,8 @@
         </div>
 
         <div class="kaposts-screen" data-app-tab-screen="kaposts" hidden>
-          <nav class="kaposts-rail" aria-label="KaPosts sections">
-            <h1 class="kaposts-title">KaPosts</h1>
+          <nav class="kaposts-rail" aria-label="KaPost sections">
+            <h1 class="kaposts-title">KaPost</h1>
             <button class="kaposts-rail-item active" type="button" data-kaposts-rail="feed">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.25 12 11.204 3.045c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75"/></svg>
               <span>Feed</span>
@@ -892,7 +897,7 @@
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="kaposts" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897l12.682-12.68Z"/><path d="M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10"/></svg><svg class="tab-glyph-filled tab-glyph-stroked" viewBox="0 0 24 24"><path d="M11 4.6H6.9A2.9 2.9 0 0 0 4 7.5v10.6A2.9 2.9 0 0 0 6.9 21h10.6a2.9 2.9 0 0 0 2.9-2.9V14"/><path d="M18.5 3a2 2 0 0 1 2.8 2.8l-8.6 8.6-3.8 1 1-3.8Z"/></svg></span>
-        <span>KaPosts</span>
+        <span>KaPost</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="apps" hidden>
         <!-- A globe (iOS AppTab.apps: SF "globe"). -->
@@ -908,9 +913,9 @@
         <span>Stats</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="address-book" hidden>
-        <!-- book.closed (iOS AppTab.addressBook). -->
-        <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15.5H6.5A1.5 1.5 0 0 0 5 20Z"/><path d="M5 20a1.5 1.5 0 0 0 1.5 1.5H19v-3"/></svg><svg class="tab-glyph-filled" viewBox="0 0 24 24"><path d="M6.7 2.5H19a1 1 0 0 1 1 1v14.3a1 1 0 0 1-1 1H6.8a1.35 1.35 0 0 0 0 2.7H19.4a.75.75 0 0 1 0 1.5H6.8a2.9 2.9 0 0 1-2.9-2.9V5.3a2.8 2.8 0 0 1 2.8-2.8Z"/></svg></span>
-        <span>Address Book</span>
+        <!-- person.text.rectangle (KaChat bc3e1ff3 AppTab.addressBook, "Contacts"; book.closed before). -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><circle cx="8.5" cy="9.9" r="2.2"/><path d="M5.1 16.4c.5-1.9 1.8-2.9 3.4-2.9s2.9 1 3.4 2.9"/><path d="M14.5 10h4M14.5 14h4"/></svg><svg class="tab-glyph-filled" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M4.5 4h15A2.5 2.5 0 0 1 22 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-15A2.5 2.5 0 0 1 2 17.5v-11A2.5 2.5 0 0 1 4.5 4ZM10.8 9.9a2.3 2.3 0 1 0-4.6 0a2.3 2.3 0 1 0 4.6 0ZM4.9 16.6h7.2c-.5-2.1-1.9-3.3-3.6-3.3s-3.1 1.2-3.6 3.3ZM14.4 9.1h4.2a.9.9 0 0 1 0 1.8h-4.2a.9.9 0 0 1 0-1.8ZM14.4 13.1h4.2a.9.9 0 0 1 0 1.8h-4.2a.9.9 0 0 1 0-1.8Z"/></svg></span>
+        <span>Contacts</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="kachat-bots" hidden>
         <!-- cpu (iOS AppTab.kachatBots, 82ab31d). -->
@@ -926,7 +931,8 @@
         <!-- A rook and a knight as text, tinted like a symbol (iOS ChessTabIcon renders "♜♞";
              SF Symbols has no chess pieces). U+FE0E keeps each a text glyph, never an emoji. -->
         <span class="sidebar-tab-icon" aria-hidden="true"><b class="chess-tab-glyph">&#x265C;&#xFE0E;&#x265E;&#xFE0E;</b></span>
-        <span>Chess</span>
+        <!-- The app is KaPlay (iOS 1d23002); the game in it is still Chess. -->
+        <span>KaPlay</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="settings" hidden>
         <!-- gearshape (iOS AppTab.settings, d54ea87c): Settings as a tab, opening the Settings page
@@ -1106,7 +1112,7 @@
                   <p class="field-hint danger" data-endpoint-error="kapostIndexer" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">K social network indexer that powers KaPosts feeds</p>
+            <p class="settings-group-footer">K social network indexer that powers KaPost feeds</p>
             <p class="settings-group-label">Public Chats Indexer</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
@@ -1167,7 +1173,7 @@
                   <p class="field-hint danger" data-endpoint-error="translationService" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">Translates KaPosts written in another language. Runs on the KaPost indexer's box by default; point this at your own if you host one (see TRANSLATION_SERVICE.md).</p>
+            <p class="settings-group-footer">Translates KaPost posts written in another language. Runs on the KaPost indexer's box by default; point this at your own if you host one (see TRANSLATION_SERVICE.md).</p>
             </div>
             <div class="connection-panel" data-connection-panel="domains" hidden>
             <!-- .kachat first: it is what every address field resolves before anything else (iOS 6ac48a7). -->
@@ -1181,6 +1187,13 @@
                     <input class="field-input" type="url" data-endpoint="kachatNamesIndexer" autocomplete="off" spellcheck="false" />
                   </label>
                   <p class="field-hint danger" data-endpoint-error="kachatNamesIndexer" hidden></p>
+                  <!-- Where names are read from right now: this indexer, or the chain (iOS KaPlay
+                       1d23002). Not .connection-readonly: testnet rewrites those by position. -->
+                  <div class="connection-names-source" data-kachat-names-source-row hidden>
+                    <span>Source</span>
+                    <code data-kachat-names-source></code>
+                    <small data-kachat-names-source-note hidden>This indexer doesn't serve .kachat names on this network, or is behind.</small>
+                  </div>
               </div>
             </div>
             <p class="settings-group-footer">Where .kachat names and profiles are read. Point it at your own indexer if you run one. If it can't serve names, they are read straight from the chain. Resolved first, everywhere you can type an address.</p>
@@ -1270,7 +1283,7 @@
           </section>
 
           <section class="settings-group" data-settings-subscreen="notifications-kaposts">
-            <p class="settings-group-label">KaPosts</p>
+            <p class="settings-group-label">KaPost</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
                   <div class="settings-toggle-row"><span><strong>Likes</strong></span><label class="switch-control"><input type="checkbox" data-pref-kaposts-notify-likes checked><span></span></label></div>
@@ -1312,13 +1325,13 @@
               <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><small data-local-storage-used>Local storage used: Unknown</small></span></div>
             </div>
             <p class="settings-group-footer">How long messages are kept on this device, and how much space they use. Applies before any cloud storage.</p>
-            <!-- Your own data, not cache (iOS cda0d99): photos you assigned in the Address Book. Kept
+            <!-- Your own data, not cache (iOS cda0d99): photos you assigned in Contacts. Kept
                  apart from Cache, whose "clear" must never delete anything you'd miss. -->
             <div class="settings-list-card">
-              <div class="settings-list-row settings-info-row"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3.5h11.5v15H7.25A1.75 1.75 0 0 0 5.5 20.25V5A1.5 1.5 0 0 1 7 3.5z"/><path d="M5.5 20.25A1.25 1.25 0 0 0 6.75 21.5H17.5v-3"/></svg></span><span class="settings-row-copy"><strong>Address Book Photos</strong></span><span class="settings-row-value" data-address-book-photos-size>…</span></div>
-              <button class="settings-list-row danger-row" type="button" data-address-book-photos-remove hidden><span class="settings-row-copy"><strong>Remove Address Book Photos</strong></span></button>
+              <div class="settings-list-row settings-info-row"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><circle cx="8.5" cy="9.9" r="2.2"/><path d="M5.1 16.4c.5-1.9 1.8-2.9 3.4-2.9s2.9 1 3.4 2.9"/><path d="M14.5 10h4M14.5 14h4"/></svg></span><span class="settings-row-copy"><strong>Contact Photos</strong></span><span class="settings-row-value" data-address-book-photos-size>…</span></div>
+              <button class="settings-list-row danger-row" type="button" data-address-book-photos-remove hidden><span class="settings-row-copy"><strong>Remove Contact Photos</strong></span></button>
             </div>
-            <p class="settings-group-footer">Photos you assigned to saved addresses, for every wallet on this device. They're kept until you remove them, and they're included in your chat backup.</p>
+            <p class="settings-group-footer">Photos you assigned to contacts, for every wallet on this device. They're kept until you remove them, and they're included in your chat backup.</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="cache">
                 <span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4.5 6h15M9.5 6V4.2h5V6M6.5 6l.9 14.3h9.2L17.5 6"/><path d="M10 9.5v8M12 9.5v8M14 9.5v8"/></svg></span>
@@ -1583,15 +1596,15 @@
           <label class="create-chat-address-label" for="create-chat-address">Kaspa Address or Domain</label>
           <input id="create-chat-address" class="create-chat-address-input" name="address" type="text" placeholder="kaspa:qr... or domain" autocomplete="off" spellcheck="false" required />
           <!-- As iOS AddContactView: the status (with Other domains), the preview card and the
-               error sit under the field, above the Address Book / Paste / Scan QR row. -->
+               error sit under the field, above the Contacts / Paste / Scan QR row. -->
           <div class="create-chat-status" data-create-chat-status hidden></div>
           <div class="create-chat-preview" data-create-chat-preview hidden></div>
           <p class="create-chat-error" data-create-chat-error hidden></p>
           <div class="create-chat-tools" aria-label="Address actions">
-            <!-- The Address Book fills the address (iOS 00767a4 / 1be4f6e: it replaced Import from Contacts). -->
+            <!-- Contacts fills the address (iOS 00767a4 / 1be4f6e: it replaced Import from Contacts; "Contacts" since KaChat bc3e1ff3). -->
             <button type="button" class="create-chat-tool" data-contact-address-book>
-              <span class="create-chat-tool-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 6.5A2 2 0 0 1 9 4.5h16v20.5H9a2 2 0 0 0-2 2Z"/><path d="M7 27a2 2 0 0 0 2 2h16v-4"/></svg></span>
-              <span>Address Book</span>
+              <span class="create-chat-tool-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><rect x="3.5" y="6" width="25" height="20" rx="3.3"/><circle cx="11.3" cy="13.2" r="2.9"/><path d="M6.8 21.9c.7-2.5 2.4-3.9 4.5-3.9s3.8 1.4 4.5 3.9"/><path d="M19.3 13.3h5.4M19.3 18.7h5.4"/></svg></span>
+              <span>Contacts</span>
             </button>
             <button type="button" class="create-chat-tool" data-contact-paste>
               <span class="create-chat-tool-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><rect x="9" y="8" width="15" height="19" rx="2.5"/><path d="M13 8V5.5h10V20"/><path d="M18.5 4.5h5v5"/></svg></span>
@@ -2146,8 +2159,8 @@
         <div class="create-chat-preview" data-group-address-preview hidden></div>
         <div class="group-address-tools" aria-label="Address actions">
           <button type="button" class="group-address-tool" data-group-address-book>
-            <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 6.5A2 2 0 0 1 9 4.5h16v20.5H9a2 2 0 0 0-2 2Z"/><path d="M7 27a2 2 0 0 0 2 2h16v-4"/></svg>
-            <span>Address Book</span>
+            <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3.5" y="6" width="25" height="20" rx="3.3"/><circle cx="11.3" cy="13.2" r="2.9"/><path d="M6.8 21.9c.7-2.5 2.4-3.9 4.5-3.9s3.8 1.4 4.5 3.9"/><path d="M19.3 13.3h5.4M19.3 18.7h5.4"/></svg>
+            <span>Contacts</span>
           </button>
           <button type="button" class="group-address-tool" data-group-address-paste>
             <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="9" y="8" width="15" height="19" rx="2.5"/><path d="M13 8V5.5h10V20"/><path d="M18.5 4.5h5v5"/></svg>
@@ -2160,7 +2173,7 @@
         </div>
         <button type="button" class="secondary-button group-address-add" data-group-address-add disabled>Add to Group</button>
         <!-- The section's footer (iOS "Add Members" footer). -->
-        <p class="field-hint group-add-members-footer" data-group-add-by-address-hint>Pick people from your Address Book, or add anyone by Kaspa address or domain.</p>
+        <p class="field-hint group-add-members-footer" data-group-add-by-address-hint>Pick people from your contacts, or add anyone by Kaspa address or domain.</p>
       </div>
 
       <p class="field-error" data-group-create-error hidden></p>
@@ -2465,7 +2478,8 @@
           </div>
         </div>
 
-        <div class="manage-address-actions">
+        <!-- Receive and Send belong to the history: the UTXOs and Domains tabs don't show them (iOS 0b9fd28). -->
+        <div class="manage-address-actions" data-manage-address-actions>
           <button type="button" class="chatting-address-copy" data-manage-address-receive>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v3M14 20h3M20 18v3"/></svg>
             <span data-i18n="action.receive">Receive</span>
@@ -3024,10 +3038,10 @@
             <span class="chat-info-row-title">Aliases</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
-          <!-- "Add to Address Book" / "Address Book" (iOS 00767a4): save, rename, note, remove. -->
+          <!-- "Add to Contacts" / "Contacts" (iOS 00767a4, KaChat bc3e1ff3): save, rename, note, remove. -->
           <button class="chat-info-row" type="button" data-chat-info-address-book>
             <span class="chat-info-row-icon-slot" data-chat-info-address-book-icon aria-hidden="true"></span>
-            <span class="chat-info-row-title" data-chat-info-address-book-title>Add to Address Book</span>
+            <span class="chat-info-row-title" data-chat-info-address-book-title>Add to Contacts</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
           <button class="chat-info-row" type="button" data-chat-info-sheet="notifications">

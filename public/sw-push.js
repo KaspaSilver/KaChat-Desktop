@@ -140,7 +140,7 @@
 
     if (type === "kaposts") {
       if (m.childMode) out.suppress = true;
-      out.title = "KaPosts";
+      out.title = "KaPost";
       out.options.body = joined(String(p.subtitle || "").trim(), tidy(p.body, ""), " ") || "New activity";
       out.options.tag = `kachat-kaposts-${p.tx_id || p.post_id || "activity"}`;
       out.options.data.route = p.post_id ? { kind: "kapost", txId: String(p.post_id) } : { kind: "tab", tab: "kaposts" };
