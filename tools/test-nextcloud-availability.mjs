@@ -13,7 +13,7 @@ const local = [
 for (const host of local) assert.equal(isLocalHostname(host), true, `${host} is local`);
 
 const hosted = [
-  "desktop.kachat.app", "kachat.app", "www.kachat.app", "kachat.duckdns.org", "example.com",
+  "desktop.kachat.app", "kachat.app", "www.kachat.app", "example.com",
   "8.8.8.8", "172.15.0.1", "172.32.0.1", "192.169.1.1", "100.63.0.1", "100.128.0.1", "11.0.0.1",
   "2001:db8::1", "localhost.example.com", "mylocal", "evil-localhost", "127.0.0.1.nip.io", "256.1.1.1", "",
 ];

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Standalone /nc-proxy server for STATIC (nginx-served) deployments: kachat.app/desktop and
-// kachatdesktoptest.duckdns.org, where there is no Vite server to provide the relay.
+// a test site, where there is no Vite server to provide the relay.
 //
 // All relay behaviour lives in ./relay-guard.mjs (and its rules in ./relay-rules.mjs), shared with
 // vite.config.mjs, so the two can no longer drift apart. DEPLOY ALL THREE FILES side by side (e.g.

@@ -223,7 +223,7 @@ export function parsePaymentRequest(rawAddress, query, { hrp = ADDRESS_HRP } = {
   return makePaymentRequest({ ...unsigned, creator, signature: sig });
 }
 
-const PAY_LINK_RE = /^(?:kachat:\/\/pay|https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/pay)\/([^/?#]+)\/?(?:\?([^#]*))?(?:#.*)?$/i;
+const PAY_LINK_RE = /^(?:kachat:\/\/pay|https?:\/\/(?:www\.)?kachat\.app\/pay)\/([^/?#]+)\/?(?:\?([^#]*))?(?:#.*)?$/i;
 /** Either link form -> a request, or null (the path holds exactly the address, as iOS parse). */
 export function parsePaymentRequestLink(text, options = {}) {
   const match = String(text ?? "").trim().match(PAY_LINK_RE);

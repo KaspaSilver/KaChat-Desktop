@@ -23,7 +23,7 @@
 // api-tn10.kaspa.org (UTXO liveness from GET /addresses/{a}/utxos instead of a node, spends from
 // GET /addresses/{a}/full-transactions) and prints what it found, then compares it with the
 // testnet-10 names indexer (read-only GETs: /names/status, /names/{name}, /names/gap/{key},
-// /names/activity at KACHAT_NAMES_INDEXER or https://tnkachat.duckdns.org:7443). An unreachable
+// /names/activity at KACHAT_NAMES_INDEXER; skipped when it isn't set). An unreachable
 // network is reported, not failed; an indexer that answers with another registry or other records
 // is reported as a mismatch (the app would walk the chain itself then).
 //
@@ -1676,7 +1676,8 @@ async function runLive({ mainnet = false } = {}) {
  *  v4) and whether its names, gaps and activity agree with the walk. Never fails the run: the
  *  indexer is an optional source (the app walks the chain when it disagrees). */
 async function compareWithIndexer(m, st) {
-  const base = String(process.env.KACHAT_NAMES_INDEXER || "https://tnkachat.duckdns.org:7443").replace(/\/+$/, "");
+  const base = String(process.env.KACHAT_NAMES_INDEXER || "").replace(/\/+$/, "");
+  if (!base) { console.log("names indexer: skipped (set KACHAT_NAMES_INDEXER to compare with one)"); return; }
   const get = async (path) => {
     const res = await fetch(base + path, { signal: AbortSignal.timeout(20_000), headers: { Accept: "application/json" } });
     if (res.status !== 200) throw new C.Failure(`GET ${path}: ${res.status}`);

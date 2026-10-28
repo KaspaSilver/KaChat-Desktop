@@ -129,15 +129,8 @@ export default defineConfig({
       },
     },
   },
-  server: {
-    // Vite rejects unknown Host headers by default; allow access via the
-    // DuckDNS domain fronted by Nginx Proxy Manager.
-    allowedHosts: [".duckdns.org"],
-  },
-  // Same allowance for the built site, which is what the public deployment should serve.
   preview: {
     host: "0.0.0.0",
-    allowedHosts: [".duckdns.org"],
     // DSK-014: CSP (no inline script, wasm allowed, framing refused), X-Frame-Options, nosniff and
     // Referrer-Policy on the page and every built asset. Vite applies these to static files and
     // index.html only, never to the /nc-proxy relay above, which sends its own sandbox CSP. This

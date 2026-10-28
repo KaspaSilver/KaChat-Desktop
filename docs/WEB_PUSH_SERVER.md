@@ -361,7 +361,7 @@ KaPosts per-kind filtering all run before `deliver()` and so apply to web tokens
 3. **Encryption:** the RFC 8291 §5 vector round-trips through the chosen crate.
 4. **Local end to end (testnet service):**
    * set `KACHAT_WEBPUSH_VAPID_PRIVATE_KEY` / `KACHAT_WEBPUSH_VAPID_SUBJECT`, restart;
-     `curl -s https://tnkachat.duckdns.org:7443/v1/push/web-config` → the public key;
+     `curl -s https://<testnet indexer>/v1/push/web-config` → the public key;
    * open KaChat Desktop on testnet in Chrome, allow notifications; Settings > Notifications should
      read "Notifications when KaChat is closed: on"; `GET /v1/push/stats` shows `by_platform.web = 1`;
    * close the tab; send a message to that account from another device → "New message" from the

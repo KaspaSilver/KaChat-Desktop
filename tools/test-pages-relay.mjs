@@ -92,7 +92,7 @@ async function relay(path, { method = "GET", headers = {}, body, env = {}, ip } 
 {
   let r = await relay(`/nc-proxy/${enc("https://example.com")}/x`, { method: "POST", body: "{}" });
   check("a write to an arbitrary host is refused", r.status === 403 && calls.length === 0);
-  r = await relay(`/nc-proxy/${enc("https://kachat.duckdns.org")}/handshakes`, { method: "POST", body: "{\"a\":1}", headers: { "content-type": "application/json" } });
+  r = await relay(`/nc-proxy/${enc("https://indexer.kachat.app")}/handshakes`, { method: "POST", body: "{\"a\":1}", headers: { "content-type": "application/json" } });
   check("a write to the indexer goes through", r.status === 200 && calls[0]?.init.method === "POST");
   check("the write carries its body", calls[0]?.init.body !== undefined);
 }
@@ -184,7 +184,7 @@ async function relay(path, { method = "GET", headers = {}, body, env = {}, ip } 
   check("redirect hops are capped", calls.length === 6 && r.status === 302, `calls ${calls.length}, status ${r.status}`);
 
   answer = () => new Response(null, { status: 302, headers: { location: "https://other.example.org/" } });
-  r = await relay(`/nc-proxy/${enc("https://kachat.duckdns.org")}/handshakes`, { method: "POST", body: "{}" });
+  r = await relay(`/nc-proxy/${enc("https://indexer.kachat.app")}/handshakes`, { method: "POST", body: "{}" });
   check("a write's redirect is passed back, not followed", r.status === 302 && calls.length === 1);
 }
 

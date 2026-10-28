@@ -72,7 +72,7 @@ test("testnet keeps its kaspatest: prefix in the path and in by", () => {
 test("sign + verify round trip through both link forms", () => {
   const request = signPaymentRequest(makePaymentRequest({ address: OTHER, amountSompi: 99_000_000n, memo: "Café ☕ für 2 👨‍👩‍👧", toChattingAddress: false }), MAKER, MAKER_KEY);
   assert.ok(verifyPaymentRequestSignature(request.signature, MAKER, request));
-  for (const link of [paymentRequestUniversalLink(request), paymentRequestAppLink(request), paymentRequestUniversalLink(request).replace("https://kachat.app", "https://www.kachat.duckdns.org")]) {
+  for (const link of [paymentRequestUniversalLink(request), paymentRequestAppLink(request), paymentRequestUniversalLink(request).replace("https://kachat.app", "https://www.kachat.app")]) {
     assert.deepEqual(parsePaymentRequestLink(link), request, link);
   }
   // uppercase hex reads the same (iOS Data(hexString:) lowercases)

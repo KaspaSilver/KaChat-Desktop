@@ -23,7 +23,7 @@ export async function loadKaspaModule() {
   const wasmUrl = new URL("../kaspa/kaspa_bg.wasm", import.meta.url);
   // Fetch the bytes ourselves and hand them to wasm-bindgen as a BufferSource. This deliberately
   // avoids WebAssembly.instantiateStreaming, which HARD-FAILS when a reverse proxy (e.g. the
-  // Nginx/DuckDNS front end for the test site) serves the .wasm with a Content-Type other than
+  // Nginx front end for the test site) serves the .wasm with a Content-Type other than
   // application/wasm, or gzip-encodes it. Streaming works on localhost/Vite but breaks behind the
   // proxy — instantiating from an ArrayBuffer sidesteps both. wasm-bindgen deprecated positional
   // init params, so pass the single-object form.

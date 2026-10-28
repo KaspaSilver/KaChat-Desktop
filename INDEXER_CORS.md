@@ -1,6 +1,6 @@
 # Indexer needs CORS headers
 
-**For:** whoever maintains the KaChat indexer at `indexer.kachat.app` (formerly `kachat.duckdns.org`; nginx 1.27.5).
+**For:** whoever maintains the KaChat indexer at `indexer.kachat.app` (nginx 1.27.5).
 **Symptom:** the KaChat web app at `https://kachat.app/desktop/` cannot load anything — chats,
 messages, groups and balances all fail at once, and the browser console fills with
 `blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present` followed by

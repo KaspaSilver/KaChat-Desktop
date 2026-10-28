@@ -1714,13 +1714,13 @@ document.addEventListener("keydown", (event) => {
 const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"']+/g;
 
 // A link that points back INSIDE KaChat (iOS KaChatInternalLink). Both forms are accepted:
-//   kachat://kapost/<txid>        https://kachat.app/post/<txid>       (kachat.duckdns.org still opens)
+//   kachat://kapost/<txid>        https://kachat.app/post/<txid>
 //   kachat://broadcast/<channel>  https://kachat.app/broadcast/<channel>
 //   kachat://profile/<address>    https://kachat.app/u/<address>       (iOS 863b0e9; a missing kaspa: prefix means mainnet)
 //   kachat://pay/<address>?...    https://kachat.app/pay/<address>?... (iOS c6851d6 / 7c71a98, engine/payment-request.js)
 // Everything a pasted link carries is untrusted, so the payload is re-validated here rather
 // than trusted from the URL's text.
-const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile|pay)\/[^\s<>"']+|https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(?:post|broadcast|u|pay)\/[^\s<>"']+)/i;
+const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile|pay)\/[^\s<>"']+|https?:\/\/(?:www\.)?kachat\.app\/(?:post|broadcast|u|pay)\/[^\s<>"']+)/i;
 // A payment request's link checked once (iOS matchCache, 427f19b): its signature check runs on
 // every message render otherwise. Keyed by the link text; the network is fixed for the page.
 var paymentRequestLinkCache = new Map();
@@ -1742,7 +1742,7 @@ function profileUniversalLink(address) {
 function parseKaChatInternalLink(raw) {
   const text = String(raw || "").trim();
   let target = null, payload = null;
-  if (/^(?:kachat:\/\/pay\/|https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/pay\/)/i.test(text)) {
+  if (/^(?:kachat:\/\/pay\/|https?:\/\/(?:www\.)?kachat\.app\/pay\/)/i.test(text)) {
     const request = parsePaymentRequestLinkCached(text);
     return request ? { kind: "pay", request } : null;
   }
@@ -1752,7 +1752,7 @@ function parseKaChatInternalLink(raw) {
   const custom = text.match(/^kachat:\/\/(kapost|broadcast|profile)\/([^/?#]+)\/?(?:\?[^#]*)?$/i);
   if (custom) { target = custom[1].toLowerCase(); payload = custom[2]; }
   else {
-    const universal = text.match(/^https?:\/\/(?:www\.)?(?:kachat\.app|kachat\.duckdns\.org)\/(post|broadcast|u)\/([^/?#]+)\/?(?:\?[^#]*)?$/i);
+    const universal = text.match(/^https?:\/\/(?:www\.)?kachat\.app\/(post|broadcast|u)\/([^/?#]+)\/?(?:\?[^#]*)?$/i);
     if (!universal) return null;
     const path = universal[1].toLowerCase();
     target = path === "post" ? "kapost" : path === "u" ? "profile" : "broadcast";
@@ -7543,7 +7543,7 @@ function connectFailureText(error) {
   try { const url = new URL(node.replace(/^ws/i, "http")); host = url.hostname; port = url.port; } catch { /* scan mode */ }
   const ip = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":");
   if (node && ip && (port === "17110" || port === "18110" || /^wss:/i.test(node))) {
-    return `${reason.replace(/\.?\s*$/, ".")} ${host}:${port || "443"} looks like a node's own wRPC port, which has no TLS certificate. A browser can only reach a node over wss:// with a certificate for its domain name - put the node behind a TLS proxy and use that address (KaChat's own: node.kachat.duckdns.org).`;
+    return `${reason.replace(/\.?\s*$/, ".")} ${host}:${port || "443"} looks like a node's own wRPC port, which has no TLS certificate. A browser can only reach a node over wss:// with a certificate for its domain name - put the node behind a TLS proxy and use that address.`;
   }
   if (/^ws:\/\//i.test(node) && typeof location !== "undefined" && location.protocol === "https:") {
     return `${reason.replace(/\.?\s*$/, ".")} Browsers block plain ws:// nodes on the internet from an https page - use the node's wss:// address.`;
@@ -12153,7 +12153,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 253;
+const APP_BUILD = 254;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -26503,7 +26503,7 @@ function renderSetupExtra(kind) {
         input.className = "field-input setup-node-input";
         // wRPC, not gRPC: this placeholder used to show the phones' grpcs://host:port form, which
         // this client cannot speak at all.
-        input.placeholder = "wss://your-node.duckdns.org";
+        input.placeholder = "wss://your-node.example.com";
         input.value = accountShellPrefs.nodeAddress || "";
         input.autocomplete = "off";
         input.spellcheck = false;

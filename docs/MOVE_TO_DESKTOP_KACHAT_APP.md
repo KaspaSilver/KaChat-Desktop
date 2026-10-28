@@ -206,8 +206,8 @@ Notes:
   on in the deploy script for BOTH builds only after desktop.kachat.app is live and serving the new build
   (step order: DNS + certificate + nginx, deploy the new-address build with `VITE_KACHAT_MIGRATE=1`,
   check it loads, then deploy the old-address build with `VITE_KACHAT_MIGRATE=1`).
-- The test site `kachatdesktoptest.duckdns.org` (base `/`) needs no change: its origin is neither
-  of the two, so the module does nothing there. Same for Docker/self-hosted installs.
+- A test site or a Docker/self-hosted install needs no change: its origin is neither of the two, so
+  the module does nothing there.
 
 ## 6. The old address during the transition (kachat.app/desktop/)
 

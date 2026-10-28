@@ -99,7 +99,7 @@ await test("config + roles: old under /desktop/, new on its own origin, nothing 
   assert.equal(migrationRole({ origin: OLD, pathname: "/desktop" }, cfg), "old");
   assert.equal(migrationRole({ origin: OLD, pathname: "/post/abc" }, cfg), "none");
   assert.equal(migrationRole({ origin: NEW, pathname: "/" }, cfg), "new");
-  assert.equal(migrationRole({ origin: "https://kachatdesktoptest.duckdns.org", pathname: "/" }, cfg), "none");
+  assert.equal(migrationRole({ origin: "https://kachat-test.example.com", pathname: "/" }, cfg), "none");
   assert.equal(migrationRole({ origin: "http://localhost:5173", pathname: "/" }, cfg), "none");
   assert.equal(migrationConfig({ enabled: "0" }).enabled, false);
   assert.equal(migrationConfig({ from: NEW, to: NEW }).enabled, false);

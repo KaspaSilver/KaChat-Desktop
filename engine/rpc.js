@@ -5,11 +5,6 @@ import { getEndpoint } from "./endpoints.js";
 // One node list per network (iOS 8f98312): a mainnet node answering a kaspatest: address would
 // report the mainnet chain's coins.
 const NODE_REGISTRY_KEY = IS_TESTNET ? "kachat.browser.node-registry.testnet.v1" : "kachat.browser.node-registry.v1";
-/// KaChat's own node, kept only as a name the UI can show. Nothing connects to it on its own:
-/// the hosted mode is the public-node scan, and a user who wants this node types it in as a
-/// custom node like any other.
-export const DEFAULT_NODE = "wss://node.kachat.duckdns.org";
-
 const DIRECT_CONNECT_TIMEOUT_MS = 8000;
 const MAX_FAILOVER_EVENTS = 24;
 
