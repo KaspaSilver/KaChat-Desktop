@@ -41,7 +41,7 @@ export const CLIENT_IDENTITY_HEADERS = [
 export const NAVIGATION_DESTS = new Set(["document", "iframe", "frame", "embed", "object"]);
 
 // Hosts the app itself writes to (the hosts engine/endpoints.js relays, plus KNS).
-export const WRITE_API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^tnkachat\.duckdns\.org$|^api(-tn\d+)?\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|^api\.knsdomains\.org$/i;
+export const WRITE_API_HOST_RE = /(^|\.)kasia\.wtf$|(^|\.)kachat\.duckdns\.org$|^indexer\.kachat\.app$|^tnkachat\.duckdns\.org$|^api(-tn\d+)?\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|^api\.knsdomains\.org$/i;
 // Nextcloud's write roots: WebDAV (remote.php) and OCS (ocs/v1.php, ocs/v2.php incl. Talk/spreed).
 // ui/nextcloud.js and ui/talk.js write only under these; index.php (previews) is only ever read.
 export const NEXTCLOUD_WRITE_PATH_RE = /^\/(?:remote\.php|ocs)\//i;

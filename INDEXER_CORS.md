@@ -1,6 +1,6 @@
 # Indexer needs CORS headers
 
-**For:** whoever maintains the KaChat indexer at `kachat.duckdns.org` (nginx 1.27.5).
+**For:** whoever maintains the KaChat indexer at `indexer.kachat.app` (formerly `kachat.duckdns.org`; nginx 1.27.5).
 **Symptom:** the KaChat web app at `https://kachat.app/desktop/` cannot load anything — chats,
 messages, groups and balances all fail at once, and the browser console fills with
 `blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present` followed by
@@ -16,7 +16,7 @@ The indexer serves a different origin from the app that calls it:
 | | |
 |---|---|
 | Page origin | `https://kachat.app` |
-| API origin | `https://kachat.duckdns.org` |
+| API origin | `https://indexer.kachat.app` |
 
 Different host, so every request is cross-origin. A browser will only hand a cross-origin response
 to JavaScript if the server says it may, via `Access-Control-Allow-Origin`. The indexer currently
@@ -26,7 +26,7 @@ Reproduce it in one command — note the absence of any `access-control-*` line:
 
 ```bash
 curl -sS -o /dev/null -D - -H "Origin: https://kachat.app" \
-  "https://kachat.duckdns.org/handshakes/by-receiver?address=test"
+  "https://indexer.kachat.app/handshakes/by-receiver?address=test"
 ```
 
 ```
@@ -109,7 +109,7 @@ A normal request now carries the header:
 
 ```bash
 curl -sS -o /dev/null -D - -H "Origin: https://kachat.app" \
-  "https://kachat.duckdns.org/handshakes/by-receiver?address=test" | grep -i access-control
+  "https://indexer.kachat.app/handshakes/by-receiver?address=test" | grep -i access-control
 ```
 
 Expected: `access-control-allow-origin: https://kachat.app`
@@ -121,7 +121,7 @@ curl -sS -o /dev/null -D - -X OPTIONS \
   -H "Origin: https://kachat.app" \
   -H "Access-Control-Request-Method: POST" \
   -H "Access-Control-Request-Headers: content-type" \
-  "https://kachat.duckdns.org/group-control/by-recipient" | head -8
+  "https://indexer.kachat.app/group-control/by-recipient" | head -8
 ```
 
 Expected: `HTTP/2 204` plus the `access-control-*` headers.
@@ -130,7 +130,7 @@ And an **error** response carries it too — this is the check that catches a mi
 
 ```bash
 curl -sS -o /dev/null -D - -H "Origin: https://kachat.app" \
-  "https://kachat.duckdns.org/definitely-not-a-real-path" | grep -i access-control
+  "https://indexer.kachat.app/definitely-not-a-real-path" | grep -i access-control
 ```
 
 Expected: the header is present on the 404 as well.

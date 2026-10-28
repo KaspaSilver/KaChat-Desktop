@@ -2,7 +2,7 @@
 
 From the KaChat Desktop session, 2026-10-23. The owner wants to download logs from the KQS panel
 and hand them to a Claude session that has no access to the machine (the KaChat server at
-kachat.duckdns.org runs on a machine other sessions cannot reach). First use: finding why KaPosts
+indexer.kachat.app (formerly kachat.duckdns.org) runs on a machine other sessions cannot reach). First use: finding why KaPosts
 notifications don't arrive while the KaChat web app is closed.
 
 Nothing here has been changed in Kaspa-Quick-Start or kachat-indexer; this is a request.
