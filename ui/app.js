@@ -12256,7 +12256,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.2";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 256;
+const APP_BUILD = 257;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -17837,7 +17837,15 @@ function renderMessages(conversationEntry) {
         bubble.append(text);
         // iOS parity: with a caption the card is its OWN block BELOW the bubble,
         // not inside it — stashed here and stacked at row-append time.
-        if (card) detachedLinkCard = card;
+        if (card) {
+          detachedLinkCard = card;
+          // Outside the bubble, so it gets its own right-click: the Link menu, Reply included.
+          onContextGesture(card, (event) => {
+            event.preventDefault();
+            if (messageSelectionMode) return;
+            openOneToOneMessageMenu(message.id, event.clientX, event.clientY, { kind: "link", url: previewable });
+          });
+        }
       }
     }
     }
@@ -31799,12 +31807,13 @@ function messageMenuRows({ txid, kindInfo, copyText, onReply, onSelect, onRetry,
     case "kachatLink": return [
       { label: "Open in KaChat", icon: MSG_MENU_ICONS.openApp, onClick: () => openKaChatInternalLink(kindInfo.link) },
       { label: "Copy Link", icon: MSG_MENU_ICONS.link, onClick: () => copyTextToClipboard(kindInfo.url).catch(() => {}) },
-      explorer, select,
+      explorer, reply, select,
     ];
-    // A Nextcloud share's link is never handed out (iOS LinkPreviewCardView.menuActions).
+    // A Nextcloud share's link is never handed out (iOS LinkPreviewCardView.menuActions). Reply
+    // is Desktop's own: iOS's link card menu has none, but right-click is how Desktop replies.
     case "link": return [
       isNextcloudShareLink(kindInfo.url) ? null : { label: "Copy Link", icon: MSG_MENU_ICONS.link, onClick: () => copyTextToClipboard(kindInfo.url).catch(() => {}) },
-      explorer, select,
+      explorer, reply, select,
     ];
     default: return [
       copyMessage, explorer,
@@ -31840,7 +31849,7 @@ function openLinkActionsMenuFor(event, onReply) {
 
 // Right-click on a 1:1 message: iOS's long-press half sheet for that kind of bubble, with its
 // title and a two-line preview on top.
-function openOneToOneMessageMenu(messageId, x, y) {
+function openOneToOneMessageMenu(messageId, x, y, kindOverride = null) {
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   const message = conversationEntry?.messages?.find((m) => m.id === messageId);
   if (!conversationEntry || !message) return;
@@ -31848,7 +31857,7 @@ function openOneToOneMessageMenu(messageId, x, y) {
   const shown = messageContent(message);
   const bodyText = parseReplyEnvelope(shown)?.text ?? shown;
   const paymentParts = parsePaymentCardParts(message);
-  const kindInfo = paymentParts || message.messageType === "payment" ? { kind: "payment" } : messageMenuKind(message.text, bodyText);
+  const kindInfo = kindOverride || (paymentParts || message.messageType === "payment" ? { kind: "payment" } : messageMenuKind(message.text, bodyText));
   const failed = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED;
   // iOS onEdit: your own ordinary message, sent, editable, not chess.
   const editable = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.CONFIRMED && Boolean(message.txid)
@@ -31876,11 +31885,11 @@ function openOneToOneMessageMenu(messageId, x, y) {
 // Right-click on a group message: iOS's long-press sheet. A text bubble's runs Reply, Edit, Copy
 // Message, View in Explorer, Reactions, Retry Send, Select (GroupChatDetailView); photos, voice
 // notes and links carry the same menus as in a 1:1 chat.
-function openGroupMessageMenu(message, x, y) {
+function openGroupMessageMenu(message, x, y, kindOverride = null) {
   const shown = groupMessageContent(activeGroupId, message);
   const plain = parseReplyEnvelope(shown)?.text ?? shown;
   const key = groupMsgKey(message);
-  const kindInfo = messageMenuKind(message.text, plain);
+  const kindInfo = kindOverride || messageMenuKind(message.text, plain);
   const failed = message.direction === "local" && message.status === MESSAGE_STATUSES.FAILED;
   const reactionRows = key ? groupReactionsFor(activeGroupId, key) : [];
   const copyText = decodeGroupMentions(plain);
@@ -32160,7 +32169,15 @@ function renderGroupMessages() {
       } else {
         bubble.appendChild(text);
         // iOS parity: with a caption the card is its OWN block BELOW the bubble.
-        if (card) detachedLinkCard = card;
+        if (card) {
+          detachedLinkCard = card;
+          // Outside the bubble, so it gets its own right-click: the Link menu, Reply included.
+          onContextGesture(card, (event) => {
+            event.preventDefault();
+            if (groupSelectionMode) return;
+            openGroupMessageMenu(message, event.clientX, event.clientY, { kind: "link", url: previewable });
+          });
+        }
       }
     }
 
