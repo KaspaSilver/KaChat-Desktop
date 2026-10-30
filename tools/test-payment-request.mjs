@@ -56,6 +56,13 @@ test("link format: kaspa: dropped, exact amount, unreserved-only memo, chat, by 
   const link = paymentRequestUniversalLink(signed);
   assert.equal(link, `https://kachat.app/pay/${MAKER.slice(6)}?amount=12.5&memo=Pizza%20%26%202%20drinks%20%3D%20100%25%20%28ok%29%21&chat=1&by=${MAKER.slice(6)}&sig=${signed.signature}`);
   assert.equal(paymentRequestAppLink(signed), link.replace("https://kachat.app/pay/", "kachat://pay/"));
+  // KaPay's kapay:// and its old kachatwallet:// carry the same tail (KaPay d9bec97).
+  for (const scheme of ["kapay", "kachatwallet", "KaPay"]) {
+    const other = parsePaymentRequestLink(link.replace("https://kachat.app/pay/", `${scheme}://pay/`));
+    assert.ok(other, `${scheme}:// is accepted`);
+    assert.equal(other.amountSompi, signed.amountSompi);
+  }
+  assert.equal(parsePaymentRequestLink(link.replace("https://kachat.app/pay/", "kapayx://pay/")), null, "only those schemes");
   // deterministic, as iOS: the same request signs to the same bytes
   assert.equal(signPaymentRequest(unsigned, MAKER, MAKER_KEY).signature, signed.signature);
   assert.equal(paymentRequestAmountText(makePaymentRequest({ address: MAKER, amountSompi: 1n })), "0.00000001");

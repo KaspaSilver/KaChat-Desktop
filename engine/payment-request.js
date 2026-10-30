@@ -4,6 +4,7 @@
 //
 //   https://kachat.app/pay/<address>?amount=<KAS>&memo=<text>[&chat=1]&by=<maker>&sig=<hex>
 //   kachat://pay/<address>?...                                   (the same tail)
+//   kapay://pay/<address>?...  kachatwallet://pay/<address>?...    (KaPay's, read only: KaPay d9bec97)
 //
 // - the address without `kaspa:` on mainnet (like profile links), with `kaspatest:` on testnet;
 // - `amount` in KAS, at most 8 decimals, "." as the separator;
@@ -223,7 +224,9 @@ export function parsePaymentRequest(rawAddress, query, { hrp = ADDRESS_HRP } = {
   return makePaymentRequest({ ...unsigned, creator, signature: sig });
 }
 
-const PAY_LINK_RE = /^(?:kachat:\/\/pay|https?:\/\/(?:www\.)?kachat\.app\/pay)\/([^/?#]+)\/?(?:\?([^#]*))?(?:#.*)?$/i;
+// kapay:// is KaPay's own scheme (KaPost hands payment requests over with it); kachatwallet:// is
+// its name from before KaPay (iOS KaChatInternalLink, KaPay d9bec97). Read, never written.
+const PAY_LINK_RE = /^(?:(?:kachat|kapay|kachatwallet):\/\/pay|https?:\/\/(?:www\.)?kachat\.app\/pay)\/([^/?#]+)\/?(?:\?([^#]*))?(?:#.*)?$/i;
 /** Either link form -> a request, or null (the path holds exactly the address, as iOS parse). */
 export function parsePaymentRequestLink(text, options = {}) {
   const match = String(text ?? "").trim().match(PAY_LINK_RE);
