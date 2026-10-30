@@ -1,8 +1,8 @@
 // node tools/test-nextcloud-availability.mjs - Nextcloud runs only where the page's relay is the
-// person's own machine: this computer or a private network address (Kaspa Quick Start, npm run dev),
-// never on a site KaChat hosts, and never on testnet.
+// person's own machine: this computer, a private network address or a DuckDNS name (Kaspa Quick
+// Start, npm run dev), never on a site KaChat hosts, and never on testnet.
 import assert from "node:assert/strict";
-import { isLocalHostname, nextcloudOffReason } from "../ui/nextcloud-availability.js";
+import { isLocalHostname, isPersonalDnsHostname, nextcloudOffReason } from "../ui/nextcloud-availability.js";
 
 const local = [
   "localhost", "LOCALHOST", "kachat.localhost", "127.0.0.1", "127.8.9.10", "[::1]", "::1",
@@ -19,9 +19,17 @@ const hosted = [
 ];
 for (const host of hosted) assert.equal(isLocalHostname(host), false, `${host} is not local`);
 
+const personal = ["myhome.duckdns.org", "MyHome.DuckDNS.org", "kachat.myhome.duckdns.org", "myhome.duckdns.org."];
+for (const host of personal) assert.equal(isPersonalDnsHostname(host), true, `${host} is a personal DNS name`);
+const notPersonal = ["duckdns.org", "www.duckdns.org.example.com", "myduckdns.org", "duckdns.org.evil.com", "desktop.kachat.app", ""];
+for (const host of notPersonal) assert.equal(isPersonalDnsHostname(host), false, `${host} is not a personal DNS name`);
+
 assert.equal(nextcloudOffReason({ hostname: "desktop.kachat.app" }), "hosted");
+assert.equal(nextcloudOffReason({ hostname: "myhome.duckdns.org" }), null);
+assert.equal(nextcloudOffReason({ hostname: "duckdns.org" }), "hosted");
+assert.equal(nextcloudOffReason({ testnet: true, hostname: "myhome.duckdns.org" }), "testnet");
 assert.equal(nextcloudOffReason({ hostname: "localhost" }), null);
 assert.equal(nextcloudOffReason({ hostname: "192.168.1.20" }), null);
 assert.equal(nextcloudOffReason({ testnet: true, hostname: "localhost" }), "testnet", "testnet wins everywhere");
 assert.equal(nextcloudOffReason({ testnet: true, hostname: "desktop.kachat.app" }), "testnet");
-console.log(`nextcloud availability: ok (${local.length} local, ${hosted.length} hosted)`);
+console.log(`nextcloud availability: ok (${local.length} local, ${personal.length} DuckDNS, ${hosted.length} hosted)`);

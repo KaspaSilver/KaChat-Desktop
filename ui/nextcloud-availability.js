@@ -4,7 +4,8 @@
 // relay is a server someone else runs, so Nextcloud is off there. On a copy the person runs
 // themselves - Kaspa Quick Start's KaChat-Desktop, or `npm run dev` - the relay is their own
 // machine, and Nextcloud works. "Their own" is read from the address the page was opened at: this
-// computer, or a private network address (the Quick Start machine from another device at home).
+// computer, a private network address (the Quick Start machine from another device at home), or a
+// DuckDNS name (the free dynamic DNS people point at their home machine to reach it from outside).
 
 /** Where to get a KaChat that runs on your own computer. */
 export const KASPA_QUICK_START_URL = "https://github.com/KaspaSilver/Kaspa-Quick-Start";
@@ -40,6 +41,20 @@ export function isLocalHostname(hostname) {
   return false;
 }
 
+/** Dynamic DNS services whose names people point at their own home machine. */
+const PERSONAL_DNS_SUFFIXES = [".duckdns.org"];
+
+/** Whether `hostname` is a name on a dynamic DNS service (myhome.duckdns.org), not the service itself. */
+export function isPersonalDnsHostname(hostname) {
+  const host = String(hostname || "").trim().toLowerCase().replace(/\.$/, "");
+  return PERSONAL_DNS_SUFFIXES.some((suffix) => host.endsWith(suffix) && host.length > suffix.length);
+}
+
+/** Whether the page was opened at an address of the person's own: their machine or their DuckDNS name. */
+export function isSelfHostedHostname(hostname) {
+  return isLocalHostname(hostname) || isPersonalDnsHostname(hostname);
+}
+
 /**
  * Why Nextcloud is off on this page, or null when it may run:
  * - "testnet": off on testnet (iOS af8ec68), so testnet can never touch the mainnet backup;
@@ -48,6 +63,6 @@ export function isLocalHostname(hostname) {
  */
 export function nextcloudOffReason({ testnet = false, hostname = "" } = {}) {
   if (testnet) return "testnet";
-  if (!isLocalHostname(hostname)) return "hosted";
+  if (!isSelfHostedHostname(hostname)) return "hosted";
   return null;
 }
