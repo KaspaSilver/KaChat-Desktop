@@ -391,46 +391,56 @@ function backupFolderPath() {
   return nc?.backupFolder || DEFAULT_BACKUP_FOLDER;
 }
 
-/** Looks for a folder on the server that already holds a KaChat backup - the default path
- *  first, then any top-level folder with "kachat" in its name (any case), then one level down
- *  inside those - and adopts the first one found as the backup folder. Automatic Sync stays as
- *  it is (off after connecting): switching it on is what restores from that backup, once. */
-async function adoptExistingBackupFolder() {
-  if (!nc || nc.backupFolderScanned) return;
-  const hasBackup = async (path) => {
-    try {
-      const listing = await listFolder(path);
-      return listing.some((f) => !f.isDirectory && (f.name === BACKUP_FILENAME || f.name === LEGACY_DESKTOP_BACKUP_FILENAME));
-    } catch { return false; }
-  };
-  const candidates = [DEFAULT_BACKUP_FOLDER];
-  try {
-    const root = await listFolder("");
-    for (const entry of root) {
-      if (entry.isDirectory && /kachat/i.test(entry.name) && !candidates.includes(entry.name)) candidates.push(entry.name);
+/** Finds the KaChat folder this account already has, instead of assuming there isn't one (iOS
+ *  discoverExistingBackupFolder). A folder holding the backup wins; a folder merely NAMED KaChat
+ *  (any case, anywhere in the first few levels) is the fallback. Either way it is stored as the
+ *  backup folder, so Settings names it rather than "KaChat (default)", and nothing makes a second
+ *  KaChat folder beside it. A folder you picked yourself is never replaced. Breadth-first and
+ *  bounded: a WebDAV walk of someone's whole drive is not a thing to do on connect. Automatic Sync
+ *  stays as it is (off after connecting): switching it on is what restores from that backup, once. */
+const BACKUP_FOLDER_SCAN_VERSION = 2; // 2: the named-folder fallback; connections scanned before it get it once
+const FOLDER_DISCOVERY_MAX_FOLDERS = 40;
+const FOLDER_DISCOVERY_MAX_DEPTH = 3;
+
+async function discoverExistingBackupFolder() {
+  const queue = [""];
+  let visited = 0;
+  let namedCandidate = null;
+  while (queue.length && visited < FOLDER_DISCOVERY_MAX_FOLDERS && nc) {
+    const path = queue.shift();
+    visited += 1;
+    let entries;
+    try { entries = await listFolder(path); } catch { continue; }
+    // A folder holding the backup file IS the answer - stop looking.
+    if (entries.some((f) => !f.isDirectory && (f.name === BACKUP_FILENAME || f.name === LEGACY_DESKTOP_BACKUP_FILENAME))) {
+      return path ? { path, hasBackup: true } : null;
     }
-    for (const folder of [...candidates]) {
-      try {
-        const inner = await listFolder(folder);
-        for (const entry of inner) {
-          if (entry.isDirectory && /kachat/i.test(entry.name)) candidates.push(`${folder}/${entry.name}`);
-        }
-      } catch { /* not listable - skip */ }
+    for (const entry of entries) {
+      if (!entry.isDirectory) continue;
+      if (!namedCandidate && entry.name.toLowerCase() === DEFAULT_BACKUP_FOLDER.toLowerCase()) namedCandidate = entry.path;
+      // Depth cap: a backup folder buried deeper than this is not something the app put there.
+      if (entry.path.split("/").length < FOLDER_DISCOVERY_MAX_DEPTH) queue.push(entry.path);
     }
-  } catch { /* the root could not be listed; the default path still gets checked */ }
-  let found = null;
-  for (const path of candidates) {
-    if (await hasBackup(path)) { found = path; break; }
   }
+  return namedCandidate ? { path: namedCandidate, hasBackup: false } : null;
+}
+
+async function adoptExistingBackupFolder() {
+  if (!nc || nc.backupFolderScanned === BACKUP_FOLDER_SCAN_VERSION) return;
+  if (nc.backupFolder) { nc.backupFolderScanned = BACKUP_FOLDER_SCAN_VERSION; saveState(); return; }
+  const found = await discoverExistingBackupFolder();
   if (!nc) return;
-  nc.backupFolderScanned = true;
-  if (found) {
-    const changed = (nc.backupFolder || DEFAULT_BACKUP_FOLDER) !== found;
-    if (changed) nc.backupFolder = found;
+  nc.backupFolderScanned = BACKUP_FOLDER_SCAN_VERSION;
+  // Chosen meanwhile in the picker: that choice stands.
+  if (found && !nc.backupFolder) {
+    nc.backupFolder = found.path;
+    delete nc.lastBackupEtag;
     saveState();
     renderSettings();
-    if (!nc.autoBackup) {
-      deps.showToast?.(changed ? `Found your KaChat backup in "${found}". Turn on Automatic Sync to restore from it.` : "Found your KaChat backup. Turn on Automatic Sync to restore from it.");
+    if (found.hasBackup && !nc.autoBackup) {
+      deps.showToast?.(`Found your KaChat backup in "${found.path}". Turn on Automatic Sync to restore from it.`);
+    } else if (!found.hasBackup) {
+      deps.showToast?.(`Using your existing "${found.path}" folder for backups.`);
     }
   } else {
     saveState();
@@ -2247,6 +2257,6 @@ export function initNextcloud(dependencies) {
 
   renderSettings();
   armAutoBackup();
-  // A connection saved before the folder scan existed gets it once.
-  if (nc && !nc.backupFolderScanned) adoptExistingBackupFolder().catch(() => {});
+  // A connection saved before this version of the folder scan gets it once.
+  if (nc && nc.backupFolderScanned !== BACKUP_FOLDER_SCAN_VERSION) adoptExistingBackupFolder().catch(() => {});
 }
