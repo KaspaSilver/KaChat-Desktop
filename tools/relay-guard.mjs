@@ -33,9 +33,10 @@
 //     everyone's counters at once.
 //   * The server's ChangeNOW API key (never in the page) rides only on the app's four swap calls -
 //     GET estimated-amount, GET min-amount, GET by-id, POST exchange on https://api.changenow.io -
-//     from a same-origin page, under its own per-client limit. A key header a client sends is
-//     dropped on every request, so nobody can route their own key through here either. Without a
-//     server key those four calls are answered "Swap is not available right now" (503).
+//     from a same-origin page or a listed KaPay Extension, under its own per-client limit. A key
+//     header a client sends is dropped on every request, so nobody can route their own key through
+//     here either. Without a server key those four calls are answered "Swap is not available right
+//     now" (503).
 //
 // Node 20+, no dependencies: the sidecar copy runs as-is under node:20-alpine (with relay-rules.mjs
 // beside it). What it refuses, strips and allows is in relay-rules.mjs, shared with the Cloudflare
@@ -49,7 +50,8 @@ import {
   WRITE_API_HOST_RE, NEXTCLOUD_WRITE_PATH_RE, NEXTCLOUD_REFUSED_MESSAGE, isNextcloudRelayRequest,
   JAR_ID_RE, NEXTCLOUD_ORIGIN_HEADER, RATE_MAX_KEYS, CHANGENOW_ORIGIN, CHANGENOW_KEY_HEADER,
   CHANGENOW_KEY_ROUTES, SWAP_UNAVAILABLE_MESSAGE, SWAP_PROBE_PATH, CHANGENOW_CLIENT_KEY_HEADER,
-  CHANGENOW_CLIENT_KEY_RE, ipv4Octets, ipv6Bytes, isBlockedHost, createLimiter, applyPreviewHeaders,
+  CHANGENOW_CLIENT_KEY_RE, EXTENSION_ID_HEADER, parseExtensionIds, listedExtensionCaller, ipv4Octets,
+  ipv6Bytes, isBlockedHost, createLimiter, applyPreviewHeaders,
 } from "./relay-rules.mjs";
 
 // The rules are defined in relay-rules.mjs; these were always exported from here, and still are.
@@ -190,6 +192,8 @@ export function parseTrustedProxies(spec) {
  *                  the key the person pasted in the app (CHANGENOW_CLIENT_KEY_HEADER). Never on a
  *                  site other people open.
  * @param {number}  [options.changenowRateMax] key-attached ChangeNOW calls per client per minute (30)
+ * @param {string}  [options.kapayExtensionIds] KAPAY_EXTENSION_IDS syntax: the KaPay Extension IDs
+ *                  whose Swap may use the server's key (listedExtensionCaller); empty: none
  * @param {string}  [options.changenowOrigin]  where the key routes live - tests only
  * @param {function} [options.resolveAllowed]  (hostname) => {address,family}|null - tests only
  * @param {function} [options.log]
@@ -206,6 +210,7 @@ export function createRelay(options = {}) {
   const changenowKey = () => String((typeof options.changenowApiKey === "function" ? options.changenowApiKey() : options.changenowApiKey) || "").trim();
   const changenowRateMax = Number(options.changenowRateMax) > 0 ? Number(options.changenowRateMax) : 30;
   const acceptClientChangenowKey = Boolean(options.acceptClientChangenowKey);
+  const kapayExtensionIds = parseExtensionIds(options.kapayExtensionIds);
   const changenowOrigin = String(options.changenowOrigin || CHANGENOW_ORIGIN).replace(/\/+$/, "").toLowerCase();
   const resolveTarget = typeof options.resolveAllowed === "function"
     ? options.resolveAllowed
@@ -387,7 +392,7 @@ export function createRelay(options = {}) {
         refuse(res, 503, SWAP_UNAVAILABLE_MESSAGE, { "x-kachat-swap": "unavailable" });
         return;
       }
-      if (!sameOriginCaller(req)) {
+      if (!sameOriginCaller(req) && !listedExtensionCaller(req.headers, kapayExtensionIds)) {
         refuse(res, 403, "Swap requests are only relayed for this site's own pages");
         return;
       }
@@ -413,6 +418,7 @@ export function createRelay(options = {}) {
     const jarId = String(headers["x-proxy-jar"] || "").trim();
     delete headers["x-proxy-jar"];
     delete headers[NEXTCLOUD_ORIGIN_HEADER];
+    delete headers[EXTENSION_ID_HEADER];
     const jarCookies = JAR_ID_RE.test(jarId) ? jarFor(jarId, origin.origin) : null;
     if (jarCookies && jarCookies.size) headers.cookie = [...jarCookies].map(([n, v]) => `${n}=${v}`).join("; ");
     // Talk's signaling channel is a long poll the server holds for up to 30s.

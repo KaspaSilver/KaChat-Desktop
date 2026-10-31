@@ -21,13 +21,15 @@
 //   CHANGENOW_API_KEY           secret: the server's ChangeNOW key. Unset: Swap is "not available".
 //   KACHAT_RELAY_RATE_MAX       requests per client per minute (default 600)
 //   KACHAT_CHANGENOW_RATE_MAX   key-attached ChangeNOW calls per client per minute (default 30)
+//   KAPAY_EXTENSION_IDS         the KaPay Extension IDs whose Swap may use the key (the Chrome Web
+//                               Store ID; Brave shares it). Unset: only this site's own pages swap.
 //   NC_PROXY_UPSTREAM_TIMEOUT_MS  wait for a read to start answering (default 30000; writes 120000)
 import {
   PROBE_REPLY, HOP_BY_HOP, STRIPPED_RESPONSE_HEADERS, CLIENT_IDENTITY_HEADERS, NAVIGATION_DESTS,
   WRITE_API_HOST_RE, NEXTCLOUD_REFUSED_MESSAGE, isNextcloudRelayRequest, NEXTCLOUD_ORIGIN_HEADER,
   CHANGENOW_ORIGIN, CHANGENOW_KEY_HEADER, CHANGENOW_KEY_ROUTES, SWAP_UNAVAILABLE_MESSAGE,
-  SWAP_PROBE_PATH, CHANGENOW_CLIENT_KEY_HEADER, ipv6Bytes, isBlockedHost, createLimiter,
-  applyPreviewHeaders,
+  SWAP_PROBE_PATH, CHANGENOW_CLIENT_KEY_HEADER, EXTENSION_ID_HEADER, parseExtensionIds,
+  listedExtensionCaller, ipv6Bytes, isBlockedHost, createLimiter, applyPreviewHeaders,
 } from "../../tools/relay-rules.mjs";
 
 const MOUNT_RE = /^\/nc-proxy(?=\/|$)/;
@@ -144,7 +146,9 @@ export async function onRequest({ request, env = {} }) {
   delete headers[CHANGENOW_CLIENT_KEY_HEADER];
   if (isChangenowKeyRoute(method, target)) {
     if (!changenowKey) return refuse(503, SWAP_UNAVAILABLE_MESSAGE, { "x-kachat-swap": "unavailable" });
-    if (!sameOriginCaller(request, siteHost)) return refuse(403, "Swap requests are only relayed for this site's own pages");
+    if (!sameOriginCaller(request, siteHost) && !listedExtensionCaller(headers, parseExtensionIds(env.KAPAY_EXTENSION_IDS))) {
+      return refuse(403, "Swap requests are only relayed for this site's own pages");
+    }
     if (limiterFor("changenow", numberSetting(env.KACHAT_CHANGENOW_RATE_MAX, 30))(who)) {
       return refuse(429, "Too many swap requests", { "retry-after": "60" });
     }
@@ -156,7 +160,7 @@ export async function onRequest({ request, env = {} }) {
   for (const name of Object.keys(headers)) {
     if (name.startsWith("cf-") || name.startsWith("sec-fetch-")) delete headers[name];
   }
-  for (const name of ["x-proxy-jar", NEXTCLOUD_ORIGIN_HEADER, "x-proxy-long-poll"]) delete headers[name];
+  for (const name of ["x-proxy-jar", NEXTCLOUD_ORIGIN_HEADER, "x-proxy-long-poll", EXTENSION_ID_HEADER]) delete headers[name];
   applyPreviewHeaders(headers, origin.hostname);
   const soft404 = headers["x-proxy-soft-404"] === "1";
   delete headers["x-proxy-soft-404"];

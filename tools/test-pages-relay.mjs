@@ -9,7 +9,7 @@
 // the write gate, the ChangeNOW key on the four swap calls from this site only, stripped request and
 // response headers, checked redirect hops, soft 404, rate limits, and no relaying into itself.
 import { onRequest, clientKey } from "../functions/nc-proxy/[[path]].js";
-import { CHANGENOW_KEY_HEADER, CHANGENOW_CLIENT_KEY_HEADER, NEXTCLOUD_REFUSED_MESSAGE, SWAP_UNAVAILABLE_MESSAGE } from "./relay-rules.mjs";
+import { CHANGENOW_KEY_HEADER, CHANGENOW_CLIENT_KEY_HEADER, NEXTCLOUD_REFUSED_MESSAGE, SWAP_UNAVAILABLE_MESSAGE, EXTENSION_ID_HEADER } from "./relay-rules.mjs";
 
 let failures = 0;
 let passes = 0;
@@ -116,6 +116,27 @@ async function relay(path, { method = "GET", headers = {}, body, env = {}, ip } 
   check("creating an exchange is the one ChangeNOW write", r.status === 200 && calls[0]?.headers.get(CHANGENOW_KEY_HEADER) === KEY);
   r = await relay(`/nc-proxy/${enc("https://api.changenow.io")}/v2/other`, { method: "POST", body: "{}", env: { CHANGENOW_API_KEY: KEY }, headers: same });
   check("no other ChangeNOW write", r.status === 403);
+  // The KaPay Extension: its fetches say Sec-Fetch-Site: none and name its ID; a POST also carries
+  // Origin: chrome-extension://<id>. Only IDs in KAPAY_EXTENSION_IDS.
+  const EXT = "abcdefghijklmnopabcdefghijklmnop";
+  const extEnv = { CHANGENOW_API_KEY: KEY, KAPAY_EXTENSION_IDS: `${"p".repeat(32)}, ${EXT}` };
+  const extGet = { "sec-fetch-site": "none", [EXTENSION_ID_HEADER]: EXT };
+  r = await relay(swap, { env: extEnv, headers: extGet });
+  check("a listed extension's swap call carries the server key", r.status === 200 && calls[0]?.headers.get(CHANGENOW_KEY_HEADER) === KEY);
+  check("the extension header is not passed on", calls[0] && !calls[0].headers.has(EXTENSION_ID_HEADER));
+  r = await relay(`/nc-proxy/${enc("https://api.changenow.io")}/v2/exchange`, { method: "POST", body: "{}", env: extEnv, headers: { ...extGet, origin: `chrome-extension://${EXT}` } });
+  check("a listed extension can create an exchange", r.status === 200 && calls[0]?.headers.get(CHANGENOW_KEY_HEADER) === KEY);
+  for (const [label, env, headers] of [
+    ["no KAPAY_EXTENSION_IDS", { CHANGENOW_API_KEY: KEY }, extGet],
+    ["an unlisted ID", extEnv, { ...extGet, [EXTENSION_ID_HEADER]: "b".repeat(32) }],
+    ["no ID header", extEnv, { "sec-fetch-site": "none" }],
+    ["a web page's Sec-Fetch-Site", extEnv, { ...extGet, "sec-fetch-site": "cross-site" }],
+    ["another extension's Origin", extEnv, { ...extGet, origin: `chrome-extension://${"c".repeat(32)}` }],
+    ["a web Origin", extEnv, { ...extGet, origin: "https://evil.example" }],
+  ]) {
+    r = await relay(swap, { env, headers });
+    check(`extension swap refused with ${label}`, r.status === 403 && calls.length === 0, `${r.status}`);
+  }
   // A swap limit of its own.
   const ip = "203.0.113.77";
   let last = null;

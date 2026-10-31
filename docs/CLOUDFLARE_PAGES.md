@@ -21,6 +21,7 @@ Environment variables (Settings > Variables and Secrets, Production):
 | `CHANGENOW_API_KEY` | Secret | The server's ChangeNOW key for Swap. Unset: Swap says "not available right now" |
 | `KACHAT_RELAY_RATE_MAX` | Text, optional | Relay requests per client per minute (default 600) |
 | `KACHAT_CHANGENOW_RATE_MAX` | Text, optional | Key-attached swap calls per client per minute (default 30) |
+| `KAPAY_EXTENSION_IDS` | Text, optional | The KaPay Extension's ID from the Chrome Web Store dashboard (Brave installs the same one), comma-separated with any unpacked test copy's. Its Swap then uses the server key too. Unset: only this site's pages can swap |
 
 ## What serves what
 
@@ -29,7 +30,8 @@ Environment variables (Settings > Variables and Secrets, Production):
   names carry a content hash. An unknown path gets `index.html`, as on the old nginx.
 - **`/nc-proxy/*`**: the Pages Function. Same rules as the Node relay (`tools/relay-rules.mjs`, shared
   by both), for a site other people open: no Nextcloud or Talk, the ChangeNOW key only on the four
-  swap calls from this site's own pages, sandboxed answers. The comment at the top of the function
+  swap calls from this site's own pages (and a KaPay Extension listed in `KAPAY_EXTENSION_IDS`),
+  sandboxed answers. The comment at the top of the function
   says what differs from the Node relay and why.
 
 ## Limits and cost

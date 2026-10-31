@@ -54,6 +54,8 @@ const relay = createRelay({
   // Read per request, so a key added to the environment of a restarted process needs no code change.
   changenowApiKey: () => process.env.CHANGENOW_API_KEY || "",
   changenowRateMax: Number(process.env.KACHAT_CHANGENOW_RATE_MAX || 30),
+  // The KaPay Extension's Swap: its Chrome Web Store ID (Brave shares it), comma-separated.
+  kapayExtensionIds: process.env.KAPAY_EXTENSION_IDS || "",
   log: (line) => console.warn(line),
 });
 

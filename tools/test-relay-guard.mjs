@@ -461,6 +461,33 @@ v6.server.close();
   check("changenow: X-Forwarded-Host counts from a trusted proxy", cnRelay.sameOriginCaller(fake("127.0.0.1", { host: "127.0.0.1:8790", "x-forwarded-host": "kachat.test", "sec-fetch-site": "same-origin", referer: "https://kachat.test/desktop/" })));
   check("changenow: X-Forwarded-Host is ignored from anyone else", !cnRelay.sameOriginCaller(fake("203.0.113.5", { host: "127.0.0.1:8790", "x-forwarded-host": "kachat.test", "sec-fetch-site": "same-origin", referer: "https://kachat.test/desktop/" })));
 
+  // A listed KaPay Extension: Sec-Fetch-Site: none, its ID in the header, and on a POST its Origin.
+  const EXT = "abcdefghijklmnopabcdefghijklmnop";
+  const { server: extServer } = relayServer({ changenowApiKey: SERVER_KEY, changenowOrigin: CN_ORIGIN, changenowRateMax: 100, kapayExtensionIds: EXT });
+  const extPort = await listen(extServer);
+  const extSeen = async (path, opts) => {
+    lastSeen = null;
+    const r = await request(extPort, `/nc-proxy/${CNE}${path}`, opts);
+    return { r, up: lastSeen };
+  };
+  const extGet = { "sec-fetch-site": "none", "x-kachat-extension": EXT };
+  const extMin = await extSeen(`/v2/exchange/min-amount${minQ}`, { headers: extGet });
+  check("changenow: a listed extension's call carries the server key", extMin.r.status === 200 && extMin.up?.headers[CHANGENOW_KEY_HEADER] === SERVER_KEY, `${extMin.r.status}`);
+  check("changenow: the extension header is not passed on", extMin.up && extMin.up.headers["x-kachat-extension"] === undefined);
+  const extPost = await extSeen("/v2/exchange", { method: "POST", headers: { ...extGet, origin: `chrome-extension://${EXT}`, "content-type": "application/json" }, body: "{}" });
+  check("changenow: a listed extension can create an exchange", extPost.r.status === 200 && extPost.up?.headers[CHANGENOW_KEY_HEADER] === SERVER_KEY, `${extPost.r.status}`);
+  for (const [label, headers] of [
+    ["an unlisted ID", { ...extGet, "x-kachat-extension": "b".repeat(32) }],
+    ["a web page's Sec-Fetch-Site", { ...extGet, "sec-fetch-site": "cross-site" }],
+    ["another extension's Origin", { ...extGet, origin: `chrome-extension://${"c".repeat(32)}` }],
+  ]) {
+    const { r, up } = await extSeen(`/v2/exchange/min-amount${minQ}`, { headers });
+    check(`changenow: extension refused with ${label}`, r.status === 403 && up === null, `${r.status}`);
+  }
+  const unlisted = await seen(`/v2/exchange/min-amount${minQ}`, { headers: extGet });
+  check("changenow: no extension swaps without kapayExtensionIds", unlisted.r.status === 403 && unlisted.up === null, `${unlisted.r.status}`);
+  extServer.close();
+
   // A redirect to another origin does not take the key along.
   const hop = await request(cnPort, `/nc-proxy/${CNE}/v2/exchange/by-id?id=hop`, { headers: page });
   check("changenow: the key does not follow a redirect to another origin", hop.status === 200 && JSON.parse(hop.body).headers[CHANGENOW_KEY_HEADER] === undefined, hop.body.slice(0, 120));

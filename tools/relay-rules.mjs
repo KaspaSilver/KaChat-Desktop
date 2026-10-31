@@ -90,6 +90,31 @@ export const SWAP_PROBE_PATH = "/__swap";
 export const CHANGENOW_CLIENT_KEY_HEADER = "x-kachat-changenow-key";
 export const CHANGENOW_CLIENT_KEY_RE = /^[A-Za-z0-9_-]{16,128}$/;
 
+/** The KaPay Extension's Swap (kachat-extension src/swaps.js) calls the relay from the extension's
+ *  own pages, never from this site, so it names itself in this header with its extension ID. */
+export const EXTENSION_ID_HEADER = "x-kachat-extension";
+const EXTENSION_ID_RE = /^[a-p]{32}$/;
+
+/** KAPAY_EXTENSION_IDS: the extension IDs whose swap calls take the server's key, comma- or
+ *  space-separated - the Chrome Web Store ID (Brave installs the same one) and any unpacked test
+ *  copy. Empty: no extension can swap through this server. */
+export function parseExtensionIds(value) {
+  return new Set(String(value || "").split(/[\s,]+/).map((id) => id.trim().toLowerCase()).filter((id) => EXTENSION_ID_RE.test(id)));
+}
+
+/** A swap call from a listed extension's own page. Chrome and Brave mark a fetch an extension makes
+ *  under its host permission Sec-Fetch-Site: none, which no web page can send; a POST also carries
+ *  Origin: chrome-extension://<id>, which must be the ID the header names (a GET carries none).
+ *  `headers` is a plain object with lower-case names. */
+export function listedExtensionCaller(headers, ids) {
+  if (!ids || ids.size === 0) return false;
+  if (String(headers["sec-fetch-site"] || "").toLowerCase() !== "none") return false;
+  const id = String(headers[EXTENSION_ID_HEADER] || "").trim().toLowerCase();
+  if (!ids.has(id)) return false;
+  const origin = headers.origin;
+  return origin === undefined || origin === null || String(origin).toLowerCase() === `chrome-extension://${id}`;
+}
+
 // --- Addresses -------------------------------------------------------------------------------
 
 export function ipv4Octets(ip) {
