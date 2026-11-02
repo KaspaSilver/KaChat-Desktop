@@ -145,3 +145,25 @@
 
 .kaposts-profile-buttons { display: flex; flex-wrap: wrap; gap: 10px; align-self: flex-start; margin-top: 4px; }
 .kaposts-profile-buttons > .kaposts-edit-kns { margin: 0; }
+
+/* --- The post action row's gaps (KaPosts-iPhone a714c97) ------------------------------------------
+   18 between the buttons' contents, as iOS; fitActionRow in ui/kaposts.js tries 12 and then 8 when a
+   post's counts would run past the row, so the row never pushes the post sideways. The gap is carried
+   by the buttons' own padding, so a tap between two buttons still lands on one, and the negative
+   margin keeps the first icon on the text's left edge. */
+.kaposts-cell .kaposts-actions.kaposts-actions {
+  --kaposts-action-gap: 18px;
+  gap: 0; flex-wrap: nowrap; justify-content: flex-start; max-width: none;
+  margin-left: calc(var(--kaposts-action-gap) / -2);
+}
+.kaposts-cell .kaposts-actions.kaposts-actions[data-kaposts-gap="12"] { --kaposts-action-gap: 12px; }
+.kaposts-cell .kaposts-actions.kaposts-actions[data-kaposts-gap="8"] { --kaposts-action-gap: 8px; }
+.kaposts-cell .kaposts-actions.kaposts-actions[data-kaposts-wrap] { flex-wrap: wrap; row-gap: 4px; }
+.kaposts-cell .kaposts-actions.kaposts-actions > .kaposts-action {
+  flex: 0 0 auto;
+  padding-left: calc(var(--kaposts-action-gap) / 2); padding-right: calc(var(--kaposts-action-gap) / 2);
+}
+.kaposts-cell .kaposts-actions.kaposts-actions > .kaposts-undo-pill {
+  padding-left: 7px; padding-right: 7px;
+  margin-left: calc(var(--kaposts-action-gap) / 2); margin-right: calc(var(--kaposts-action-gap) / 2);
+}

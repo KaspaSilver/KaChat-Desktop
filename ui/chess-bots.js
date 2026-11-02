@@ -1,9 +1,10 @@
-// Chess Online > Bots (iOS c3c04a1: ChessBotsView, ChessBotDetailView, ChessBotGameView; ONLINE_CHESS.md
-// §7). Five bots, level 1 to 5, as a ladder: level 1 is open, each level opens when the one
-// before it is beaten (kept on this device, per address). The bot runs here, its search in a Web
-// Worker (engine/chess-bot-worker.js); the game goes on chain in #chess-bots as it is played -
-// the start, every move (the player's and the bot's, both signed by the player's address) and a
-// resignation. No server, no stakes, no leaderboard.
+// KaPlay > Bots (iOS c3c04a1: ChessBotsView, ChessBotDetailView, ChessBotGameView; KaPlay ddec987:
+// ChessBotLeaderboardViews, ChessBotLeaderboardService, ChessBotLinks; ONLINE_CHESS.md §7). Five
+// bots, level 1 to 5, as a ladder: level 1 is open, each level opens when the one before it is
+// beaten (kept on this device, per address). The bot runs here, its search in a Web Worker
+// (engine/chess-bot-worker.js), and the game costs nothing while it is played; when it ends, its
+// result and moves go on chain in #chess-bots in one transaction, the stamp. A stamped win counts
+// on the bot's board and can be shared to KaPost; the post's challenge link opens the bot here.
 //
 // The screens live inside Chess Online's own screen (ui/chess-tournaments.js): its home card
 // opens them, its render() paints renderChessBots() while view.name is "bots", and its click,
@@ -14,20 +15,26 @@ import "./chess-bots.css";
 import * as Chess from "../engine/chess.js";
 import {
   CHESS_BOTS, CHESS_BOTS_CHANNEL, chessBot, SIDE_PREFERENCES, resolveSide, botRecord, isBotUnlocked,
-  addBotResult, parseBotRecords, sampleMoveContent, chessBotBestMove, ChessBotGame,
+  addBotResult, parseBotRecords, addStampedWin, parseStampedWins, indexerBotBoards, botBoardRows, botHasBeenPlayed,
+  sampleStampContent, chessBotBestMove, ChessBotGame,
 } from "../engine/chess-bot.js";
+import { botSharePostText, botChallengeBannerText } from "../engine/chess-bot-links.js";
+import { LEADERBOARD_PERIODS } from "../engine/chess-tournament.js";
 import { sendBroadcastMessage, broadcastPayloadBytes } from "../engine/broadcasts.js";
 import { confirmDialog } from "./dialogs.js";
 import { KAS_UNIT } from "../engine/network.js";
+import { getEndpoint } from "../engine/endpoints.js";
 
 /** Level -> { wins, losses, draws }, under the account's scope (iOS keeps address -> level ->
  *  record in one UserDefaults entry; here the scope is the address). */
 const RECORDS_KEY = "kachat-chess-bots-v1";
+/** Level -> [{ moves, at }]: the stamped wins (ChessBotProgress.stampedWins), per account. */
+const STAMPED_WINS_KEY = "kachat-chess-bot-stamped-wins-v1";
 /** ui/app.js's accountScopedKey prefix, for when the host passes no accountScopedKey. */
 const ACCOUNT_DATA_PREFIX = "kachat-account-data-v1";
 
 let ctx = null;                // { deps, render, exit }
-let screen = "ladder";         // ladder | detail | game
+let screen = "ladder";         // ladder | detail | game | boards | board
 let selectedLevel = 1;
 let sidePreference = "White";
 let game = null;
@@ -39,6 +46,12 @@ let feeText = null;            // "0.0017 KAS" once estimated for this account
 let feeEstimating = false;
 let resetScroll = false;
 let asking = false;            // a resign / leave sheet is up
+let challenge = null;          // a challenge link on screen (engine/chess-bot-links.js), its banner up
+let boards = {};               // period -> level -> { games, rows }: the indexer's boards
+let boardLevel = 1;
+let boardPeriod = "month";     // This month whenever a board comes up (iOS @State)
+let lastBoardsFetch = 0;
+let boardsSerial = 0;
 
 const deps = () => ctx?.deps || {};
 const esc = (v) => (deps().escapeHtml ? deps().escapeHtml(String(v ?? "")) : String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])));
@@ -49,18 +62,26 @@ const currentBot = () => chessBot(selectedLevel) || CHESS_BOTS[0];
 // Record (ChessBotProgress)
 // ---------------------------------------------------------------------------------------------
 
-function recordsKey() {
+function accountKey(key) {
   const d = deps();
-  if (typeof d.accountScopedKey === "function") return d.accountScopedKey(RECORDS_KEY);
+  if (typeof d.accountScopedKey === "function") return d.accountScopedKey(key);
   const address = String(d.engine?.address || "").trim();
-  return address ? `${ACCOUNT_DATA_PREFIX}:${address}:${RECORDS_KEY}` : RECORDS_KEY;
+  return address ? `${ACCOUNT_DATA_PREFIX}:${address}:${key}` : key;
 }
+function recordsKey() { return accountKey(RECORDS_KEY); }
 function loadRecords() {
   try { return parseBotRecords(localStorage.getItem(recordsKey())); } catch { return {}; }
 }
 function saveResult(level, kind) {
   const next = addBotResult(loadRecords(), level, kind);
   try { localStorage.setItem(recordsKey(), JSON.stringify(next)); } catch { /* storage blocked: this session only */ }
+}
+function loadStampedWins() {
+  try { return parseStampedWins(localStorage.getItem(accountKey(STAMPED_WINS_KEY))); } catch { return {}; }
+}
+function saveStampedWin(level, moves) {
+  const next = addStampedWin(loadStampedWins(), level, moves, Date.now());
+  try { localStorage.setItem(accountKey(STAMPED_WINS_KEY), JSON.stringify(next)); } catch { /* storage blocked: the indexer will have it */ }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -136,14 +157,53 @@ async function sendContent(content, address) {
   await sendBroadcastMessage({ engine, channel: CHESS_BOTS_CHANNEL, content, feeKas: "0", singleInput: true });
 }
 
-/** The "about 0.0017 KAS each" figure (ChessBotCodec.moveFeeText): a move at ply 40. */
-async function estimateMoveFee() {
+/** The "about 0.0017 KAS" figure (ChessBotCodec.stampFeeText): a game of 40 moves a side. */
+async function estimateStampFee() {
   if (feeText || feeEstimating || !deps().estimateFeeKas) return;
   feeEstimating = true;
   try {
-    const fee = await deps().estimateFeeKas(broadcastPayloadBytes(CHESS_BOTS_CHANNEL, sampleMoveContent()), { singleInput: true });
+    const fee = await deps().estimateFeeKas(broadcastPayloadBytes(CHESS_BOTS_CHANNEL, sampleStampContent()), { singleInput: true });
     if (fee != null && Number.isFinite(Number(fee))) { feeText = `${Number(fee).toFixed(4)} ${KAS_UNIT}`; requestRender(); }
-  } catch { /* "one small fee each" */ } finally { feeEstimating = false; }
+  } catch { /* "one small fee" */ } finally { feeEstimating = false; }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The boards (ChessBotLeaderboardService, ONLINE_CHESS.md §7.1)
+// ---------------------------------------------------------------------------------------------
+
+const BOARDS_MIN_MS = 20_000;
+
+/** GET /chess/bots/leaderboard?period=month|all&limit=100. At most every 20 s; any failure leaves
+ *  what is there in place. */
+function refreshBoards() {
+  if (lastBoardsFetch && Date.now() - lastBoardsFetch < BOARDS_MIN_MS) return;
+  const base = String(getEndpoint("broadcastIndexer") || "").trim().replace(/\/+$/, "");
+  if (!base) return;
+  lastBoardsFetch = Date.now();
+  const serial = ++boardsSerial;
+  (async () => {
+    for (const period of LEADERBOARD_PERIODS) {
+      let levels = null;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15_000);
+      try {
+        const url = new URL(`${base}/chess/bots/leaderboard`);
+        url.searchParams.set("period", period);
+        url.searchParams.set("limit", "100");
+        const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", signal: controller.signal });
+        if (response.ok) levels = indexerBotBoards(await response.json(), period);
+      } catch { levels = null; }
+      finally { clearTimeout(timer); }
+      if (serial !== boardsSerial) return;
+      if (!levels) continue;
+      boards = { ...boards, [period]: levels };
+      if (screen === "boards" || screen === "board") requestRender();
+    }
+  })().catch(() => {});
+}
+
+function boardRows(level, period) {
+  return botBoardRows({ boards, level, period, wins: loadStampedWins(), address: deps().engine?.address || "", nowMs: Date.now() });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -159,6 +219,8 @@ const ICON_CHECK = `<svg class="ok" viewBox="0 0 24 24" aria-hidden="true"><circ
 const ICON_TROPHY = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v5a5 5 0 0 1-10 0V4Z"/><path d="M7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4M12 14v3M8 20h8M9 17h6"/></svg>`;
 const ICON_FLAG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4m0 0h11l-2 4 2 4H5"/></svg>`;
 const ICON_EQUAL = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 10h7M8.5 14h7"/></svg>`;
+const ICON_SHARE = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3.5M8 7l4-4 4 4M7.5 10.5H6a1.5 1.5 0 0 0-1.5 1.5v7.5A1.5 1.5 0 0 0 6 21h12a1.5 1.5 0 0 0 1.5-1.5V12a1.5 1.5 0 0 0-1.5-1.5h-1.5"/></svg>`;
+const ICON_CROSSED_FLAGS = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21 15.5 4.5M15.5 4.5 21 8l-3.5 3.8L13 10.5M20 21 8.5 4.5M8.5 4.5 3 8l3.5 3.8 4.5-1.3"/></svg>`;
 const STAR_PATH = "M12 3.3l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.7l-5.2 2.8 1-5.9-4.3-4.1 5.9-.8Z";
 
 // ---------------------------------------------------------------------------------------------
@@ -184,6 +246,17 @@ function starsHtml(level) {
   let html = "";
   for (let star = 1; star <= 5; star += 1) html += `<svg viewBox="0 0 24 24" class="${star <= level ? "on" : ""}"><path d="${STAR_PATH}"/></svg>`;
   return `<span class="chess-bot-stars" role="img" aria-label="Level ${level} of 5">${html}</span>`;
+}
+
+/** What a challenge asks, at the top of the screen it opened (ChessBotChallengeBanner). */
+function challengeBannerHtml() {
+  const bot = chessBot(challenge?.level);
+  if (!bot) return "";
+  const text = botChallengeBannerText({
+    challenge, botName: bot.name, who: challenge.by ? (deps().displayNameFor?.(challenge.by) || challenge.by) : "",
+    unlocked: isBotUnlocked(loadRecords(), bot.level),
+  });
+  return `<div class="chess-bot-challenge">${ICON_CROSSED_FLAGS}<span>${esc(text)}</span></div>`;
 }
 
 function recordLineHtml(record) {
@@ -214,17 +287,18 @@ function renderLadder() {
       <div class="chess-t-hero">
         <span class="chess-t-hero-icon">${ICON_CPU}</span>
         <h2>Climb the ladder</h2>
-        <p>Five bots, level 1 to 5. Beat one to unlock the next. Every move, yours and the bot's, is a Kaspa transaction.</p>
+        <p>Five bots, level 1 to 5. Beat one to unlock the next. Each game's result is stamped on Kaspa when it ends.</p>
       </div>
+      ${challenge ? challengeBannerHtml() : ""}
       ${cards}
     </div>`;
 }
 
 // --- One bot before a game (ChessBotDetailView) ---
 
-function feeLine(bot) {
-  const each = feeText ? `about ${feeText} each` : "one small fee each";
-  return `Every move, yours and ${bot.name}'s, is a Kaspa transaction from your wallet, ${each}. Starting and resigning are one transaction too.`;
+function feeLine() {
+  const fee = feeText ? `about ${feeText}` : "one small fee";
+  return `The game itself is free. When it ends, win or lose, its result is stamped on Kaspa: one transaction from your wallet, ${fee}.`;
 }
 
 function renderDetail() {
@@ -240,6 +314,7 @@ function renderDetail() {
         ${starsHtml(bot.level)}
         <p>${esc(bot.bio)}</p>
       </div>
+      ${challenge?.level === bot.level ? challengeBannerHtml() : ""}
       <div class="chess-bot-panel row"><strong>Your record</strong>${recordLineHtml(record)}</div>
       <div class="chess-bot-panel">
         <strong>Play as</strong>
@@ -247,7 +322,7 @@ function renderDetail() {
           ${SIDE_PREFERENCES.map((option) => `<button class="settings-segmented-option${sidePreference === option ? " active" : ""}" type="button" role="radio" aria-checked="${sidePreference === option}" data-chess-bot-side="${option}">${option}</button>`).join("")}
         </div>
       </div>
-      <p class="chess-bot-fee">${ICON_LINK}<span>${esc(feeLine(bot))}</span></p>
+      <p class="chess-bot-fee">${ICON_LINK}<span>${esc(feeLine())}</span></p>
       <button class="primary-button chess-bot-play" type="button" data-chess-bot-play>Play ${esc(bot.name)}</button>
     </div>`;
 }
@@ -258,13 +333,11 @@ function statusText(g) {
   const bot = g.bot;
   if (g.result) {
     const { kind, why } = g.result;
-    if (kind === "won") return `You won by ${why}.`;
+    if (kind === "won") return `You won by ${why} in ${g.playerMoveCount} moves.`;
     if (kind === "lost") return why === "resignation" ? `You resigned. ${bot.name} wins.` : `${bot.name} won by ${why}.`;
     return `Draw by ${why}.`;
   }
-  if (g.sendError != null) return "Couldn't put the last move on Kaspa.";
   if (g.isThinking) return `${bot.name} is thinking…`;
-  if (g.outbox.length) return g.moves.length === 0 ? "Starting the game on Kaspa…" : "Putting the move on Kaspa…";
   if (g.board.sideToMove === g.playerColor) {
     return Chess.isKingInCheck(g.board, g.playerColor) ? "Check. Your move." : "Your move";
   }
@@ -293,6 +366,13 @@ function notation(played) {
   return `${letter}${captured ? "x" : ""}${Chess.algebraic(move.to)}${promotion}`;
 }
 
+/** Share to KaPost, once the win is on chain: what the post shows off can be looked up. */
+function shareButtonHtml(g) {
+  const title = g.stamp === "stamped" ? "Share to KaPost" : g.stamp === "failed" ? "Retry the stamp" : "Stamping the result…";
+  const waiting = g.stamp === "sending" || g.stamp === "none";
+  return `<button class="chess-bot-share" type="button" data-chess-bot-share ${waiting ? "disabled" : ""}>${ICON_SHARE}<span>${title}</span></button>`;
+}
+
 function endOverlayHtml(g) {
   const result = g.result;
   const [icon, headline] = result.kind === "won" ? [ICON_TROPHY, "You won!"] : result.kind === "lost" ? [ICON_FLAG, "You lost"] : [ICON_EQUAL, "Draw"];
@@ -306,6 +386,7 @@ function endOverlayHtml(g) {
         <strong>${headline}</strong>
         <small>${esc(statusText(g))}</small>
         ${unlockedLine}
+        ${result.kind === "won" ? shareButtonHtml(g) : ""}
         <div class="chess-bot-end-actions">
           <button class="primary-button" type="button" data-chess-bot-again>Play again</button>
           <button class="secondary-button chess-bot-done" type="button" data-chess-bot-done>Done</button>
@@ -345,10 +426,16 @@ function renderGame() {
       </div></div>
     </div>` : "";
 
-  let chainTrailing;
-  if (g.sendError != null) chainTrailing = `<button class="chess-bot-retry" type="button" data-chess-bot-retry>Retry</button>`;
-  else if (g.outbox.length) chainTrailing = `<span class="chess-bot-spinner small" role="progressbar" aria-label="Sending"></span>`;
-  else chainTrailing = ICON_CHECK;
+  let chainTrailing = "";
+  if (g.stamp === "failed") chainTrailing = `<button class="chess-bot-retry" type="button" data-chess-bot-retry>Retry</button>`;
+  else if (g.stamp === "sending") chainTrailing = `<span class="chess-bot-spinner small" role="progressbar" aria-label="Sending"></span>`;
+  else if (g.stamp === "stamped") chainTrailing = ICON_CHECK;
+  const chainText = {
+    none: "The result goes on Kaspa when the game ends",
+    sending: "Stamping the result on Kaspa…",
+    stamped: "Result stamped on Kaspa",
+    failed: "Couldn't stamp the result on Kaspa",
+  }[g.stamp];
 
   const moves = g.moves;
   let moveList = "";
@@ -357,7 +444,7 @@ function renderGame() {
   }
   if (!moveList) moveList = `<span class="empty">${g.playerColor === Chess.WHITE ? "You move first." : `${esc(bot.name)} moves first.`}</span>`;
 
-  const statusClass = g.sendError != null ? " error" : g.isOver ? " muted" : "";
+  const statusClass = g.isOver ? " muted" : "";
   return `
     ${headerHtml(`Level ${bot.level}`, g.isOver ? "" : `<button class="chess-t-resign" type="button" data-chess-bot-resign>Resign</button>`)}
     <div class="chess-t-body chess-t-game chess-bot-body">
@@ -369,10 +456,63 @@ function renderGame() {
       <p class="chess-bot-status${statusClass}" aria-live="polite">${esc(statusText(g))}</p>
       <div class="chess-board-wrap"><div class="chess-board chess-t-board chess-bot-board${canMove ? "" : " locked"}">${squares}</div>${showEnd && g.result ? endOverlayHtml(g) : ""}${promo}</div>
       <div class="chess-bot-chain">
-        <div class="chess-bot-chain-row">${ICON_LINK}<span class="chess-bot-chain-label">${g.movesOnChain} of ${g.moves.length} moves on Kaspa</span>${chainTrailing}</div>
-        ${g.sendError != null ? `<p class="chess-bot-chain-error">${esc(g.sendError)}</p>` : ""}
+        <div class="chess-bot-chain-row">${ICON_LINK}<span class="chess-bot-chain-label">${chainText}</span>${chainTrailing}</div>
+        ${g.stamp === "failed" ? `<p class="chess-bot-chain-error">${esc(g.stampError)}</p>` : ""}
       </div>
       <div class="chess-bot-moves" data-chess-bot-moves>${moveList}</div>
+    </div>`;
+}
+
+// --- Leaderboard > Bots: the bots that have been played (ChessBotLeaderboardsView) ---
+
+function renderBoards() {
+  const records = loadRecords();
+  const played = CHESS_BOTS.filter((bot) => botHasBeenPlayed({ records, boards, level: bot.level }));
+  const rows = played.map((bot) => {
+    const best = boardRows(bot.level, "all")[0];
+    return `
+      <button class="chess-bot-card" type="button" data-chess-bot-board="${bot.level}">
+        ${avatarHtml(bot, 44)}
+        <span class="chess-bot-card-main"><strong>${esc(bot.name)}</strong><small>${best ? `Best: ${best.moves} moves` : "Not beaten yet"}</small></span>
+        <span class="chess-bot-card-trailing">${ICON_CHEVRON}</span>
+      </button>`;
+  }).join("");
+  return `
+    ${headerHtml("Bots")}
+    <div class="chess-t-body chess-bot-body">
+      ${played.length ? "" : `<p class="field-hint">No bot has been played yet.</p>`}
+      ${rows}
+      <p class="field-hint">Ranked by the fewest moves to win.</p>
+    </div>`;
+}
+
+// --- One bot's board (ChessBotLeaderboardView) ---
+
+function renderBoard() {
+  const bot = chessBot(boardLevel) || CHESS_BOTS[0];
+  const month = boardPeriod === "month";
+  const rows = boardRows(bot.level, boardPeriod);
+  const my = String(deps().engine?.address || "");
+  const nameOf = (address) => deps().displayNameFor?.(address) || address;
+  const options = [["month", "This month"], ["all", "All time"]];
+  return `
+    ${headerHtml(bot.name)}
+    <div class="chess-t-body chess-bot-body">
+      <div class="settings-segmented full chess-t-segment" role="radiogroup" aria-label="Leaderboard period">
+        ${options.map(([id, label]) => `<button class="settings-segmented-option${boardPeriod === id ? " active" : ""}" type="button" role="radio" aria-checked="${boardPeriod === id}" data-chess-bot-period="${id}">${esc(label)}</button>`).join("")}
+      </div>
+      ${month ? `<p class="field-hint chess-t-period-note">Resets on the 1st of every month (UTC).</p>` : ""}
+      <p class="screen-kicker">Fewest moves to beat ${esc(bot.name)}</p>
+      ${rows.length ? "" : `<p class="field-hint">${esc(month ? `Nobody has beaten ${bot.name} this month yet.` : `Nobody has beaten ${bot.name} yet.`)}</p>`}
+      <div class="chess-t-list">
+        ${rows.map((row, index) => `
+          <button class="chess-t-row${row.address === my ? " me" : ""}" type="button" data-chess-bot-user="${esc(row.address)}">
+            <span class="chess-t-rank">${index + 1}</span>
+            ${deps().avatarHtmlFor?.(row.address, "chess-t-avatar") || ""}
+            <span class="chess-t-row-main"><strong>${esc(nameOf(row.address))}</strong></span>
+            <span class="chess-bot-board-moves">${row.moves} moves</span>
+          </button>`).join("")}
+      </div>
     </div>`;
 }
 
@@ -393,7 +533,6 @@ function onGameChange(g) {
 
 function newGame() {
   const d = deps();
-  if (d.isChattingBalanceZero?.()) { d.showFundingGate?.(); return; }
   const bot = currentBot();
   const playerColor = resolveSide(sidePreference);
   const address = d.engine?.address || "";
@@ -402,6 +541,7 @@ function newGame() {
     send: (content) => sendContent(content, address),
     think,
     record: (result) => saveResult(bot.level, result.kind),
+    recordStampedWin: (moves) => saveStampedWin(bot.level, moves),
     onChange: () => onGameChange(g),
     log: (line) => deps().appendEngineLog?.(line),
   });
@@ -423,7 +563,7 @@ async function askResign(leaving) {
   asking = true;
   try {
     const bot = game?.bot || currentBot();
-    const consequence = `It counts as a loss against ${bot.name}. Resigning is one transaction.`;
+    const consequence = `It counts as a loss against ${bot.name}, and the result goes on Kaspa in one transaction.`;
     return await confirmDialog({
       title: leaving ? "Leave the game?" : "Resign this game?",
       message: leaving ? `If you leave, you resign the game. ${consequence}` : consequence,
@@ -439,7 +579,8 @@ function go(next) {
   selectedSquare = null;
   pendingPromotion = null;
   resetScroll = true;
-  if (next === "detail") estimateMoveFee().catch(() => {});
+  if (next === "detail") estimateStampFee().catch(() => {});
+  if (next === "boards" || next === "board") refreshBoards();
   requestRender();
 }
 
@@ -454,8 +595,25 @@ async function back() {
     go("detail");
     return;
   }
-  if (screen === "detail") { go("ladder"); return; }
+  if (screen === "detail") {
+    // A challenge that opened this bot's screen ends with it; one that opened on the ladder, because
+    // its bot is still locked, stays up there.
+    if (challenge?.level === selectedLevel) challenge = null;
+    go("ladder");
+    return;
+  }
+  if (screen === "board") { go("boards"); return; }
+  if (screen === "boards") { ctx?.exit?.("leaderboard"); return; }
+  challenge = null;
   ctx?.exit?.();
+}
+
+/** Share to KaPost (ChessBotLinks.shareToKaPost): KaPost's composer with the post written; the
+ *  player still taps Post there. KaPost is in this app, so no kaposts://compose link. */
+function shareWin(g) {
+  const by = deps().engine?.address;
+  if (!by) return;
+  deps().openKaPostComposer?.(botSharePostText({ level: g.bot.level, botName: g.bot.name, moves: g.playerMoveCount, by, gameId: g.id }));
 }
 
 function tapSquare(file, rank) {
@@ -498,14 +656,33 @@ export function initChessBots({ deps: dependencies, render, exit }) {
 /** The home card opened the bots: the ladder. */
 export function openChessBots() {
   screen = "ladder";
+  challenge = null;
   selectedSquare = null;
   pendingPromotion = null;
   resetScroll = true;
 }
 
+/** The Leaderboard's Bots square: a board per played bot. */
+export function openChessBotBoards() {
+  go("boards");
+}
+
+/** A challenge link (ChessHomeView.takeChallenge): that bot's screen with the challenge at the top,
+ *  or the ladder if the bot is still locked, which says who to beat first. */
+export function openChessBotChallengeScreen(link) {
+  challenge = link;
+  if (isBotUnlocked(loadRecords(), link.level)) {
+    selectedLevel = link.level;
+    sidePreference = "White";
+    go("detail");
+  } else go("ladder");
+}
+
 export function renderChessBots() {
   if (screen === "game" && game) return renderGame();
   if (screen === "detail") return renderDetail();
+  if (screen === "boards") return renderBoards();
+  if (screen === "board") return renderBoard();
   return renderLadder();
 }
 
@@ -536,12 +713,30 @@ export function chessBotsClick(event) {
     go("detail");
     return;
   }
+  const board = t.closest("[data-chess-bot-board]");
+  if (board) {
+    boardLevel = Number(board.dataset.chessBotBoard);
+    boardPeriod = "month";
+    go("board");
+    return;
+  }
+  const period = t.closest("[data-chess-bot-period]");
+  if (period) { boardPeriod = period.dataset.chessBotPeriod; requestRender(); return; }
+  // A board's row: the same User Info sheet a public chat opens from View Profile.
+  const user = t.closest("[data-chess-bot-user]");
+  if (user) { deps().openUserInfo?.(user.dataset.chessBotUser); return; }
   const side = t.closest("[data-chess-bot-side]");
   if (side) { sidePreference = side.dataset.chessBotSide; requestRender(); return; }
   if (t.closest("[data-chess-bot-play]") || t.closest("[data-chess-bot-again]")) { newGame(); return; }
   if (t.closest("[data-chess-bot-done]")) { go("detail"); return; }
   if (t.closest("[data-chess-bot-see]")) { showEnd = false; requestRender(); return; }
   if (t.closest("[data-chess-bot-retry]")) { game?.retry(); return; }
+  if (t.closest("[data-chess-bot-share]")) {
+    const g = game;
+    if (g?.stamp === "stamped") shareWin(g);
+    else if (g?.stamp === "failed") g.retry();
+    return;
+  }
   if (t.closest("[data-chess-bot-resign]")) {
     const g = game;
     if (!g || g.isOver) return;
@@ -570,7 +765,7 @@ export function chessBotsLockedIn() {
 }
 
 /** May the dock take the player away? Only by resigning while a game is on - it asks
- *  ("Leave the game?"); Resign and leave resigns (the resign still goes on chain) and returns
+ *  ("Leave the game?"); Resign and leave resigns (the result still goes on chain) and returns
  *  to the bot's page. */
 export async function chessBotsMayLeave() {
   if (!chessBotsLockedIn()) return true;
@@ -582,8 +777,8 @@ export async function chessBotsMayLeave() {
   return true;
 }
 
-/** Another account: its own record and fee; a game of the old one stops here (nothing more is
- *  sent from the new address for it). */
+/** Another account: its own record, wins and fee; a game of the old one stops here (nothing more
+ *  is sent from the new address for it). */
 export function resetChessBotsForAccount() {
   try { game?.dispose(); } catch { /* fine */ }
   game = null;
@@ -593,4 +788,5 @@ export function resetChessBotsForAccount() {
   showEnd = false;
   endShownFor = null;
   feeText = null;
+  challenge = null;
 }

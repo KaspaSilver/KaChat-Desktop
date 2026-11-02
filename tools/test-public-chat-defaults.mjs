@@ -36,7 +36,9 @@ const r = {
 const engine = { address: "kaspa:qwalletone", onConnectionState: noop, onBroadcastBlockHits: noop, setBroadcastScanChannels: noop };
 const scoped = (key) => (engine.address ? `acct:${engine.address}:${key}` : key);
 let pushSyncs = 0;
+let blockedAccounts = [];
 rooms.initBroadcasts({
+  blockedAccounts: () => blockedAccounts,
   engine,
   accountScopedKey: scoped,
   escapeHtml: (value) => String(value),
@@ -65,6 +67,19 @@ const notifyStore = () => JSON.parse(localStorage.getItem(scoped("kachat-broadca
   r.eq(notifyStore().kaspa, true, "the bell is saved");
   r.check(pushSyncs > 0, "the push registration hears about it");
   r.eq(rooms.broadcastPushWatch().channels.join(","), [...FEATURED_BROADCAST_CHANNELS].sort().join(","), "push watches only the two bells");
+}
+
+// --- a blocked account is hidden in every room the push service watches (KaPosts-iPhone 9e22075) ---
+{
+  blockedAccounts = ["kaspa:qblocked"];
+  const before = pushSyncs;
+  rooms.broadcastBlockedAccountsChanged();
+  r.check(pushSyncs > before, "a block tells the push registration");
+  const { channels, hidden } = rooms.broadcastPushWatch();
+  for (const name of channels) r.check(hidden[name]?.includes("kaspa:qblocked"), `#${name} leaves out the blocked account`);
+  blockedAccounts = [];
+  rooms.broadcastBlockedAccountsChanged();
+  r.eq(Object.keys(rooms.broadcastPushWatch().hidden).length, 0, "undoing the block puts them back");
 }
 
 // --- once per wallet: a bell switched off stays off -------------------------------------------------

@@ -41,6 +41,12 @@ function reachable(selector) {
   return null;
 }
 
+/// Whether a touch landing at `x` is this swipe's: the chat rows' own swipes leave it alone (a chat
+/// and its list side by side on a tablet still have a Back to reach).
+export function edgeBackWouldClaim(x) {
+  return phone.matches && x <= EDGE_PX && Boolean(reachableBackButton());
+}
+
 let indicator = null;
 function showIndicator(dx, y, armed) {
   if (!indicator) {

@@ -28,6 +28,7 @@ import {
 } from "../engine/broadcasts.js";
 import { confirmDialog, promptDialog, PROMPT_EXTRA, alertDialog, chooseDialog, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
+import { askKaPostTerms, kaPostTermsAccepted, roomHiddenSenders, roomMessageReportBody, sendContentReport } from "./kapost-moderation.js";
 
 // Public chain data caches are global but per network: a testnet room is not the mainnet room.
 const NET_SUFFIX = IS_TESTNET ? "-testnet" : "";
@@ -757,8 +758,21 @@ function pruneCache() {
   }
 }
 
+// Blocked accounts are hidden in every room (KaPosts-iPhone 9e22075 PublicChatStore.blockedSenders).
+// They are not rows in hiddenByRoom: Room Info's Hidden Users lists that room's own hides, and a
+// block is undone under Blocked in KaPost's menu.
 function hiddenIn(channel) {
-  return new Set(hiddenByRoom[channel] || []);
+  return roomHiddenSenders(hiddenByRoom[channel], deps?.blockedAccounts?.());
+}
+
+/** The blocked list changed (a block, or an undo in KaPost's menu): they leave or come back to every
+ *  room, and the push service is told (broadcastPushWatch). */
+export function broadcastBlockedAccountsChanged() {
+  if (!deps) return;
+  try { renderChannelList(); } catch { /* list not mounted */ }
+  if (activeChannel) { try { renderRoom(); } catch { /* room not mounted */ } }
+  deps.onUnreadChanged?.();
+  deps.onPushPreferencesChanged?.();
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,7 +1224,7 @@ function buildMessageRow(m) {
   const avatar = document.createElement("span");
   avatar.className = "broadcast-avatar-slot group-avatar-clickable";
   avatar.innerHTML = deps.avatarHtmlForAddress?.(m.senderAddress, "message-avatar") || "";
-  avatar.addEventListener("click", (event) => { event.stopPropagation(); openBroadcastSenderMenu(m.senderAddress, event.clientX, event.clientY); });
+  avatar.addEventListener("click", (event) => { event.stopPropagation(); openBroadcastSenderMenu(m.senderAddress, event.clientX, event.clientY, m); });
   const card = buildMessageElement(m);
   if (mine) row.append(card, avatar);
   else row.append(avatar, card);
@@ -1460,13 +1474,13 @@ function jumpToBroadcastMessage(txId) {
 
 // The avatar menu (iOS BroadcastChannelView.avatarButton): who this is, and what you can do
 // about them. Same menu from the sender's name.
-function openBroadcastSenderMenu(address, x, y) {
+function openBroadcastSenderMenu(address, x, y, message = null) {
   void x; void y;
   if (!address) return;
   const mine = address === deps.engine.address;
   // iOS PublicChatChannelView.senderSheet: a header naming the sender and their address, then
   // one row per option saying what it does - View Profile, Open Chat, Send Kaspa, Copy Address,
-  // Hide User, in that order.
+  // Hide User, Report, Block, in that order (Report and Block: KaPosts-iPhone 9e22075).
   const options = [{ id: "profile", title: "View Profile", subtitle: "Their profile, .kachat name and address." }];
   if (!mine) {
     options.push({ id: "chat", title: "Open Chat", subtitle: "Message them directly, one to one." });
@@ -1476,6 +1490,8 @@ function openBroadcastSenderMenu(address, x, y) {
   options.push({ id: "copy", title: "Copy Address", subtitle: "Copy their Kaspa address." });
   if (!mine) {
     options.push({ id: "hide", title: "Hide User", subtitle: "Stop seeing their messages in this room. Undo it in Room Info.", destructive: true });
+    if (message) options.push({ id: "report", title: "Report", subtitle: "Report abusive or objectionable content. Opens an email with this message attached.", destructive: true });
+    options.push({ id: "block", title: `Block ${senderName(address)}`, subtitle: "Hides their posts and room messages, and stops them interacting with you.", destructive: true });
   }
   chooseDialog({ title: senderName(address), message: address, options }).then((choice) => {
     if (choice === "profile") deps.openUserInfo?.(address);
@@ -1483,7 +1499,25 @@ function openBroadcastSenderMenu(address, x, y) {
     else if (choice === "copy") deps.copyText?.(address).then(() => deps.showToast?.(deps.addressCopiedToastText?.(address) || "Address copied")).catch(() => {});
     else if (choice === "pay") deps.payInKaspa?.(address, deps.contactNameFor?.(address) || "");
     else if (choice === "hide") hideSender(address);
+    else if (choice === "report") reportBroadcastMessage(message);
+    else if (choice === "block") {
+      deps.blockAccount?.(address);
+      deps.showToast?.("Blocked. Undo it in the Feed's menu, under Blocked.");
+    }
   });
+}
+
+/** Reporting (KaPosts-iPhone 9e22075 reportMessage): the message's id, room, sender and text. Works
+ *  with no mail app, see sendContentReport. */
+function reportBroadcastMessage(m) {
+  if (!activeChannel || !m) return;
+  const body = roomMessageReportBody({
+    channel: activeChannel,
+    txId: m.txId,
+    senderAddress: m.senderAddress,
+    text: humanizeBroadcastContent(effectiveContent(activeChannel, m)),
+  });
+  sendContentReport(body, { copyText: deps.copyText, confirm: confirmDialog });
 }
 
 // A failed send of yours: drop the failed row and send the same content again.
@@ -1614,6 +1648,10 @@ function openBroadcastMessageMenu(m, x, y) {
       label: "Copy Message", icon: icons.copy,
       onClick: () => deps.copyText?.(text).then(() => deps.showToast?.("Message copied.")).catch(() => {}),
     });
+  }
+  // Report, on someone else's message (KaPosts-iPhone 9e22075), under Copy as on iOS.
+  if (!mine) {
+    items.push({ label: "Report", hint: "Report abusive or objectionable content. Opens an email with this message attached.", icon: icons.flag || icons.info, onClick: () => reportBroadcastMessage(m) });
   }
   // Translate (iOS 03e5128): someone else's plain text, in a language other than the reader's.
   // Public rooms only - the text is public already; 1:1 and group messages never leave the device.
@@ -2130,6 +2168,9 @@ function cancelVoiceRecordingIfActive() {
 // ---------------------------------------------------------------------------
 
 function openRoom(channel) {
+  // The Terms of Use come first the first time (KaPosts-iPhone 9e22075 ContentView), wherever the
+  // room was opened from: a circle, a link, a notification.
+  if (!kaPostTermsAccepted()) { askKaPostTerms({ onAgree: () => openRoom(channel) }); return; }
   if (normalizeBroadcastChannel(channel) !== activeChannel) releaseTypingFocus();
   activeChannel = normalizeBroadcastChannel(channel);
   // Every default room is joined at load (iOS 865c9ab) unless it was switched off; a link or a
@@ -2723,6 +2764,8 @@ export function stopBroadcastPolling() {
 // yet, then opens it - the same gate a pasted room name goes through.
 export function openBroadcastRoomFromLink(channel) {
   if (!deps) return;
+  // Before the join: Not Now on the Terms leaves the list as it was (KaPosts-iPhone 9e22075).
+  if (!kaPostTermsAccepted()) { askKaPostTerms({ onAgree: () => openBroadcastRoomFromLink(channel) }); return; }
   loadState({ caches: false });
   joinChannel(channel);
 }

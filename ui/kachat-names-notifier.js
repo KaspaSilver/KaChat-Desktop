@@ -94,6 +94,8 @@ export function removeKachatNameReminders(walletAddress) {
   for (const key of remindersStorageKeysForWallet(wallet)) {
     try { localStorage.removeItem(key); } catch { /* not stored */ }
   }
+  // and the names and offers it last saw for the wallet
+  try { localStorage.removeItem(SNAPSHOT_PREFIX + wallet); } catch { /* not stored */ }
 }
 
 function canNotify() {

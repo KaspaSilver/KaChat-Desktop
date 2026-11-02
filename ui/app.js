@@ -25,7 +25,8 @@ import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFrom
 import { kapostsFiatFieldText, kapostsKasFieldText, kapostsTipFieldAmount, kapostsSwitchTipText, kapostsDefaultTipSompi } from "./kaposts-format.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
 import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
-import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount, chessTournamentsMayLeave } from "./chess-tournaments.js";
+import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount, chessTournamentsMayLeave, openChessBotChallenge } from "./chess-tournaments.js";
+import { parseBotChallengeLink, botChallengeFromLaunchSearch } from "../engine/chess-bot-links.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { kachatHeroProfile, kachatCachedOwnedNameCount, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames, startKachatUnnamedIdentitySweep } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell, removeKachatNameReminders } from "./kachat-names-notifier.js";
@@ -40,6 +41,11 @@ import { broadcastPushWatch, activeBroadcastChannelName } from "./broadcasts.js"
 import { chatListUnreadCount, chatsTabUnreadCount, debouncedCountPublisher } from "./chat-unread.js";
 import { setBroadcastRoomsNotify } from "./broadcasts.js";
 import { kaPostsWatchedAuthorAddresses } from "./kaposts.js";
+import { openKaPostComposerWithText } from "./kaposts.js";
+// Terms of Use, Block and tapped room links (KaPosts-iPhone 9e22075); Feed to its top (45de945).
+import { blockKaPostAccount, closeKaPostCovers, kaPostsBlockedAddresses, kaPostsFeedToTop } from "./kaposts.js";
+import { broadcastBlockedAccountsChanged } from "./broadcasts.js";
+import { askKaPostTerms, kaPostTermsAccepted, kaPostTermsHtml } from "./kapost-moderation.js";
 import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml } from "./kachat-bots.js";
 import {
   configureAddressBook, addressBookName, addressBookEntry, addressBookIsEmpty, archiveAddressBook,
@@ -102,6 +108,11 @@ import {
 import { KNSProfileLinkBuilder, safeExternalHref, clearAllKnsCache } from "../engine/kns.js";
 import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
+import { createAccountBackupStatus, nextDefaultAccountName, accountHasFunds } from "./account-backup-status.js";
+import { configureAccountBackup, openAccountBackup, openBackupHygiene, closeAccountBackup } from "./account-backup.js";
+import { ownedNamesStorageKey } from "../engine/kachat-names/owned-names-cache.js";
+import { marketAddressesStorageKey } from "../engine/kachat-names/actions.js";
+import { ownProfileStorageKey } from "../engine/kachat-names/registry.js";
 import * as Chess from "../engine/chess.js";
 import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER as KNS_PROFILE_FIELD_EDIT_ORDER } from "../engine/kns-write.js";
 import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
@@ -113,6 +124,9 @@ import kachatLogoUrl from "./assets/kachat-logo.png";
 import addressExplainerUrl from "./assets/address-explainer.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, PROMPT_EXTRA, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
+import { attachRowSwipes, chatRowSwipeActions } from "./row-swipe.js";
+import { attachPinnedSearch } from "./pinned-search.js";
+import { edgeBackWouldClaim } from "./edge-back.js";
 import { startAppUpdateChecks } from "./app-update.js";
 import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
@@ -193,6 +207,12 @@ const STATE_BACKUP_KEY = "kachat-shell-state-backup-v1";
 const STATE_BACKUP_MIN_INTERVAL_MS = 60_000;
 let lastStateBackupWriteAt = 0;
 const ACCOUNT_DATA_PREFIX = "kachat-account-data-v1";
+// Which accounts still owe the backup steps, and when each was last checked (iOS d063b897
+// AccountBackupStatus). One key, two addresses: kept on both networks.
+const accountBackupStatus = createAccountBackupStatus({
+  storage: localStorage,
+  variants: (address) => [reencodeAddress(address, "kaspa"), reencodeAddress(address, "kaspatest")],
+});
 const SESSION_LOGGED_OUT_KEY = "kachat-session-logged-out-v1";
 // Marks that an account is active in THIS page. Memory only (DSK-023): browsers keep
 // sessionStorage on disk and give it back on "Reopen closed tab", session restore and Duplicate
@@ -630,6 +650,7 @@ let lockedByAnotherTabPromptOpen = false;
 async function handleLockedByAnotherTab() {
   refreshPasswordStatus();
   if (!isAppLocked()) return; // no password left to enter (it was removed there)
+  closeAccountBackup(); // the words stay off screen behind the lock
   if (!engine.privateKeyHex) { renderSavedAccountsScreen(); return; } // signed out: the sign-in screen is the lock
   if (lockedByAnotherTabPromptOpen) return;
   lockedByAnotherTabPromptOpen = true;
@@ -646,6 +667,7 @@ async function handleLockedByAnotherTab() {
  *  marking every tab logged out. */
 async function signOutLockedTab() {
   try {
+    closeAccountBackup();
     persistState();
     clearSessionActive();
     await engine.disconnect?.();
@@ -669,6 +691,23 @@ window.addEventListener("storage", (event) => {
   const wasUnlocked = keyVaultStorageChanged(event.key);
   if (wasUnlocked && !hasAppPassword()) showCopyToast("This account's password was removed in another tab.");
   handleLockedByAnotherTab();
+});
+// The account open in this tab was deleted in another one (Settings > Delete Account, or the sign-in
+// screen). Saving it again as this tab goes to the background would bring it back: with its password
+// gone too, its key in plaintext. Nothing of it is written from here on, and this tab goes to the
+// sign-in screen. Its own signal, not a change in the registry: a chatting-address switch also takes
+// an address off the registry, and leaves that address's chats in place on purpose.
+const ACCOUNT_DELETED_SIGNAL_KEY = "kachat-account-deleted-signal-v1";
+window.addEventListener("storage", (event) => {
+  if (event.key !== ACCOUNT_DELETED_SIGNAL_KEY || !event.newValue || (event.storageArea && event.storageArea !== localStorage)) return;
+  const address = String(engine.address || "").trim();
+  if (!address || canonicalAccountAddress(address) !== event.newValue) return;
+  closeAccountBackup();
+  clearSessionActive();
+  engine.clearSession();
+  state = { contacts: [], conversations: [] };
+  try { removeAccountScopedLocalData(address); } catch { /* the other tab already removed it */ }
+  flushChatStorage().finally(() => reloadKaChat());
 });
 function hasAppPassword() { return vaultHasAppPassword(); }
 async function setAppPassword(password) { await vaultSetAppPassword(password); }
@@ -1218,6 +1257,9 @@ function activateSavedAccount(address) {
   })));
   localStorage.removeItem(SESSION_LOGGED_OUT_KEY);
   markSessionActive(); // survives the sign-in reload even if "Keep me signed in" is off
+  // Every sign-in gets new tabs, opening on Chats (iOS d063b897 signInSession): the remembered tab
+  // is for a refresh of the same session, not for the next sign-in.
+  try { localStorage.removeItem(UI_SPOT_TAB_KEY); } catch { /* best-effort */ }
 }
 
 /** iOS IOS-016: before the active-wallet record (and, with `legacy`, the pre-v2 bare key) is
@@ -1407,14 +1449,29 @@ function hideLoggedOutScreen() {
   document.body.classList.remove("session-logged-out");
 }
 
-// iOS OnboardingView: "Remove Saved Account" in the same chooser as every other confirm
-// (ConfirmActionSheet): the red "Remove from Device" row with its consequence, then "Cancel".
+/// iOS d063b897 DeleteAccountSheet: the warning before an account is deleted, from Settings or the
+/// sign-in screen. Nothing can bring the account back without its seed phrase (and passphrase), so
+/// it says that first. `notBackedUp`: it hasn't finished the backup steps, which never blocks
+/// deleting (an empty account someone doesn't want shouldn't have to be backed up first). Fixed
+/// strings only: this goes in as markup.
+function deleteAccountWarningHtml({ notBackedUp, canBackUpHere }) {
+  return `<span class="delete-account-warning">
+    <span class="delete-account-warning-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4 21 19.5H3z"/><path d="M12 10v4.2"/><circle cx="12" cy="16.6" r=".3"/></svg></span>
+    ${notBackedUp ? `<span class="delete-account-warning-strong">This account isn't backed up. If you delete it now, it and its funds can never be recovered.</span>` : ""}
+    ${notBackedUp && !canBackUpHere ? "<span>To back it up first, sign in to it and use the card on the Profile tab.</span>" : ""}
+    <span>Make sure your seed phrase is backed up, and your passphrase too if you have one. They are the only way to recover this account and its funds.</span>
+  </span>`;
+}
+
+// The sign-in screen's Delete: the same warning, without a way to the seed phrase (a signed-out
+// account has none open to show).
 async function openSavedAccountDelete(account) {
   pendingSavedAccountRemoval = account;
   const choice = await chooseDialog({
-    title: "Remove Saved Account",
+    title: "Delete Account",
+    messageHtml: deleteAccountWarningHtml({ notBackedUp: accountBackupStatus.isPending(account.address), canBackUpHere: false }),
     options: [
-      { id: "remove", title: "Remove from Device", subtitle: `Deletes ${account.name} (${savedAccountShortAddress(account.address)}) and its local data from this device.`, destructive: true },
+      { id: "remove", title: "Delete Account", subtitle: `Deletes ${account.name} (${savedAccountShortAddress(account.address)}) and its local data from this device.`, destructive: true },
       { id: "cancel", title: "Cancel", subtitle: "Leave everything as it is." },
     ],
   });
@@ -1446,6 +1503,14 @@ function removeAccountScopedLocalData(address) {
   for (const encoded of new Set([cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")])) {
     // its .kachat reminders would keep firing for names this device no longer holds (iOS 6128f1e)
     if (encoded) { try { removeKachatNameReminders(encoded); } catch { /* not stored */ } }
+    // What this device remembers of its .kachat names, filed by address outside the account prefix.
+    // A pending registration or transfer stays: its record is what finishes or recovers funds
+    // already committed, if the seed comes back (engine/kns-write.js clearPendingKnsTransfer).
+    if (encoded) {
+      for (const key of [ownedNamesStorageKey(encoded), marketAddressesStorageKey(encoded), ownProfileStorageKey(encoded)]) {
+        try { localStorage.removeItem(key); } catch { /* not stored */ }
+      }
+    }
     // The pre-DSK-011 faucet lock lived outside the account prefix under a global key.
     try { localStorage.removeItem(`kachat_tn10_faucet_claimed_${String(encoded || "").toLowerCase()}`); } catch { /* not stored */ }
     const prefix = `${ACCOUNT_DATA_PREFIX}:${encoded}:`;
@@ -1460,9 +1525,15 @@ function removeAccountScopedLocalData(address) {
     }
   }
 
+  // Its backup status (iOS d063b897 AccountBackupStatus.forget), on both networks.
+  accountBackupStatus.forget(cleanAddress);
+
   let metadata = {};
   try { metadata = loadAccountMetaMap(); } catch {}
+  // Its name, on both networks: left behind, it would come back when the seed is imported again.
   delete metadata[cleanAddress];
+  delete metadata[reencodeAddress(cleanAddress, "kaspa")];
+  delete metadata[reencodeAddress(cleanAddress, "kaspatest")];
   if (Object.keys(metadata).length) saveAccountMetaMap(metadata);
   else localStorage.removeItem(ACCOUNT_SHELL_META_KEY);
 
@@ -1530,11 +1601,17 @@ function removeSavedAccountFromDevice(account) {
   if (!address) throw new Error("Saved account address is missing.");
   const remaining = loadSavedAccounts().filter((entry) => entry.address !== address);
   persistSavedAccounts(remaining);
+  // A tab still open on it stops saving it (only the event matters, so nothing stays stored).
+  try {
+    localStorage.setItem(ACCOUNT_DELETED_SIGNAL_KEY, canonicalAccountAddress(address));
+    localStorage.removeItem(ACCOUNT_DELETED_SIGNAL_KEY);
+  } catch { /* storage full: no signal, nothing else depends on it */ }
   // Its closed-app notifications stop with it (the device key removes the registration).
   webPushForgetAccount(address).catch(() => {});
   removeAccountScopedLocalData(address);
-  // The last account gone: its password protects nothing now, and the next account sets its own.
-  if (!remaining.length && releaseAppPasswordIfUnused()) refreshPasswordStatus();
+  // Its own password and Face ID record protect nothing now, whether or not other accounts remain;
+  // the shared one goes once no account is left in it.
+  if (releaseAppPasswordIfUnused()) refreshPasswordStatus();
   renderSavedAccountsScreen();
 }
 
@@ -1726,6 +1803,8 @@ const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"']+/g;
 //   kachat://broadcast/<channel>  https://kachat.app/broadcast/<channel>
 //   kachat://profile/<address>    https://kachat.app/u/<address>       (iOS 863b0e9; a missing kaspa: prefix means mainnet)
 //   kachat://pay/<address>?...    https://kachat.app/pay/<address>?... (iOS c6851d6 / 7c71a98, engine/payment-request.js)
+// and KaPlay's bot challenge, kachatchess://bot/<level>?... (KaPlay ddec987, engine/chess-bot-links.js).
+// That one has no card in a chat: INTERNAL_LINK_IN_TEXT_RE leaves it out, and only a KaPost draws it.
 // Everything a pasted link carries is untrusted, so the payload is re-validated here rather
 // than trusted from the URL's text.
 const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile|pay)\/[^\s<>"']+|https?:\/\/(?:www\.)?kachat\.app\/(?:post|broadcast|u|pay)\/[^\s<>"']+)/i;
@@ -1750,6 +1829,10 @@ function profileUniversalLink(address) {
 function parseKaChatInternalLink(raw) {
   const text = String(raw || "").trim();
   let target = null, payload = null;
+  if (/^kachatchess:\/\//i.test(text)) {
+    const challenge = parseBotChallengeLink(text);
+    return challenge ? { kind: "kaplayBot", challenge } : null;
+  }
   if (/^(?:kachat:\/\/pay\/|https?:\/\/(?:www\.)?kachat\.app\/pay\/)/i.test(text)) {
     const request = parsePaymentRequestLinkCached(text);
     return request ? { kind: "pay", request } : null;
@@ -1806,9 +1889,37 @@ function openKaChatInternalLink(link) {
   // payment request opens Send Kaspa, which it keeps too.
   if (isChildModeEnabled() && link.kind !== "profile" && link.kind !== "pay") { showCopyToast("Not available in Simple Mode."); return; }
   if (link.kind === "kapost") { setActiveAppTab("kaposts"); try { openKaPostFromNotification(link.txId); } catch {} }
-  else if (link.kind === "broadcast") { openPublicChatsTab(); try { openBroadcastRoomFromLink(link.channel); } catch {} }
+  else if (link.kind === "broadcast") { closeOpenSheets(); openPublicChatsTab(); try { openBroadcastRoomFromLink(link.channel); } catch {} }
   else if (link.kind === "profile") openProfileLink(link.address);
   else if (link.kind === "pay") openPaymentRequest(link.request);
+  else if (link.kind === "kaplayBot") openKaPlayChallenge(link.challenge).catch(() => {});
+}
+/** A bot challenge opens KaPlay on that bot (KaPlay ddec987 KaChatChessApp.onOpenURL). A game on
+ *  holds the board as it holds the dock: leaving it asks first, and a seat in a waiting room stays
+ *  where it is. */
+async function openKaPlayChallenge(challenge) {
+  const mayLeave = await chessTournamentsMayLeave().catch(() => true);
+  setActiveAppTab("chess");
+  if (mayLeave) openChessBotChallenge(challenge);
+}
+/** Desktop opened from a challenge link (`?challenge=`, engine/chess-bot-links.js): out of the
+ *  address bar at once, so a reload or a bookmark never opens it again, and opened once the account
+ *  is in, tried while the app boots or waits to be unlocked, as a tapped notification is. */
+function routeLaunchChallengeLink() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("challenge")) return;
+  const challenge = botChallengeFromLaunchSearch(location.search);
+  params.delete("challenge");
+  const query = params.toString();
+  try { history.replaceState(history.state, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash || ""}`); } catch { /* cosmetic */ }
+  if (!challenge) return;
+  const open = (attempt = 0) => {
+    if (engine.address) {
+      if (isChildModeEnabled()) showCopyToast("Not available in Simple Mode.");
+      else openKaPlayChallenge(challenge).catch(() => {});
+    } else if (attempt < 180) window.setTimeout(() => open(attempt + 1), 1000);
+  };
+  open();
 }
 /** Someone's profile link shows their User Info, contact or not (iOS 81df734); Open Chat is one
  *  click from there. Your own link lands on Chats. */
@@ -3294,6 +3405,8 @@ const appDetail = document.querySelector("[data-app-detail]");
 const detailEmptyState = document.querySelector("[data-detail-empty]");
 const emptyState = document.querySelector("[data-empty-state]");
 const chatList = document.querySelector("[data-chat-list]");
+// Set once the rows' swipes are wired, further down; renderChats can run before that.
+let chatRowSwipes = null;
 const chatSelectToggle = document.querySelector("[data-chat-select-toggle]");
 const chatSelectAll = document.querySelector("[data-chat-select-all]");
 const chatSelectionBar = document.querySelector("[data-chat-selection-bar]");
@@ -3835,7 +3948,7 @@ function routeNotificationClick(data) {
     else if (route.kind === "kapost" && route.txId) { setActiveAppTab("kaposts"); openKaPostFromNotification(route.txId); }
     else if (route.kind === "group" && route.groupId) { setActiveAppTab("chats"); openGroupChat(route.groupId); }
     // A public room's ping opens that room straight in the detail pane (iOS a062577).
-    else if (route.kind === "room" && route.channel) { if (openPublicChatsTab()) openBroadcastChannelFromNotification(route.channel); }
+    else if (route.kind === "room" && route.channel) { closeOpenSheets(); if (openPublicChatsTab()) openBroadcastChannelFromNotification(route.channel); }
     else if (route.kind === "tab" && route.tab === "kachat-names" && route.name) openKachatNameFromBell(route.name, { showTab: () => setActiveAppTab("kachat-names") });
     else if (route.kind === "tab" && route.tab) setActiveAppTab(route.tab);
     // A "Received" / "Balance increased" for one address opens that address's History (iOS 13046ad).
@@ -5419,6 +5532,7 @@ function handleChatStorageFlushError(error) {
 }
 
 function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
+  try { closeAccountBackup(); } catch { /* not yet initialized */ }
   // Creating or importing an account while signed in keeps this page alive, so the chat, group or
   // room open in the old account would stay open in the new one. Every account starts on its own
   // list, nothing selected (iOS c130dc1 ChatListView). Rooms close in resetBroadcastsForAccount.
@@ -7562,6 +7676,7 @@ document.querySelector("[data-notif-list]")?.addEventListener("click", (event) =
   if (!notif) return;
   if (notif.targetKind === "broadcast") {
     // The room opens straight in the detail pane (iOS a062577); Simple Mode opens nothing.
+    closeOpenSheets();
     if (openPublicChatsTab() && notif.targetId) { try { openBroadcastChannelFromNotification(notif.targetId); } catch {} }
   } else if (notif.targetKind === "group") {
     setActiveAppTab("chats");
@@ -9371,6 +9486,7 @@ function saveSpendingBalCacheEntries(updates) {
 // own total lands, and a read that finishes after the switch is dropped (iOS c130dc1).
 const profileSpendingTotal = accountScopedValue(() => engine.address, null);
 function renderProfileAccountTotal() {
+  renderAccountBackupCard();
   const el = document.querySelector("[data-manage-addresses-total]");
   if (!el) return;
   const chatting = sompiFromUserText(String(currentBalanceKas ?? ""));
@@ -9383,6 +9499,45 @@ function renderProfileAccountTotal() {
   // 8 decimals, as iOS's card shows it (formatKaspaExact).
   el.textContent = `${spendingKasText(chatting + (needsSpending ? spendingTotalSompi : 0n))} ${KAS_UNIT}`;
 }
+
+// Profile's card above Manage Addresses (iOS d063b897 accountBackupSection): until this account's
+// backup steps are finished, red once it holds funds; after that, Backup Hygiene every six months.
+function renderAccountBackupCard() {
+  const card = document.querySelector("[data-account-backup-card]");
+  if (!card) return;
+  const address = engine.address;
+  const pending = accountBackupStatus.isPending(address);
+  const hygiene = !pending && accountBackupStatus.isHygieneDue(address);
+  card.hidden = !(pending || hygiene);
+  if (card.hidden) return;
+  const hasFunds = pending && accountHasFunds(sompiFromUserText(String(currentBalanceKas ?? "")), profileSpendingTotal.get());
+  card.dataset.tone = hygiene ? "hygiene" : (hasFunds ? "funds" : "owed");
+  card.querySelector("[data-account-backup-card-title]").textContent = hygiene ? "Backup Hygiene" : "Backup Your Account To Prevent Loss Of Funds";
+  const note = card.querySelector("[data-account-backup-card-note]");
+  note.hidden = hygiene;
+  note.textContent = hasFunds ? "You now have funds that aren't backed up." : "If you lose this device, your seed phrase is the only way back.";
+}
+document.querySelector("[data-account-backup-card]")?.addEventListener("click", async () => {
+  if (accountBackupStatus.isPending(engine.address)) {
+    if (await unlockForSeedPhrase()) await openAccountBackup();
+  } else {
+    await openBackupHygiene();
+  }
+  renderAccountBackupCard();
+});
+configureAccountBackup({
+  status: accountBackupStatus,
+  activeAddress: () => String(engine.address || ""),
+  // From the key vault, only when the steps open: they keep it until they close.
+  readSeed: () => {
+    const record = activeSavedAccountRecord();
+    const words = String(record?.mnemonic || "").split(/\s+/).filter(Boolean);
+    return words.length ? { words, passphrase: String(record.passphrase || ""), passphraseForm: passphraseFormForRecord(record) } : null;
+  },
+  unlockSeed: () => unlockForSeedPhrase(),
+  onStatusChanged: () => renderAccountBackupCard(),
+  setEye: (button, revealed) => setPassphraseEye(button, revealed),
+});
 
 let spendingTotalToken = 0;
 async function refreshSpendingTotal() {
@@ -10974,12 +11129,24 @@ function restoreLastAppTab() {
   try {
     const saved = localStorage.getItem(UI_SPOT_TAB_KEY);
     if (saved && document.querySelector(`.sidebar-tab[data-app-tab="${saved}"]`)) tab = saved;
+    // Coming back to where you were isn't opening KaPost: the Terms wait for a tap, not a reload.
+    if (tab === "kaposts" && !kaPostTermsAccepted()) tab = "chats";
   } catch { /* restoring the spot is best-effort */ }
   // Always applied, Chats included. Skipping Chats because the markup "already shows it" left the
   // layout state setActiveAppTab owns (the chats-tab body class, the dock height) unset until the
   // first tab switch, so a refresh on Chats came up in the old full-width layout.
   setActiveAppTab(tab);
   applyDockLayout(); // falls back to chats if this account hides that tab
+}
+
+/// Every sign-in gets new tabs, opening on Chats (iOS d063b897 signInSession / KaPay 99ab88a). A
+/// saved account's sign-in reloads the page (activateSavedAccount drops the remembered tab);
+/// creating or importing one stays in this page, so what the last account left open closes here:
+/// Settings, where Log Out is, above all.
+function openNewTabsForSignIn() {
+  try { closeAccountOverlay(); } catch { /* not yet initialized */ }
+  try { showSettingsCategory(null); } catch { /* not yet initialized */ }
+  setActiveAppTab("chats");
 }
 
 /// The Hub section on screen, or null for the Hub's own grid.
@@ -10995,6 +11162,14 @@ function setActiveAppTab(tab) {
   // Child Mode choke point: every tab switch (dock click, restore, deep link,
   // programmatic) funnels through here, so gated tabs simply become Chats.
   if (isChildModeEnabled() && CHILD_HIDDEN_TABS.includes(tab)) tab = "chats";
+  // KaPost asks for its Terms of Use the first time it is opened (KaPosts-iPhone 9e22075, which asks
+  // on the KaPost app's first launch; Desktop is one app), from wherever: the dock, the Hub, a link.
+  // The tab doesn't change until they agree. A post a link asked for loads behind and is there then.
+  if (!kaPostTermsAccepted() && (tab === "kaposts" || (tab === "hub" && hubSection === "kaposts"))) {
+    if (tab === "hub") hubSection = null;
+    askKaPostTerms({ onAgree: () => { setActiveAppTab("kaposts"); applyDockLayout(); } });
+    return;
+  }
   // A tab that lives in the Hub is REACHED through the Hub, so asking for it directly - a deep
   // link, a notification tap, the restored spot - opens it there rather than failing.
   if (tab !== "hub" && !dockPrefs.dock.includes(tab) && dockPrefs.hub.includes(tab)) {
@@ -11098,8 +11273,11 @@ sidebarTabButtons.forEach((button) => {
     // Kaspa Hub is its own way back: clicking it while a section is open closes the section and
     // returns to the grid, so the button that opened a section is the one that leaves it.
     if (tab === "hub" && currentAppTab === "hub" && hubSection) hubSection = null;
+    const wasOnKaPost = tab === "kaposts" && currentAppTab === "kaposts";
     setActiveAppTab(tab);
     applyDockLayout();
+    // KaPost on the dock takes the feed back to its top (KaPosts-iPhone 45de945).
+    if (tab === "kaposts" && currentAppTab === "kaposts") { try { kaPostsFeedToTop({ animated: wasOnKaPost }); } catch { /* not started */ } }
   });
 });
 
@@ -11697,6 +11875,8 @@ function setChattingAddressStatus(text, { spinner = false } = {}) {
 let receiveScreenRun = 0;
 async function openReceiveKaspaScreen() {
   if (!engine.address || !chattingAddressScreen) return;
+  // a reminder only: receiving is never blocked (iOS d063b897 ReceiveKaspaQRView)
+  { const reminder = document.querySelector("[data-receive-backup-reminder]"); if (reminder) reminder.hidden = !accountBackupStatus.isPending(engine.address); }
   const run = ++receiveScreenRun;
   const account = engine.address;
   const live = () => run === receiveScreenRun && engine.address === account && !chattingAddressScreen.hidden;
@@ -11766,6 +11946,7 @@ async function openChattingAddressScreen(options = {}) {
 function closeChattingAddressScreen() {
   receiveScreenRun += 1; // a Receive still deciding its address no longer paints this screen
   if (chattingAddressScreen) chattingAddressScreen.hidden = true;
+  { const reminder = document.querySelector("[data-receive-backup-reminder]"); if (reminder) reminder.hidden = true; }
 }
 
 document.querySelector("[data-open-chatting-address]")?.addEventListener("click", openChattingAddressScreen);
@@ -12254,9 +12435,9 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 
 // --- Profile > About: Version and Donate (iOS aboutSection). Donate opens Profile's Send screen
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
-const APP_VERSION = "5.2.2";
+const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 261;
+const APP_BUILD = 262;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -14437,7 +14618,7 @@ attachTabSwipe(document.querySelector("[data-manage-view=\"list\"] .manage-addre
 /**
  * Swipe left / right on `body` to the next / previous of `tabs()` (tab buttons, the active one
  * with .active): judged when the finger lifts, on a move more than 50 px across and more than 1.5
- * times as far across as up or down, as on .kachat's tabs (ui/kachat-market.js). The touch is only
+ * times as far across as up or down, as .kachat's tabs did (KaPay 99ab88a made them cards). The touch is only
  * measured, never claimed, so the page keeps scrolling under it and a tap stays a tap. Touch only:
  * a mouse drag selects text, and the tabs are right there. Not from a text field.
  */
@@ -17247,6 +17428,7 @@ function renderChats() {
   chatList.hidden = !requestsRowHtml && visibleConversations.length === 0;
   if (visibleConversations.length === 0) {
     chatList.innerHTML = requestsRowHtml;
+    chatRowSwipes?.refresh();
     return;
   }
 
@@ -17257,6 +17439,7 @@ function renderChats() {
       active: conversationEntry.id === activeConversationId,
     }))
     .join("");
+  chatRowSwipes?.refresh();
 
   refreshVisibleKnsNames(visibleConversations);
 }
@@ -20378,6 +20561,12 @@ const settingsHubEl = (() => {
     const label = group.querySelector(".settings-group-label")?.textContent?.trim() || `Section ${index + 1}`;
     const danger = group.classList.contains("danger-zone-group");
     if (danger) {
+      // Terms of Use (KaPosts-iPhone 9e22075): to read again, after Diagnostics as on iOS.
+      rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-settings-hub-terms>
+        <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3.5h7.5L19 8v12.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5Z"/><path d="M9 11.5h6.5M9 14.5h6.5M9 17.5h4"/></svg></span>
+        <span class="settings-hub-label">Terms of Use</span>
+        ${chevron}
+      </button>`);
       // View Seed Phrase: a direct action right above Danger Zone, not a sub-page (matches iOS).
       rows.push(`<button class="settings-list-row settings-hub-row seed" type="button" data-settings-hub-seed>
         <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="7.25" r="4.5"/><circle cx="12" cy="5.6" r="1"/><path d="M12 11.75v9l1.9-1.6-1.9-1.6 1.9-1.6-1.9-1.6"/></svg></span>
@@ -20392,8 +20581,13 @@ const settingsHubEl = (() => {
   });
   // Log Out (iOS 84f9bb02): back in Settings from Profile, its own card at the very bottom, apart
   // from the category rows, so it is easy to find and hard to hit by accident.
+  // Delete Account above it (iOS d063b897).
   hub.innerHTML = `<div class="settings-list-card">${rows.join("")}</div>
     <div class="settings-list-card danger-list-card settings-logout-card">
+      <button class="settings-list-row settings-hub-row danger settings-delete-account-row" type="button" data-shell-action="delete-account">
+        <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg></span>
+        <span class="settings-hub-label">Delete Account</span>
+      </button>
       <button class="settings-list-row settings-hub-row danger settings-logout-row" type="button" data-shell-action="logout">
         <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M10 4H5.75A1.75 1.75 0 0 0 4 5.75v12.5C4 19.22 4.78 20 5.75 20H10"/><path d="M14 8l4 4-4 4"/><path d="M18 12H9"/></svg></span>
         <span class="settings-hub-label">Log Out</span>
@@ -20592,6 +20786,9 @@ settingsScreenEl?.addEventListener("click", (event) => {
   if (event.target.closest("[data-settings-hub-seed]")) {
     openRecoveryModal();
   }
+  if (event.target.closest("[data-settings-hub-terms]")) {
+    infoSheet({ title: "Terms of Use", html: kaPostTermsHtml() });
+  }
 });
 showSettingsCategory(null);
 
@@ -20704,6 +20901,10 @@ function setSettingsAppOnlyMode(appOnly) {
   });
   const seedRow = settingsHubEl?.querySelector("[data-settings-hub-seed]");
   if (seedRow) seedRow.hidden = appOnly;
+  const termsRow = settingsHubEl?.querySelector("[data-settings-hub-terms]");
+  if (termsRow) termsRow.hidden = appOnly;
+  const deleteRow = settingsHubEl?.querySelector("[data-shell-action=\"delete-account\"]");
+  if (deleteRow) deleteRow.hidden = appOnly;
   // iOS AppSettingsView: titled "App Settings" (no connection dot or balance), and its
   // Customization page has only Appearance, Language and Currency.
   const title = document.querySelector("[data-settings-overlay-title]");
@@ -21024,6 +21225,22 @@ function syncPublicChatsPane() {
 // A room handed over from outside the list - a notification, a room link, the New sheet: Chats
 // comes up with the pane cleared for it, and the caller opens the room. Simple Mode hides public
 // rooms, so there it clears nothing and returns false.
+/** A tapped room push or room link goes to the room with nothing over it (KaPosts-iPhone 9e22075
+ *  KaPostsTabView .openPublicChat). KaPost's screens close as on iOS; Desktop's other sheets close
+ *  through their own close buttons, so each runs its own clean-up, and one whose button is disabled
+ *  stays up. Left alone: a password prompt, what a game is holding (leaving means resigning),
+ *  and the composers inside KaPost's screen, which go away with the tab and keep their text. */
+function closeOpenSheets() {
+  try { closeKaPostCovers(); } catch { /* not started */ }
+  document.querySelectorAll(".modal-backdrop:not([hidden])").forEach((sheet) => {
+    if (sheet.matches("[data-password-modal], .chess-overlay") || sheet.closest("[data-app-tab-screen]")) return;
+    sheet.querySelector(".modal-close, [data-app-dialog-cancel], [data-kmkt-close]")?.click();
+  });
+  if (photoPreviewOverlay && !photoPreviewOverlay.hidden) closePhotoPreview();
+  if (chattingAddressScreen && !chattingAddressScreen.hidden) closeChattingAddressScreen();
+  if (accountOverlay && !accountOverlay.hidden) closeAccountOverlay();
+}
+
 function openPublicChatsTab() {
   if (isChildModeEnabled()) return false;
   setActiveAppTab("chats");
@@ -21268,6 +21485,8 @@ function chatCirclesHtml(items, pins, selecting) {
 // again closes it, as with a chat row.
 function openRoomFromCircle(name) {
   if (isChildModeEnabled()) return;
+  // Asked before the chat gives the pane up, so Not Now leaves it as it was.
+  if (!kaPostTermsAccepted()) { askKaPostTerms({ onAgree: () => openRoomFromCircle(name) }); return; }
   let rooms = [];
   try { rooms = chatCircleRooms(); } catch { rooms = []; }
   if (rooms.find((room) => room.name === name)?.open) { closeBroadcastRoom(); return; }
@@ -21580,15 +21799,41 @@ function deleteConversationsByIds(ids, { quiet = false } = {}) {
   if (!quiet) showCopyToast(idsToDelete.size === 1 ? "Chat deleted." : `${idsToDelete.size} chats deleted.`);
 }
 
-// Right-click on a chat row (iOS long-press): Read/Unread show contextually (the relevant one
-// only, matching Mail) and reuse the same paths as the Select-mode bulk bar; Delete routes
-// through its own confirmation. Nothing while Select mode is active - the bulk bar owns actions.
-onContextGesture(chatList, (event) => {
+// Right-click on a chat row: Read/Unread show contextually (the relevant one only, matching Mail)
+// and reuse the same paths as the Select-mode bulk bar; Delete routes through its own confirmation.
+// Nothing while Select mode is active - the bulk bar owns actions. On touch the rows swipe instead
+// of hold (KaChat-iPhone d063b897), so a hold no longer opens this; a mouse has no swipe and keeps it.
+chatList.addEventListener("contextmenu", (event) => {
   const row = event.target.closest("[data-conversation-id]");
   if (!row || chatSelectionModeActive) return;
   event.preventDefault();
+  // Android raises contextmenu for a hold.
+  if (event.pointerType === "touch" || event.pointerType === "pen" || chatRowSwipes?.fingerIsDown()) return;
   const conversationEntry = state.conversations.find((entry) => entry.id === row.dataset.conversationId);
   if (conversationEntry) openChatRowSheet(conversationEntry);
+});
+
+chatRowSwipes = attachRowSwipes(chatList, {
+  rowAttr: "data-conversation-id",
+  actionsFor(id) {
+    const conversationEntry = state.conversations.find((entry) => entry.id === id);
+    const contact = contactForConversation(conversationEntry);
+    if (!conversationEntry || !contact) return null;
+    return chatRowSwipeActions({
+      isSelf: isSelfConversation(conversationEntry),
+      unread: Number(conversationEntry.unreadCount || 0),
+      isSilent: getContactNotifyOverride(contact.address) === "off",
+      isPinned: chatCirclePins().includes(chatCirclePinId(contact.address)),
+    });
+  },
+  iconFor: (key) => ACTION_TILE_ICONS[key] || "",
+  onAction(id, actionId) {
+    const conversationEntry = state.conversations.find((entry) => entry.id === id);
+    if (conversationEntry) runChatRowChoice(conversationEntry, actionId);
+  },
+  enabled: () => !chatSelectionModeActive,
+  // On a touch screen wide enough to show a chat beside the list, the left edge is still Back.
+  ignoreStart: (x) => edgeBackWouldClaim(x),
 });
 
 /** A chat row's half sheet - also a pinned chat's circle's (iOS 7abc06e8). */
@@ -21630,13 +21875,20 @@ async function openChatRowSheet(conversationEntry) {
     openAddressBookEditor({ address: contact.address, suggestedName: contact.nameIsCustom ? contact.name : displayNameForAddress(contact) });
     return;
   }
+  runChatRowChoice(conversationEntry, choice);
+}
+
+/** Read, unread, pin, silence or delete on one chat: its half sheet's tiles and its row's swipes. */
+async function runChatRowChoice(conversationEntry, choice) {
+  const contact = contactForConversation(conversationEntry);
+  if (!contact) return;
   if (choice === "read") { conversationEntry.unreadCount = 0; persistState(); renderChats(); return; }
   if (choice === "unread") { conversationEntry.unreadCount = Math.max(1, Number(conversationEntry.unreadCount || 0)); persistState(); renderChats(); return; }
-  if (choice === "pin") { toggleChatCirclePin(pinId); return; }
+  if (choice === "pin") { toggleChatCirclePin(chatCirclePinId(contact.address)); return; }
   if (choice === "silence") {
     // Silencing is the existing per-contact notification override set to "off" - the one the
     // notification path already consults - not a second, parallel mute flag.
-    setContactPref(contact.address, "notify", isSilent ? undefined : "off");
+    setContactPref(contact.address, "notify", getContactNotifyOverride(contact.address) === "off" ? undefined : "off");
     renderChats();
     return;
   }
@@ -21859,6 +22111,7 @@ searchInput.addEventListener("input", () => {
   if (chatSearchDebounce) clearTimeout(chatSearchDebounce);
   chatSearchDebounce = window.setTimeout(() => { chatSearchDebounce = null; renderChats(); }, 180);
 });
+attachPinnedSearch(document.querySelector("[data-app-sidebar]"));
 
 messageArea.addEventListener("click", (event) => {
   const bubble = event.target.closest("[data-message-id]");
@@ -26820,7 +27073,7 @@ function openSavedAccounts() {
 document.querySelectorAll("[data-open-account-manager]").forEach((button) => {
   const label = button.textContent?.trim().toLowerCase() || "";
   button.addEventListener("click", () => {
-    if (label.includes("add") || button.classList.contains("profile-account-add")) openCreateAccountModal();
+    if (label.includes("add") || button.classList.contains("profile-account-add")) createNewAccount();
     else openSavedAccounts();
   });
 });
@@ -26831,15 +27084,7 @@ document.querySelector("[data-open-profile-account]")?.addEventListener("click",
 });
 
 const createAccountModal = document.querySelector("[data-create-account-modal]");
-const createAccountError = document.querySelector("[data-create-account-error]");
-const createAccountErrorSeed = document.querySelector("[data-create-account-error-seed]");
-const createNameInput = document.querySelector("[data-create-name]");
 const createPassphraseInput = document.querySelector("[data-create-passphrase]");
-const createSeedGrid = document.querySelector("[data-seed-grid]");
-const createSeedReveal = document.querySelector("[data-seed-reveal]");
-const createSeedConfirm = document.querySelector("[data-seed-confirm]");
-const createContinueBtn = document.querySelector("[data-continue-to-passphrase]");
-const generateAccountBtn = document.querySelector("[data-generate-account]");
 const createPassphraseConfirm = document.querySelector("[data-create-passphrase-confirm]");
 const createPassphraseError = document.querySelector("[data-create-passphrase-error]");
 const passphraseToggleBtn = document.querySelector("[data-create-passphrase-toggle]");
@@ -26885,6 +27130,8 @@ function passphrasePreviewNodes(flow) {
     root,
     address: root.querySelector("[data-passphrase-preview-address]"),
     note: root.querySelector("[data-passphrase-preview-note]"),
+    balance: root.querySelector("[data-passphrase-preview-balance]"),
+    verdict: root.querySelector("[data-passphrase-preview-verdict]"),
   };
 }
 
@@ -26918,6 +27165,7 @@ function schedulePassphrasePreview(flow) {
   if (passphrasePreviewTimers[flow]) clearTimeout(passphrasePreviewTimers[flow]);
   const token = ++passphrasePreviewTokens[flow];
   nodes.address.dataset.pending = "1";
+  renderPassphrasePreviewBalance(nodes, flow, { looking: true });
   passphrasePreviewTimers[flow] = setTimeout(async () => {
     try {
       const derived = await engine.deriveIdentityAddressRange(phrase, passphrase, {
@@ -26933,13 +27181,40 @@ function schedulePassphrasePreview(flow) {
         delete nodes.address.dataset.pending;
       } else {
         nodes.address.textContent = "Could not derive an address from this phrase.";
+        renderPassphrasePreviewBalance(nodes, flow, { failed: true });
+        return;
       }
+      // a further pause, so only the passphrase someone stopped typing is looked up (iOS d063b897)
+      await new Promise((resolve) => { setTimeout(resolve, 450); });
+      if (token !== passphrasePreviewTokens[flow]) return;
+      const byAddress = await spendingBalancesBatchSompi([address]);
+      if (token !== passphrasePreviewTokens[flow]) return;
+      renderPassphrasePreviewBalance(nodes, flow, { sompi: BigInt(Math.round(Number(byAddress.get(address)) || 0)) });
     } catch (error) {
       if (token !== passphrasePreviewTokens[flow]) return;
-      nodes.address.textContent = "Could not derive an address from this phrase.";
-      appendEngineLog(`Passphrase address preview failed: ${error.message}`);
+      if (nodes.address.dataset.pending) nodes.address.textContent = "Could not derive an address from this phrase.";
+      renderPassphrasePreviewBalance(nodes, flow, { failed: true });
+      appendEngineLog(`Passphrase preview failed: ${error.message}`);
     }
   }, 250);
+}
+
+// The balance is only the chatting address's: funds can also sit on the account's other addresses,
+// so an empty one suggests a wrong passphrase rather than proving it. Someone importing is told what
+// it suggests (iOS d063b897 PassphraseOptionView.previewBalanceRow).
+function renderPassphrasePreviewBalance(nodes, flow, { sompi = null, failed = false } = {}) {
+  if (!nodes.balance) return;
+  nodes.balance.classList.toggle("has-funds", sompi != null && sompi > 0n);
+  if (sompi != null) nodes.balance.textContent = `${formatSompiPlain(sompi)} ${KAS_UNIT}`;
+  else if (failed) nodes.balance.textContent = "Couldn't check";
+  else nodes.balance.innerHTML = '<span class="sk-spinner" aria-hidden="true"></span>';
+  if (!nodes.verdict) return;
+  nodes.verdict.hidden = flow !== "import" || sompi == null;
+  if (nodes.verdict.hidden) return;
+  nodes.verdict.classList.toggle("has-funds", sompi > 0n);
+  nodes.verdict.textContent = sompi > 0n
+    ? "This address holds funds, so this looks like the right account."
+    : "No funds on this address. If you expected funds here, check your passphrase.";
 }
 
 function resetPassphrasePreview(flow) {
@@ -26949,171 +27224,91 @@ function resetPassphrasePreview(flow) {
   if (passphrasePreviewTimers[flow]) clearTimeout(passphrasePreviewTimers[flow]);
   nodes.address.textContent = "Checking...";
   nodes.address.dataset.pending = "1";
+  renderPassphrasePreviewBalance(nodes, flow, { looking: true });
 }
 
-function showCreateStep(step) {
-  document.querySelectorAll("[data-create-step]").forEach((el) => { el.hidden = el.dataset.createStep !== step; });
-  // iOS PassphraseOptionView is titled "Passphrase"; every other step "Create Account".
-  const title = document.querySelector("[data-create-title]");
-  if (title) title.textContent = step === "passphrase" ? "Passphrase" : "Create Account";
-}
 /// The passphrase fields' eye (iOS eye / eye.slash): shows or hides both fields at once.
 function setPassphraseEye(button, revealed) {
   if (!button) return;
   button.innerHTML = revealed ? EYE_SLASH_SVG : EYE_SVG;
   button.setAttribute("aria-label", revealed ? "Hide passphrase" : "Show passphrase");
 }
-// Create Account, iOS acd879b / c6bd716: step 1 the name (local to this device), step 2 the seed
-// length as two buttons (with the warning that the seed phrase comes next), step 3 the seed phrase,
-// then the optional passphrase, which commits the account. The chosen length (12 | 24, null =
-// none yet - nothing is chosen for you, iOS 3a5c852).
-let createWordCount = null;
-const createNameNextBtn = document.querySelector("[data-create-name-next]");
-function renderCreateWordCount() {
-  document.querySelectorAll("[data-create-word-count]").forEach((button) => {
-    const chosen = Number(button.dataset.createWordCount) === createWordCount;
-    button.classList.toggle("chosen", chosen);
-    button.setAttribute("aria-checked", chosen ? "true" : "false");
-  });
-  updateGenerateAccountEnabled();
+/** A new seed phrase of 24 words (iOS d063b897: the only length Create New Account makes; Import
+ *  still takes 12 or 24). Nothing shows it: Profile's card leads to the backup steps. */
+async function generateNewAccountPhrase() {
+  if (!engine.kaspa) await ensureRuntimes();
+  // If the WASM genuinely failed to load, show the real reason (e.g. a fetch/HTTP error behind a
+  // proxy) instead of the opaque "Load Rusty Kaspa WASM first." from the SDK guard.
+  if (!engine.kaspa && lastWasmError) throw new Error(`Kaspa engine failed to load: ${lastWasmError.message}`);
+  const phrase = engine.generateMnemonicPhrase(24);
+  const words = phrase.split(/\s+/).filter(Boolean);
+  if (words.length !== 24) throw new Error(`Expected 24 words but generated ${words.length}.`);
+  return phrase;
 }
-function openCreateAccountModal() {
+
+/** The next free default name (iOS nextDefaultAccountName): renameable later. */
+function nextNewAccountName() {
+  return nextDefaultAccountName(savedAccountSummaries().map((account) => account.name));
+}
+
+// Create New Account is one tap (iOS d063b897 / KaPay 99ab88a OnboardingView.createAccount): 24
+// words, no passphrase, the next free name, then the Welcome Guide. On Desktop the same tap also
+// asks for this account's password (finalizeNewAccount), since its keys are encrypted with it.
+let creatingAccount = false;
+async function createNewAccount() {
+  if (creatingAccount) return;
+  creatingAccount = true;
+  const createButton = document.querySelector("[data-logged-out-create]");
+  const others = [document.querySelector("[data-logged-out-import]"), document.querySelector("[data-logged-out-create-passphrase]")];
+  if (createButton) { createButton.disabled = true; createButton.classList.add("is-busy"); }
+  others.forEach((button) => { if (button) button.disabled = true; });
+  try {
+    const phrase = await generateNewAccountPhrase();
+    await enterNewAccount({ name: nextNewAccountName(), phrase, passphrase: "", wordCount: 24 });
+  } catch (error) {
+    appendEngineLog(`Create account failed: ${error.message}`);
+    alertDialog({ title: "Couldn't Create Account", message: userFacingError(error) });
+  } finally {
+    creatingAccount = false;
+    if (createButton) { createButton.disabled = false; createButton.classList.remove("is-busy"); }
+    others.forEach((button) => { if (button) button.disabled = false; });
+  }
+}
+
+// "Advanced: Create with a Passphrase" (iOS d063b897 CreateWalletView), the only other way: also 24
+// words, then the passphrase wizard, which commits the account. The seed phrase isn't shown here
+// either.
+async function openCreateAccountModal() {
   pendingNewAccount = null;
-  if (createAccountError) { createAccountError.hidden = true; createAccountError.textContent = ""; }
-  if (createAccountErrorSeed) createAccountErrorSeed.hidden = true;
-  // Neither a name nor a seed length is chosen for you (iOS 3a5c852): each step's button stays
-  // disabled until its choice is made.
-  if (createNameInput) createNameInput.value = "";
   if (createPassphraseInput) { createPassphraseInput.value = ""; createPassphraseInput.type = "password"; }
-  if (createPassphraseConfirm) createPassphraseConfirm.value = "";
+  if (createPassphraseConfirm) { createPassphraseConfirm.value = ""; createPassphraseConfirm.type = "password"; }
   if (createPassphraseError) createPassphraseError.hidden = true;
-  createWordCount = null;
-  renderCreateWordCount();
-  updateCreateNameNextEnabled();
-  showCreateStep("name");
+  setPassphraseEye(passphraseToggleBtn, false);
+  resetPassphrasePreview("create");
+  updateCreatePassphraseSubmitEnabled();
+  try {
+    pendingNewAccount = { phrase: await generateNewAccountPhrase(), wordCount: 24, passphrase: "" };
+  } catch (error) {
+    alertDialog({ title: "Couldn't Create Account", message: userFacingError(error) });
+    return;
+  }
+  showPassphraseScreen("create", "question");
   if (createAccountModal) createAccountModal.hidden = false;
-  queueMicrotask(() => createNameInput?.focus());
 }
-function updateCreateNameNextEnabled() {
-  if (createNameNextBtn) createNameNextBtn.disabled = !String(createNameInput?.value || "").trim();
-}
-// STEP 1 -> STEP 2: the name is set; the seed length comes next.
-function createNameNext() {
-  if (!String(createNameInput?.value || "").trim()) return;
-  if (createAccountError) { createAccountError.hidden = true; createAccountError.textContent = ""; }
-  showCreateStep("length");
-  queueMicrotask(() => document.querySelector("[data-create-word-count]")?.focus());
-}
-createNameNextBtn?.addEventListener("click", createNameNext);
-createNameInput?.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); createNameNext(); }
-});
-document.querySelectorAll("[data-create-word-count]").forEach((button) => button.addEventListener("click", () => {
-  if (generateAccountBtn?.dataset.busy === "1") return;
-  createWordCount = Number(button.dataset.createWordCount) === 24 ? 24 : 12;
-  if (createAccountError) createAccountError.hidden = true;
-  renderCreateWordCount();
-}));
-document.querySelector("[data-create-length-back]")?.addEventListener("click", () => {
-  if (generateAccountBtn?.dataset.busy === "1") return;
-  showCreateStep("name");
-  queueMicrotask(() => createNameInput?.focus());
-});
-// "What is this?" under Generate Account (iOS 712bb4d SeedPhraseExplainerPage): what a seed phrase
-// is, on its own page in the Create Account flow - pushed like "What is a passphrase?", not a half
-// sheet over the length step. Back (or Escape) returns to the length step, choice kept.
-const seedExplainerStep = document.querySelector('[data-create-step="seed-explainer"]');
-const seedExplainerOpenBtn = document.querySelector("[data-seed-explainer-open]");
-function onSeedExplainerKey(event) {
-  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeSeedExplainer(); }
-}
-function openSeedExplainer() {
-  if (!seedExplainerStep) return;
-  showCreateStep("seed-explainer");
-  document.addEventListener("keydown", onSeedExplainerKey, true);
-  queueMicrotask(() => seedExplainerStep.querySelector("[data-seed-explainer-back]")?.focus());
-}
-/** Leaves the page (back to the length step) when it is showing; `refocus` false when the whole
- *  modal is closing. */
-function closeSeedExplainer({ refocus = true } = {}) {
-  document.removeEventListener("keydown", onSeedExplainerKey, true);
-  if (!seedExplainerStep || seedExplainerStep.hidden) return;
-  showCreateStep("length");
-  if (refocus) seedExplainerOpenBtn?.focus();
-}
-seedExplainerOpenBtn?.addEventListener("click", openSeedExplainer);
-seedExplainerStep?.querySelector("[data-seed-explainer-back]")?.addEventListener("click", () => closeSeedExplainer());
 function closeCreateAccountModal() {
-  closeSeedExplainer({ refocus: false });
+  if (createAccountModal?.dataset.busy === "1") return;
   if (createAccountModal) createAccountModal.hidden = true;
+  if (createPassphraseInput) createPassphraseInput.value = "";
+  if (createPassphraseConfirm) createPassphraseConfirm.value = "";
+  resetPassphrasePreview("create");
   pendingNewAccount = null;
   if (!engine.address || localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true") showLoggedOutScreen();
 }
 document.querySelectorAll("[data-close-create-account]").forEach((button) => button.addEventListener("click", closeCreateAccountModal));
 createAccountModal?.addEventListener("click", (event) => { if (event.target === createAccountModal) closeCreateAccountModal(); });
 
-function renderSeedGrid(phrase) {
-  if (!createSeedGrid) return;
-  createSeedGrid.replaceChildren();
-  phrase.split(/\s+/).filter(Boolean).forEach((word, index) => {
-    const cell = document.createElement("div");
-    cell.className = "seed-grid-cell";
-    cell.innerHTML = `<span class="seed-grid-index">${index + 1}.</span><span class="seed-grid-word"></span>`;
-    cell.querySelector(".seed-grid-word").textContent = word;
-    createSeedGrid.appendChild(cell);
-  });
-}
-
-// STEP 2 → STEP 3: generate a phrase and show it for backup (no derivation yet).
-function updateGenerateAccountEnabled() {
-  if (!generateAccountBtn || generateAccountBtn.dataset.busy === "1") return;
-  const named = String(createNameInput?.value || "").trim().length > 0;
-  generateAccountBtn.disabled = !(named && (createWordCount === 12 || createWordCount === 24));
-}
-createNameInput?.addEventListener("input", () => { updateCreateNameNextEnabled(); updateGenerateAccountEnabled(); });
-generateAccountBtn?.addEventListener("click", async () => {
-  const name = String(createNameInput?.value || "").trim();
-  const wordCount = createWordCount || 0;
-  if (!name) { showCreateStep("name"); queueMicrotask(() => createNameInput?.focus()); return; }
-  if (![12, 24].includes(wordCount)) { if (createAccountError) { createAccountError.textContent = "Choose a 12 or 24 word seed phrase."; createAccountError.hidden = false; } return; }
-  generateAccountBtn.disabled = true;
-  generateAccountBtn.dataset.busy = "1";
-  if (createAccountError) createAccountError.hidden = true;
-  try {
-    if (!engine.kaspa) await ensureRuntimes();
-    // If the WASM genuinely failed to load, show the real reason (e.g. a fetch/HTTP error behind a
-    // proxy) instead of the opaque "Load Rusty Kaspa WASM first." from the SDK guard.
-    if (!engine.kaspa && lastWasmError) throw new Error(`Kaspa engine failed to load: ${lastWasmError.message}`);
-    const phrase = engine.generateMnemonicPhrase(wordCount);
-    const words = phrase.split(/\s+/).filter(Boolean);
-    if (words.length !== wordCount) throw new Error(`Expected ${wordCount} words but generated ${words.length}.`);
-    pendingNewAccount = { name, wordCount, phrase, passphrase: "" };
-    renderSeedGrid(phrase);
-    // Reset the reveal/confirm gate each time.
-    if (createSeedGrid) createSeedGrid.hidden = true;
-    if (createSeedReveal) createSeedReveal.hidden = false;
-    if (createSeedConfirm) createSeedConfirm.checked = false;
-    if (createContinueBtn) createContinueBtn.disabled = true;
-    if (createAccountErrorSeed) createAccountErrorSeed.hidden = true;
-    showCreateStep("seed");
-  } catch (error) {
-    if (createAccountError) { createAccountError.textContent = error.message; createAccountError.hidden = false; }
-  } finally {
-    delete generateAccountBtn.dataset.busy;
-    updateGenerateAccountEnabled();
-  }
-});
-
-createSeedReveal?.addEventListener("click", () => {
-  if (createSeedGrid) createSeedGrid.hidden = false;
-  if (createSeedReveal) createSeedReveal.hidden = true;
-});
-createSeedConfirm?.addEventListener("change", () => {
-  if (createContinueBtn) createContinueBtn.disabled = !createSeedConfirm.checked;
-});
-
-// STEP 2 → enter app: derive the wallet (with optional passphrase), persist, and
-// launch the setup guide (new accounts only), matching iOS's justCreatedNewWallet.
+// Derive the wallet (with optional passphrase), persist, and enter the app. The setup guide follows
+// (enterNewAccount; new accounts only), matching iOS's justCreatedNewWallet.
 async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   if (!engine.kaspa) await ensureRuntimes();
   // BIP39 (audit EXT-010): derived from, and stored as, the NFKD passphrase.
@@ -27138,6 +27333,9 @@ async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   state = { contacts: [], conversations: [] };
   persistState();
   resetHandshakeSyncStateFor(wallet.address); // a new wallet starts from scratch on both networks (IOS-004)
+  // nobody has seen these words yet: Profile's card stays until they're backed up (iOS d063b897).
+  // Before the keys are saved, so no saved account was ever created without owing one.
+  accountBackupStatus.markPending(wallet.address);
   persistTestingWallet({ mnemonic: wallet.mnemonic, passphrase, passphraseForm: "nfkd", derivationPath: wallet.derivationPath, wordCount });
 
   if (accountShellPrefs.saveAccount !== false) {
@@ -27154,7 +27352,7 @@ async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   // A brand-new account lands on Chats. The remembered spot is the LAST session's tab, which
   // belongs to a different account entirely - being dropped into Profile (or Cold Storage) on
   // an account that has neither a profile nor any funds yet is nobody's idea of where to start.
-  setActiveAppTab("chats");
+  openNewTabsForSignIn();
   requestNotificationPermissionIfNeeded();
   currentBalanceKas = "--";
   updateWalletUi();
@@ -27175,28 +27373,9 @@ async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   return wallet;
 }
 
-// STEP 2 → STEP 3: after backing up the seed, advance to the optional passphrase
-// step (the wallet isn't derived until a passphrase is chosen or skipped).
-createContinueBtn?.addEventListener("click", () => {
-  if (!pendingNewAccount || !createSeedConfirm?.checked) return;
-  if (createPassphraseInput) { createPassphraseInput.value = ""; createPassphraseInput.type = "password"; }
-  if (createPassphraseConfirm) createPassphraseConfirm.value = "";
-  if (createPassphraseError) createPassphraseError.hidden = true;
-  setPassphraseEye(passphraseToggleBtn, false);
-  updateCreatePassphraseSubmitEnabled();
-  showCreateStep("passphrase");
-  showPassphraseScreen("create", "question");
-  queueMicrotask(() => createPassphraseInput?.focus());
-});
-// Back on the seed step (iOS navigation back): to the length step; the words are made again.
-document.querySelector("[data-create-seed-back]")?.addEventListener("click", () => {
-  showCreateStep("length");
-});
-// Back on the passphrase question: to the seed phrase, still revealed and confirmed.
-document.querySelector("[data-create-passphrase-question-back]")?.addEventListener("click", () => {
-  if (createAccountModal?.dataset.busy === "1") return;
-  showCreateStep("seed");
-});
+// Back on the passphrase question: out of Create Account, as iOS's navigation back leads to the
+// sign-in screen.
+document.querySelector("[data-create-passphrase-question-back]")?.addEventListener("click", closeCreateAccountModal);
 
 setPassphraseEye(passphraseToggleBtn, false);
 passphraseToggleBtn?.addEventListener("click", () => {
@@ -27212,28 +27391,35 @@ function updateCreatePassphraseSubmitEnabled() {
 }
 createPassphraseInput?.addEventListener("input", updateCreatePassphraseSubmitEnabled);
 
-// STEP 3 → enter app: derive with the chosen passphrase ("" when skipped),
-// persist, and launch the setup guide.
+/** Derives, persists and enters the new account, then the setup guide. */
+async function enterNewAccount(account) {
+  await finalizeNewAccount(account);
+  // First-run experience begins. Both markers are persisted BEFORE presenting
+  // (iOS MainTabView does the same): the in-memory "just created" trigger is
+  // lost on a page reload, so without them a reload mid-guide would be a
+  // permanent way past a mandatory run. markUserTypePending never downgrades
+  // "chosen", which is exactly why the run marker exists alongside it.
+  markUserTypePending();
+  markOnboardingRunPending("create");
+  openSetupGuide({ onboardingRun: true });
+}
+
+// Enter the app with the chosen passphrase ("" when skipped).
 async function commitPendingAccount(passphrase) {
   if (!pendingNewAccount) return;
-  const account = { ...pendingNewAccount, passphrase };
+  const account = { ...pendingNewAccount, name: nextNewAccountName(), passphrase };
   // iOS: Yes, No and "What is a passphrase?" (and Back) are all off while it commits.
   const buttons = [continueWithPassphraseBtn, skipPassphraseBtn, ...document.querySelectorAll("[data-create-passphrase-yes], [data-create-passphrase-explain], [data-create-passphrase-question-back], [data-create-passphrase-back]")];
   buttons.forEach((b) => { if (b) b.disabled = true; });
   if (createAccountModal) createAccountModal.dataset.busy = "1";
   if (createPassphraseError) createPassphraseError.hidden = true;
   try {
-    await finalizeNewAccount(account);
+    await enterNewAccount(account);
     pendingNewAccount = null;
     if (createAccountModal) createAccountModal.hidden = true;
-    // First-run experience begins. Both markers are persisted BEFORE presenting
-    // (iOS MainTabView does the same): the in-memory "just created" trigger is
-    // lost on a page reload, so without them a reload mid-guide would be a
-    // permanent way past a mandatory run. markUserTypePending never downgrades
-    // "chosen", which is exactly why the run marker exists alongside it.
-    markUserTypePending();
-    markOnboardingRunPending("create");
-    openSetupGuide({ onboardingRun: true });
+    if (createPassphraseInput) createPassphraseInput.value = "";
+    if (createPassphraseConfirm) createPassphraseConfirm.value = "";
+    resetPassphrasePreview("create");
   } catch (error) {
     appendEngineLog(`Create account failed: ${error.message}`);
     alertDialog({ title: "Error", message: error.message });
@@ -27987,6 +28173,7 @@ async function performChattingAddressSwitch() {
     // chat scope is deliberately left in place.
     if (previousAddress && previousAddress !== engine.address) {
       persistSavedAccounts(loadSavedAccounts().filter((entry) => entry.address !== previousAddress));
+      accountBackupStatus.carry(previousAddress, engine.address);
     }
     chattingPickerSwitching = false;
     closeChattingAddressPicker();
@@ -28507,7 +28694,7 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", pa
   localStorage.removeItem(SESSION_LOGGED_OUT_KEY);
   hideLoggedOutScreen();
   // As with create: an imported account starts on its chats, not on the last account's tab.
-  setActiveAppTab("chats");
+  openNewTabsForSignIn();
   requestNotificationPermissionIfNeeded();
   currentBalanceKas = "--";
   updateWalletUi();
@@ -28599,6 +28786,8 @@ async function commitImport(passphrase) {
   try {
     const imported = await importAndEnterAccount({ ...pendingImport, passphrase });
     pendingImport = null;
+    // whoever typed the words has them (iOS d063b897)
+    accountBackupStatus.markDone(imported?.address || engine.address);
     // A restored seed finds its spending addresses by itself - legacy and quantum, the same sweep as
     // Manage Addresses' Discover Addresses - in the background (iOS da2c8e2, owner's call
     // 2026-10-21). Only this path, a typed-in recovery phrase: creating or switching accounts (the
@@ -28653,7 +28842,8 @@ function resetRecoveryHold() {
 // iOS shows the seed phrase for a fixed window then re-hides it, so a shoulder-surfer
 // can't linger on a left-open screen. Match that: reveal for RECOVERY_VIEW_MS, count down,
 // then cover it again and restore the reveal button so the user can view it once more.
-const RECOVERY_VIEW_MS = 7000;
+// 20 seconds, long enough to write the words down (iOS d063b897, was 7).
+const RECOVERY_VIEW_MS = 20000;
 let recoveryViewTimer = 0;
 let recoveryViewCountdown = 0;
 
@@ -28683,7 +28873,7 @@ document.querySelector("[data-copy-seed-privatekey]")?.addEventListener("click",
 
 function renderRecoveryCountdown() {
   const label = recoveryPhraseBox?.querySelector("[data-recovery-countdown]");
-  // iOS hides the words again after 7s without a countdown line.
+  // iOS hides the words again after 20s without a countdown line.
   if (label) label.textContent = "";
 }
 
@@ -28779,6 +28969,17 @@ function closeRecoveryModal() {
   revealedMnemonic = "";
   { const copySeed = document.querySelector("[data-copy-seed-phrase]"); if (copySeed) copySeed.hidden = true; }
   if (revealRecoveryButton) revealRecoveryButton.hidden = false;
+  const closed = recoveryModalClosed;
+  recoveryModalClosed = null;
+  closed?.();
+}
+/** Delete Account's way to the seed phrase: the warning comes back when this closes. */
+let recoveryModalClosed = null;
+function waitForRecoveryModalToClose() {
+  return new Promise((resolve) => {
+    if (!recoveryModal || recoveryModal.hidden) { resolve(); return; }
+    recoveryModalClosed = resolve;
+  });
 }
 function openRecoveryModal() {
   const account = activeSavedAccountRecord();
@@ -28799,12 +29000,14 @@ recoveryModal?.addEventListener("click", (event) => { if (event.target === recov
 // Click-to-view (no longer hold): password-gated when the seed-phrase
 // protection is on.
 revealRecoveryButton?.addEventListener("click", async () => {
-  if (accountShellPrefs.passwordForSeed && hasAppPassword()) {
-    const ok = await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to view the seed phrase." });
-    if (!ok) return;
-  }
+  if (!(await unlockForSeedPhrase())) return;
   revealRecoveryPhraseAfterHold();
 });
+/** The seed phrase's gate (iOS AccountBackupView.unlock): the password, when it protects the seed. */
+async function unlockForSeedPhrase() {
+  if (!(accountShellPrefs.passwordForSeed && hasAppPassword())) return true;
+  return Boolean(await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to view the seed phrase." }));
+}
 
 // Profile's Log Out asks in the same chooser as every other confirm (iOS ProfileView logOutSection
 // -> ConfirmActionSheet): the red "Log Out" row with its consequence, then "Cancel".
@@ -28823,6 +29026,7 @@ document.querySelectorAll('[data-shell-action="logout"]').forEach((button) => bu
 
 async function performLogout() {
   try {
+    closeAccountBackup();
     persistState();
     // Signed out: no more closed-app notifications for this account on this browser. Signed with
     // the wallet key while it is still here; not waited for (the device key can finish it later).
@@ -28844,6 +29048,70 @@ async function performLogout() {
     appendEngineLog(`Logout failed: ${error.message}`);
   }
 }
+
+// Settings > Delete Account (iOS d063b897 DeleteAccountSheet, WalletManager.deleteCurrentAccount):
+// the warning, with a way to the seed phrase or, for an account that hasn't finished them, the
+// backup steps; both come back to the warning when they close.
+async function openDeleteAccountSheet() {
+  while (engine.address) {
+    const record = activeSavedAccountRecord();
+    const notBackedUp = accountBackupStatus.isPending(engine.address);
+    const choice = await chooseDialog({
+      title: "Delete Account",
+      messageHtml: deleteAccountWarningHtml({ notBackedUp, canBackUpHere: true }),
+      options: [
+        notBackedUp && record?.mnemonic ? { id: "backup", title: "Back Up Account", subtitle: "Write down your seed phrase before you delete." } : null,
+        !notBackedUp && record?.mnemonic ? { id: "seed", title: "View Seed Phrase and Passphrase", subtitle: "The passphrase shows too, if this account has one." } : null,
+        { id: "delete", title: "Delete Account", subtitle: "Removes this account and its data from this device.", destructive: true },
+        { id: "cancel", title: "Cancel", subtitle: "Leave everything as it is." },
+      ],
+    });
+    if (choice === "backup") {
+      if (await unlockForSeedPhrase()) await openAccountBackup();
+      continue;
+    }
+    if (choice === "seed") {
+      openRecoveryModal();
+      await waitForRecoveryModalToClose();
+      continue;
+    }
+    if (choice === "delete") await deleteCurrentAccount();
+    return;
+  }
+}
+
+// Removed the way the sign-in screen's Delete removes it, once nothing is running for it. Unlike Log
+// Out nothing is saved first, and the page reloads at the end: whatever was still in flight or
+// waiting on a timer for this account ends there instead of writing it back.
+//
+// iOS also revokes the app password it made on the user's Nextcloud. Desktop never makes one: the
+// person pastes their own, which may serve other devices too, so that stays theirs ("Nothing changes
+// on your Nextcloud server"); the copy on this device goes with the account, and the encrypted backup
+// stays on the server, as on iOS.
+async function deleteCurrentAccount() {
+  const address = String(engine.address || "").trim();
+  if (!address) return;
+  try {
+    closeAccountBackup();
+    // No more closed-app notifications for it; signed with the wallet key while it is still here.
+    if (engine.privateKeyHex) webPushSignOut({ privateKeyHex: engine.privateKeyHex, address }).catch(() => {});
+    localStorage.setItem(SESSION_LOGGED_OUT_KEY, "true");
+    clearSessionActive();
+    try { await engine.disconnect?.(); } catch { /* no node to say goodbye to */ }
+    engine.clearSession();
+    lockKeyVault();
+    setActiveConversationId(null);
+    state = { contacts: [], conversations: [] };
+    removeSavedAccountFromDevice({ address });
+    appendEngineLog(`Deleted account ${address}`);
+    await flushChatStorage();
+    reloadKaChat();
+  } catch (error) {
+    appendEngineLog(`Delete account failed: ${error.message}`);
+    showCopyToast(userFacingError(error));
+  }
+}
+document.querySelectorAll('[data-shell-action="delete-account"]').forEach((button) => button.addEventListener("click", openDeleteAccountSheet));
 
 // ---------------------------------------------------------------------------
 // Danger Zone (Settings), matching iOS's Danger Zone: only "Wipe and re-sync incoming
@@ -29010,8 +29278,8 @@ async function runIncomingResync(conversationIds) {
 }
 
 // No "Delete Account" or "Wipe all saved accounts & local data" here (owner, iOS SettingsView
-// dangerZonePage): removing an account is the accounts screen's job, where you can see which
-// one you are removing.
+// dangerZonePage): Delete Account is its own row above Log Out, and the sign-in screen's Delete
+// shows the same warning.
 
 // Chat History (iOS chatHistoryPage): the same archive file every device shares, saved to a
 // file here rather than a share sheet; import merges a file through the blocking restore modal.
@@ -29147,7 +29415,8 @@ async function unlockBeforeAddingAccount(open) {
   if (releaseAppPasswordIfUnused()) refreshPasswordStatus();
   open();
 }
-document.querySelector("[data-logged-out-create]")?.addEventListener("click", () => unlockBeforeAddingAccount(openCreateAccountModal));
+document.querySelector("[data-logged-out-create]")?.addEventListener("click", () => unlockBeforeAddingAccount(createNewAccount));
+document.querySelector("[data-logged-out-create-passphrase]")?.addEventListener("click", () => unlockBeforeAddingAccount(openCreateAccountModal));
 
 document.querySelector("[data-logged-out-import]")?.addEventListener("click", () => unlockBeforeAddingAccount(openImportAccountModal));
 
@@ -29462,7 +29731,7 @@ initWebPush({
 });
 routePendingNotificationClick();
 
-document.querySelector("[data-generate-wallet]")?.addEventListener("click", openCreateAccountModal);
+document.querySelector("[data-generate-wallet]")?.addEventListener("click", createNewAccount);
 
 document.querySelector("[data-import-wallet]")?.addEventListener("click", openImportAccountModal);
 
@@ -29726,6 +29995,8 @@ queueMicrotask(async () => {
   // the app without click handlers for the whole download.
   try {
     initKaPosts({
+      copyText: copyTextToClipboard,
+      onBlockedAccountsChanged: () => { try { broadcastBlockedAccountsChanged(); } catch { /* rooms not started */ } },
       // A KaChat link from a post opens in the app (iOS 5090ad9); returns whether it was one.
       openKaChatLink: (raw) => { const link = parseKaChatInternalLink(raw); if (!link) return false; openKaChatInternalLink(link); return true; },
       engine,
@@ -29862,7 +30133,10 @@ queueMicrotask(async () => {
       // The room owns the detail pane while open, beside the one Chats list (iOS a062577).
       onRoomVisibility: (open) => { publicRoomOpen = open; syncPublicChatsPane(); },
       // A room's ping, clicked: Chats comes up and the room opens in the pane.
-      openRoomFromNotification: (channel) => { if (openPublicChatsTab()) openBroadcastChannelFromNotification(channel); },
+      openRoomFromNotification: (channel) => { closeOpenSheets(); if (openPublicChatsTab()) openBroadcastChannelFromNotification(channel); },
+      // Block, and who is blocked: kaposts.js owns the list (KaPosts-iPhone 9e22075).
+      blockAccount: blockKaPostAccount,
+      blockedAccounts: kaPostsBlockedAddresses,
       onUnreadChanged: () => updateChatsListTabBadges(),
       readDraft, saveDraft,
       parseEditEnvelope, applyEditToContent, isEditableContent,
@@ -30088,7 +30362,7 @@ queueMicrotask(async () => {
   } catch (error) { appendEngineLog(`initNextcloud did not start: ${error?.message || error}`); }
 
   // Chess Online is one screen: whatever goes wrong there must not stop the rest of startup.
-  try { initChessTournamentsSafe(); } catch (error) { appendEngineLog(`Chess Online did not start: ${error?.message || error}`); }
+  try { initChessTournamentsSafe(); routeLaunchChallengeLink(); } catch (error) { appendEngineLog(`Chess Online did not start: ${error?.message || error}`); }
   // Kaspa Hub, 5.2: the .kachat marketplace (UI only) and KaChat Stats (the indexers' numbers).
   try {
     // .kachat names are live on testnet-10 (iOS 5df42b4): one shared service/registry/actions runtime.
@@ -30315,6 +30589,8 @@ queueMicrotask(async () => {
     avatarHtmlFor: (address, className) => avatarHtmlForAnyAddress(address, className),
     estimateFeeKas: (payloadBytes, opts) => engine.estimateMessageFee(payloadBytes, opts),
     openUserInfo: (address) => openChatInfoForAddress(address),
+    // A stamped win's Share to KaPost (KaPlay ddec987): the composer, with the post written.
+    openKaPostComposer: (text) => { setActiveAppTab("kaposts"); openKaPostComposerWithText(text); },
   }); }
 
   try {
@@ -31473,6 +31749,7 @@ function jumpToGroupMessage(targetKey) {
 
 // Minimal inline-SVG icons for the message context menu (Telegram-style).
 const MSG_MENU_ICONS = {
+  flag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4.5c4-2.2 7 2.2 14 0v9.5c-7 2.2-10-2.2-14 0"/></svg>',
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
   reply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>',
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',

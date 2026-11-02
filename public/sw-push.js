@@ -55,6 +55,21 @@
   }
   function joined(a, b, sep) { return a && b ? `${a}${sep}${b}` : (a || b || ""); }
 
+  // A reply or quote push opens the reply or quote itself, the same target the in-app bell uses
+  // (KaPosts-iPhone 093fe4d kaPostsPushOpensAction). post_id is the post it was made ON, and opening
+  // that left you on your own post waiting for the indexer to list the reply. iOS reads the action's
+  // txid from the APNs collapse id; here it is the payload's tx_id, the same value on the server.
+  function kapostsPushTarget(p) {
+    const action = lower(p.tx_id);
+    const kind = String(p.kaposts_kind || "");
+    const body = String(p.body || "").toLowerCase();
+    const opensAction = kind
+      ? kind === "reply" || kind === "quote"
+      : body.indexOf("replied to your") >= 0 || body.indexOf("quoted your") >= 0;
+    if (opensAction && /^[0-9a-f]{64}$/.test(action)) return action;
+    return String(p.post_id || "");
+  }
+
   /**
    * payload -> { title, options, badge: "increment" | number | null, suppress }.
    * `suppress` = iOS would show nothing (your own message, a blocked sender, the other network):
@@ -143,7 +158,8 @@
       out.title = "KaPost";
       out.options.body = joined(String(p.subtitle || "").trim(), tidy(p.body, ""), " ") || "New activity";
       out.options.tag = `kachat-kaposts-${p.tx_id || p.post_id || "activity"}`;
-      out.options.data.route = p.post_id ? { kind: "kapost", txId: String(p.post_id) } : { kind: "tab", tab: "kaposts" };
+      const target = kapostsPushTarget(p);
+      out.options.data.route = target ? { kind: "kapost", txId: target } : { kind: "tab", tab: "kaposts" };
       return out;
     }
 

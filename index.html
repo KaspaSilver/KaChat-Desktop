@@ -13,7 +13,7 @@
   <!-- Too-old browsers (no WebAssembly / modern JS, e.g. iOS 10) get a clear message, not a blank layout. -->
   <script src="/browser-check.js"></script>
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=393" />
+  <link rel="stylesheet" href="./ui/styles.css?v=394" />
   <meta name="theme-color" content="#000000" />
   <link rel="manifest" href="manifest.json" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
@@ -64,6 +64,8 @@
       <div class="logged-out-actions">
         <button class="logged-out-primary" type="button" data-logged-out-create><span>＋</span>Create New Account</button>
         <button class="logged-out-secondary" type="button" data-logged-out-import><span>⇩</span>Import Existing Account</button>
+        <!-- iOS d063b897: a passphrase moved behind this; Create New Account above is one tap. -->
+        <button class="logged-out-advanced" type="button" data-logged-out-create-passphrase>Advanced: Create with a Passphrase</button>
       </div>
       <!-- Which KaChat this is, before any account is open (the same label as Profile > About). -->
       <p class="logged-out-version" data-logged-out-version></p>
@@ -102,11 +104,15 @@
     <div class="app-body" data-app-body>
       <aside class="app-sidebar" data-app-sidebar>
         <!-- Chats is one list (iOS a062577): the Chats / Group Chats / Public Chats tabs are gone. -->
-        <!-- The large "Chats" title over the search field (iOS ChatListView navigationTitle, .large). -->
+        <!-- The fixed "Chats" title and search field, outside the list's scroll (iOS PinnedListHeader, KaChat-iPhone d063b897). -->
         <h1 class="kaposts-title chats-list-title">Chats</h1>
-        <section class="search-wrap" data-search-wrap aria-label="Search chats">
-          <input class="search-input" type="search" placeholder="Search chats" autocomplete="off" />
-        </section>
+        <div class="pinned-search chats-pinned-search">
+          <section class="search-wrap" data-search-wrap aria-label="Search chats">
+            <input class="search-input" type="search" placeholder="Search chats" autocomplete="off" />
+            <button class="pinned-search-clear" type="button" data-pinned-search-clear aria-label="Clear" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path class="cutout-stroke" d="m8.5 8.5 7 7m0-7-7 7"/></svg></button>
+          </section>
+          <button class="pinned-search-cancel" type="button" data-pinned-search-cancel hidden>Cancel</button>
+        </div>
 
         <div class="sidebar-scroll">
           <!-- Group chats and public rooms as a sideways row of circles above the chats (iOS
@@ -832,6 +838,17 @@
             <svg class="testnet-faucet-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
           </button>
 
+          <!-- Until this account's backup steps are finished, red once it holds funds; then Backup
+               Hygiene every six months (iOS d063b897 AccountBackupCard, BackupHygieneCard). -->
+          <button class="profile-card account-backup-card" type="button" data-account-backup-card hidden>
+            <span class="account-backup-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.5-3 8.2-7.5 9.5-4.5-1.3-7.5-5-7.5-9.5V6z"/><path class="account-backup-card-mark-owed" d="M12 8.5v4.2M12 15.6v.1"/><path class="account-backup-card-mark-hygiene" d="m8.6 12.2 2.4 2.4 4.4-4.6"/></svg></span>
+            <span class="account-backup-card-copy">
+              <strong data-account-backup-card-title></strong>
+              <small data-account-backup-card-note></small>
+            </span>
+            <svg class="profile-manage-addresses-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
+
           <!-- One Manage Addresses card (iOS 6333dd3): every address of this account, with the
                account total (the chatting address and every spending address, hidden ones too,
                245a5d2). Which address a send comes from is picked on the send screen (From), so
@@ -971,6 +988,8 @@
         <button class="settings-nav-back" type="button" data-settings-nav-back aria-label="Back" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5.5 8.5 12l6.5 6.5"/></svg></button>
         <h2 class="settings-nav-title" data-settings-nav-title hidden></h2>
       </header>
+      <!-- Fixed, above the scroll (iOS PinnedListHeader, KaChat-iPhone d063b897); the hub's only: a pushed page has its inline title. -->
+      <h1 class="kaposts-title settings-large-title">Settings</h1>
       <div class="account-overlay-body">
         <section class="app-screen utility-screen settings-screen" data-screen="settings">
           <section class="settings-group">
@@ -1642,87 +1661,14 @@
   <div class="modal-backdrop" data-create-account-modal hidden>
     <div class="contact-modal create-account-modal create-account-flow" role="dialog" aria-modal="true" aria-label="Create Account">
       <div class="modal-header">
-        <div><h2 data-create-title>Create Account</h2></div>
+        <div><h2 data-create-title>Passphrase</h2></div>
         <button class="modal-close" type="button" data-close-create-account aria-label="Close">×</button>
       </div>
 
-      <!-- Create Account is three steps (iOS acd879b / c6bd716): the name, then the seed length,
-           then the seed phrase - and after it the optional passphrase, which commits the account. -->
-      <div data-create-step="name">
-        <h3 class="create-step-title">Create a name for your wallet</h3>
-        <p class="create-step-note">This name is only stored on this device, to tell your wallets apart. No one else will ever see it.</p>
-        <input class="field-input create-name-input" data-create-name type="text" value="" maxlength="48" placeholder="Enter account name" autocomplete="off" aria-label="Account name" />
-        <div class="modal-actions">
-          <button class="secondary-button" type="button" data-close-create-account>Cancel</button>
-          <button class="primary-button" type="button" data-create-name-next disabled>Next</button>
-        </div>
-      </div>
-
-      <div data-create-step="length" hidden>
-        <h3 class="create-step-title">Choose seed phrase length</h3>
-        <!-- Two full-width buttons in the Generate Account style; the chosen one is filled, the other
-             outlined. Nothing is chosen until one is clicked. -->
-        <div class="seed-length-buttons" role="radiogroup" aria-label="Seed phrase length">
-          <button type="button" class="seed-length-button" role="radio" aria-checked="false" data-create-word-count="12">
-            <span class="seed-length-check" aria-hidden="true"></span>12 words
-          </button>
-          <button type="button" class="seed-length-button" role="radio" aria-checked="false" data-create-word-count="24">
-            <span class="seed-length-check" aria-hidden="true"></span>24 words
-          </button>
-        </div>
-        <div class="create-warning">
-          <strong><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3zM12 9v5M12 17.5v.5"/></svg> Important</strong>
-          <p>The next screen shows your seed phrase. It is the only way to recover your account: write it down and store it securely, and make sure no one can see your screen.</p>
-        </div>
-        <p class="field-error" data-create-account-error hidden></p>
-        <div class="modal-actions">
-          <button class="secondary-button" type="button" data-create-length-back>Back</button>
-          <button class="primary-button" type="button" data-generate-account disabled>Generate Account</button>
-        </div>
-        <!-- iOS dd0aab1 / 712bb4d: what a seed phrase is, on its own page in this flow. -->
-        <button class="linklike-button full seed-explainer-link" type="button" data-seed-explainer-open>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.85.85c0 1.7-2.45 2.2-2.45 3.85"/><path d="M12 17v.5"/></svg>
-          What is this?
-        </button>
-      </div>
-
-      <!-- "What is this?" on the seed length step (iOS 712bb4d SeedPhraseExplainerPage): a full page
-           in the same flow, like "What is a passphrase?" - not a half sheet over it. Back returns. -->
-      <div data-create-step="seed-explainer" hidden>
-        <h3 class="create-step-title" id="seed-explainer-title">What is a seed phrase?</h3>
-        <div class="passphrase-explainer seed-explainer-page" role="region" aria-labelledby="seed-explainer-title">
-          <section><h4>The short version</h4><p>A seed phrase is a list of 12 or 24 ordinary words that works as the master key to your account. Your wallet, your chatting address and your messages all come from it.</p></section>
-          <section><h4>Anyone with it can take everything</h4><p>Anyone who has these words can take everything in your account. If you lose them and lose this device, nobody can get your account back, not even KaChat.</p></section>
-          <section><h4>How to keep it safe</h4><p>Write the words on paper, in order, and keep them somewhere safe and private. Never type them into a website, send them in a chat, or keep them in a screenshot or cloud notes.</p></section>
-          <section><h4>12 or 24 words?</h4><p>12 words are already very secure. 24 words add even more protection.</p></section>
-        </div>
-        <div class="modal-actions passphrase-actions">
-          <button class="secondary-button full" type="button" data-seed-explainer-back>Back</button>
-        </div>
-      </div>
-
-      <div data-create-step="seed" hidden>
-        <div class="create-warning create-warning-orange">
-          <strong><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></svg> Write Down Your Seed Phrase</strong>
-          <p>Store this in a safe place. Anyone with these words can access your account.</p>
-        </div>
-        <button type="button" class="seed-reveal-cover" data-seed-reveal>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><path d="M4 4l16 16"/></svg>
-          <span>Tap to reveal seed phrase</span>
-        </button>
-        <div class="seed-grid" data-seed-grid hidden></div>
-        <label class="seed-confirm">
-          <input type="checkbox" data-seed-confirm />
-          <span>I have written down my seed phrase and stored it securely</span>
-        </label>
-        <p class="field-error" data-create-account-error-seed hidden></p>
-        <div class="modal-actions">
-          <button class="secondary-button" type="button" data-create-seed-back>Back</button>
-          <button class="primary-button" type="button" data-continue-to-passphrase disabled>Next</button>
-        </div>
-      </div>
-
-      <div data-create-step="passphrase" hidden>
+      <!-- "Advanced: Create with a Passphrase" (iOS d063b897 CreateWalletView): a new 24-word seed,
+           then the passphrase wizard, which commits the account. Create New Account makes one with no
+           passphrase in a tap; neither shows the seed phrase (Profile's card leads to the backup steps). -->
+      <div data-create-step="passphrase">
       <div data-create-passphrase-screen="question">
         <div class="passphrase-question">
           <span class="passphrase-question-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.5-3 8.2-7.5 9.5-4.5-1.3-7.5-5-7.5-9.5V6L12 3Z"/><rect x="9.2" y="11" width="5.6" height="4.4" rx="1"/><path d="M10.4 11V9.8a1.6 1.6 0 0 1 3.2 0V11"/></svg></span>
@@ -1749,6 +1695,8 @@
         <div class="passphrase-address-preview" data-passphrase-preview="create">
           <p class="passphrase-preview-label">Your chatting address</p>
           <p class="passphrase-preview-address" data-passphrase-preview-address>Checking...</p>
+          <p class="passphrase-preview-balance-row"><span>Balance</span> <strong data-passphrase-preview-balance></strong></p>
+          <p class="passphrase-preview-verdict" data-passphrase-preview-verdict hidden></p>
           <p class="passphrase-preview-note" data-passphrase-preview-note>This is the account your seed phrase opens on its own.</p>
         </div>
         <p class="field-error" data-create-passphrase-error hidden></p>
@@ -1905,6 +1853,8 @@
         <div class="passphrase-address-preview" data-passphrase-preview="import">
           <p class="passphrase-preview-label">Your chatting address</p>
           <p class="passphrase-preview-address" data-passphrase-preview-address>Checking...</p>
+          <p class="passphrase-preview-balance-row"><span>Balance</span> <strong data-passphrase-preview-balance></strong></p>
+          <p class="passphrase-preview-verdict" data-passphrase-preview-verdict hidden></p>
           <p class="passphrase-preview-note" data-passphrase-preview-note>This is the account your seed phrase opens on its own.</p>
         </div>
         <p class="field-error" data-import-passphrase-error hidden></p>
@@ -1963,7 +1913,7 @@
     <section class="contact-modal recovery-modal recovery-hold-modal" role="dialog" aria-modal="true" aria-label="Seed phrase">
       <h2 class="recovery-title">Seed Phrase</h2>
       <button class="modal-close recovery-close" type="button" data-close-recovery aria-label="Close">×</button>
-      <div class="security-warning-card"><strong>Security Warning</strong><p class="field-hint">Anyone with your seed phrase can access your account. Never share it with anyone.</p></div>
+      <div class="security-warning-card"><strong>Security Warning</strong><p class="field-hint">Anyone with your seed phrase can access your account. Never share it with anyone.</p><p class="field-hint">Best practice is to write your seed phrase down to back it up, and never store it online.</p></div>
       <p class="recovery-passphrase-note" data-recovery-passphrase-note hidden>This wallet also uses a passphrase. You need it together with these words to restore it.</p>
 
       <button class="recovery-hold-target" type="button" data-reveal-recovery aria-label="Tap to reveal seed phrase">
@@ -2360,6 +2310,7 @@
         <span class="chatting-address-balance" data-chatting-address-balance>-- KAS</span>
         <span class="chatting-address-header-spacer" aria-hidden="true"></span>
       </header>
+      <p class="receive-backup-reminder" data-receive-backup-reminder hidden>This account isn't backed up yet. Use the card on the Profile tab to back it up.</p>
       <div class="chatting-address-body">
         <div class="chatting-address-qr-frame">
           <canvas width="512" height="512" data-chatting-address-qr></canvas>

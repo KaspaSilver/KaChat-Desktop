@@ -238,7 +238,7 @@ small address → name map the app mirrors into IndexedDB):
 | `group_message` | `blinded_group_id`, `sender` | **group name** / "**member**: New message" (unknown group: "Group chat" / "New group message") | `kachat-group-<groupId>` | that group |
 | `group_control` | `blinded_group_id` | **group name** / "Group update" | `kachat-group-<groupId>` | that group |
 | `broadcast` | `channel`, `title`, `subtitle`, `body`, `tx_id` | `#channel` / "subtitle: body" | `kachat-broadcast-<tx_id>` | that room |
-| `kaposts` | `subtitle`, `body`, `post_id`, `tx_id` | "KaPosts" / "subtitle body" | `kachat-kaposts-<tx_id>` | the post |
+| `kaposts` | `subtitle`, `body`, `post_id`, `kaposts_kind`, `tx_id` | "KaPosts" / "subtitle body" | `kachat-kaposts-<tx_id>` | the post; a `reply` or `quote` opens `tx_id`, the reply itself |
 | `name_event` | `title`, `body`, `name`, `dedup` | title / body as sent | `kachat-name-<dedup>` | .kachat |
 | `address_activity` | `address`, `amount_kas`, `tx_id` | "Received 12.5 KAS" / the address's label | `kachat-addr-activity-<tx_id>` | that address |
 | anything else | `title`, `body` | as sent | `kachat-push-<tx_id>` | Chats |

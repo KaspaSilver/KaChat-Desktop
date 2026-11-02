@@ -90,16 +90,33 @@
 .kmkt-search-result-copy strong { font-size: 17px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kmkt-search-result-copy small { font-size: 12px; color: var(--muted); }
 
-/* The underline tab bar (iOS UnderlineTabBar; same look as .kaposts-feed-tab). */
-.kmkt-tabs { display: flex; border-bottom: .5px solid var(--line); }
-.kmkt-tab {
-  flex: 1; padding: 10px 0 8px; margin-bottom: -.5px;
-  border: 0; border-bottom: 2px solid transparent; background: transparent;
-  color: color-mix(in srgb, var(--kaspa-ink) 50%, transparent);
-  font: inherit; font-size: 15px; font-weight: 700; cursor: pointer;
+/* The cards (KaPay 99ab88a KachatHubCard): one per page, what it is and how many live there. */
+.kmkt-hub-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.kmkt-hub-card {
+  display: flex; flex-direction: column; align-items: stretch; gap: 10px; width: 100%; min-width: 0;
+  padding: 14px; border: 0; text-align: left; font: inherit; cursor: pointer; color: var(--text);
 }
-.kmkt-tab.active { color: var(--kaspa-ink); border-bottom-color: var(--kaspa); }
-.kmkt-tab:focus-visible { outline: 2px solid color-mix(in srgb, var(--kaspa) 55%, transparent); outline-offset: -2px; border-radius: 6px; }
+.kmkt-hub-card:hover { background: color-mix(in srgb, var(--grouped-row) 92%, var(--text)); }
+.kmkt-hub-card:focus-visible { outline: 2px solid color-mix(in srgb, var(--kaspa) 55%, transparent); outline-offset: 2px; }
+.kmkt-hub-card-top { display: flex; align-items: center; justify-content: space-between; }
+.kmkt-hub-card-icon { display: inline-flex; color: var(--kaspa-ink); }
+.kmkt-hub-card-icon .kmkt-ico { width: 24px; height: 24px; }
+.kmkt-hub-card-chevron { display: inline-flex; color: var(--muted); }
+.kmkt-hub-card-chevron .kmkt-ico { width: 15px; height: 15px; stroke-width: 2.4; }
+.kmkt-hub-card-count { font-size: 28px; font-weight: 700; line-height: 34px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kmkt-hub-card-title { font-size: 15px; font-weight: 600; line-height: 20px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A card's page keeps an inline title at phone width (iOS navigationTitle, .inline), where the rest of
+   .kachat's large titles give way to the toolbar: centred, clear of the back button on its left. */
+@media (max-width: 859px) {
+  .kmkt-page-header.kmkt-page-header > .kaposts-title {
+    display: block; margin-right: 44px; text-align: center;
+    font-size: 17px; font-weight: 600; line-height: 22px;
+  }
+}
+
+/* A page's toolbar with nothing in it (no refresh, no claims): no empty capsule at phone width. */
+.kmkt-header [data-kmkt-header-actions]:empty { display: none; }
 
 .kmkt-page { display: flex; flex-direction: column; gap: 18px; padding-top: 4px; }
 .kmkt-footnote { margin: 0; text-align: center; font-size: 13px; line-height: 18px; color: var(--muted); }

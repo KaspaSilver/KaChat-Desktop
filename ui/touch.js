@@ -1,6 +1,6 @@
 // Touch equivalents of desktop gestures. iOS Safari never fires `contextmenu` for a long-press
 // (it shows its own callout for links and images, and nothing at all for anything else), so every
-// right-click menu in the app - message bubbles, chat rows, broadcast rooms - gets a long-press
+// right-click menu in the app - message bubbles, pinned circles, broadcast rooms - gets a long-press
 // path through here, the way the iOS app opens those same menus.
 
 const LONG_PRESS_MS = 420;

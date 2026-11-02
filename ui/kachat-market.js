@@ -33,7 +33,7 @@ import { kachatNamesLaunched, kachatNamesUiEnabled } from "./kachat-names-runtim
 import {
   initKachatLive, liveEnabled, liveHubIsLive, liveHubShow, liveHubHide, liveHubRefresh, liveHubClick,
   liveHeroStatusHtml, liveRefreshButtonHtml, liveSearchInput, liveSearchResultHtml,
-  livePageHtml, createNameDetail, openLiveProfileEditor, renderKachatLiveDomainsTab,
+  livePageHtml, livePageCount, createNameDetail, openLiveProfileEditor, renderKachatLiveDomainsTab,
   kachatNameTileHtml, kachatNameGridHtml, liveClaimsButtonHtml, openClaimsList,
 } from "./kachat-names-live.js";
 
@@ -43,9 +43,11 @@ export { renderKachatLiveDomainsTab };
 let deps = null;
 let marketEl = null;
 
-// Market navigation. view: "home" | "listing" | "name" (a live name, testnet). page: "market" |
-// "available" | "expired" | "activity". detail: the live name detail while view is "name".
-const state = { view: "home", page: "market", search: "", homeScroll: 0, detail: null };
+// Market navigation (KaPay 99ab88a: the logo and a numbered card per page; a card opens its page).
+// view: "home" | "page" (a card's page) | "listing" | "name" (a live name, testnet). page: "market"
+// | "available" | "expired" | "activity", the page open or last opened. backTo: where a listing or
+// a name goes back to. detail: the live name detail while view is "name".
+const state = { view: "home", page: "market", backTo: "home", search: "", homeScroll: 0, pageScroll: 0, detail: null };
 
 /** A listing as a real one will hand it in; no listing exists yet, so its seller is unknown and
  *  Message stays disabled. With a seller, Message opens a 1:1 chat through deps.openChat. */
@@ -55,10 +57,10 @@ const placeholderListing = { sellerAddress: null };
 // release), and everything that happens in the registry - in that order (iOS cb3c27d, 73128b3).
 // Your own names (and the offers you made) live in Profile > Your Domains (iOS 0765ce0, eea52b2).
 const PAGES = [
-  { id: "market", title: "Marketplace" },
-  { id: "available", title: "Available" },
-  { id: "expired", title: "Expired" },
-  { id: "activity", title: "Activity" },
+  { id: "market", title: "Marketplace", icon: "tag" },
+  { id: "available", title: "Available", icon: "sealOutline" },
+  { id: "expired", title: "Expired", icon: "hourglass" },
+  { id: "activity", title: "Activity", icon: "history" },
 ];
 
 const PROFILE_FIELDS = ["Bio", "X handle", "Website", "Telegram", "Discord user id", "Email", "GitHub", "Redirect URL"];
@@ -94,6 +96,9 @@ const ICON = {
   lock: svg(`<rect x="5" y="10.5" width="14" height="10" rx="2.2"/><path d="M8 10.5V7.6a4 4 0 0 1 8 0v2.9"/>`),
   bubbles: svg(`<path d="M3.9 4h9.7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H8.7L5.2 16v-3H3.9a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M15.6 8.5h4.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-1.3v3l-3.5-3h-4.6a2 2 0 0 1-2-1.6"/>`),
   chevron: svg(`<path d="m9.5 6 6 6-6 6"/>`),
+  sealOutline: svg(`<path d="M12 1.8l2.4 1.8 3-.2.9 2.9 2.5 1.7-1 2.8 1 2.8-2.5 1.7-.9 2.9-3-.2L12 22.2l-2.4-1.8-3 .2-.9-2.9-2.5-1.7 1-2.8-1-2.8 2.5-1.7.9-2.9 3 .2Z"/><path d="m8.4 12.3 2.4 2.4 4.8-5"/>`),
+  hourglass: svg(`<path d="M6.5 3h11M6.5 21h11"/><path d="M8 3v3.6c0 1.6.9 2.9 2.2 3.8L12 12l-1.8 1.6C8.9 14.5 8 15.8 8 17.4V21M16 3v3.6c0 1.6-.9 2.9-2.2 3.8L12 12l1.8 1.6c1.3.9 2.2 2.2 2.2 3.8V21"/>`),
+  history: svg(`<path d="M4.6 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.8V9h4.2"/><path d="M12 8v4.3l2.8 1.7"/>`),
   back: svg(`<path d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/>`),
   personCircle: svg(`<circle cx="12" cy="12" r="9.4"/><circle cx="12" cy="10" r="3.2"/><path d="M5.9 18.5a7.3 7.3 0 0 1 12.2 0"/>`),
   personFill: svg(`<circle cx="12" cy="7.8" r="4.3"/><path d="M3.6 21c.5-4.6 4-7.3 8.4-7.3s7.9 2.7 8.4 7.3Z"/>`, "kmkt-ico kmkt-ico-fill"),
@@ -229,8 +234,8 @@ function closeLayersOwnedBy(owner) {
 // Market: home (hero, search, tabs, page)
 // ---------------------------------------------------------------------------------------------
 
-/** The logo and the status (Testnet, Setting up, Coming soon): no title or description, so the
- *  search sits higher (iOS 27a4f39). */
+/** The logo and the status (Testnet, Setting up, Coming soon): no title or description (iOS
+ *  27a4f39), and the cards under it (KaPay 99ab88a). */
 function heroHtml() {
   return `
     <section class="kmkt-hero kmkt-hero-compact">
@@ -266,16 +271,27 @@ function searchCardHtml() {
     </section>`;
 }
 
-function tabsHtml() {
-  return `
-    <div class="kmkt-tabs" role="tablist">
-      ${PAGES.map((page) => `
-        <button class="kmkt-tab ${page.id === state.page ? "active" : ""}" type="button" role="tab"
-          aria-selected="${page.id === state.page}" data-kmkt-page="${page.id}">${esc(page.title)}</button>`).join("")}
-    </div>`;
+/** How many live on a page, "-" until the registry has answered (KaPay 99ab88a count(of:)). */
+function pageCountText(page) {
+  return livePageCount(page) ?? "-";
 }
 
-/** A name tile's shape, redacted: no invented name or price (iOS tilePlaceholder, 27a4f39 / c488d1d). */
+/** One page's card: what it is and how many live there (KaPay 99ab88a KachatHubCard). */
+function pageCardsHtml() {
+  return `
+    <section class="kmkt-hub-cards">
+      ${PAGES.map((page) => `
+        <button class="kmkt-card kmkt-hub-card" type="button" data-kmkt-open-page="${page.id}">
+          <span class="kmkt-hub-card-top">
+            <span class="kmkt-hub-card-icon">${ICON[page.icon]}</span>
+            <span class="kmkt-hub-card-chevron">${ICON.chevron}</span>
+          </span>
+          <span class="kmkt-hub-card-count" data-kmkt-count="${page.id}">${esc(pageCountText(page.id))}</span>
+          <span class="kmkt-hub-card-title">${esc(page.title)}</span>
+        </button>`).join("")}
+    </section>`;
+}
+
 function tilePlaceholderInner() {
   return kachatNameTileHtml(bar(78, 15), bar(58, 13));
 }
@@ -346,8 +362,13 @@ function headerActionsHtml() {
   return `${liveRefreshButtonHtml()}${liveClaimsButtonHtml()}<button class="kaposts-icon-button" type="button" data-kmkt-how aria-label="How it works" title="How it works">${ICON.question}</button>`;
 }
 
+/** On a card's page: the refresh control and the claims button (iOS's toolbar there has no help). */
+function pageHeaderActionsHtml() {
+  return `${liveRefreshButtonHtml()}${liveClaimsButtonHtml()}`;
+}
+
 function homeHtml() {
-  // mainnet's opening countdown is gone: search and the pages on every network (iOS 48d194d)
+  // mainnet's opening countdown is gone: the cards on every network (iOS 48d194d)
   return `
     <div class="kmkt-root">
       <div class="kaposts-header kmkt-header">
@@ -355,8 +376,22 @@ function homeHtml() {
         <div class="kaposts-header-actions" data-kmkt-header-actions>${headerActionsHtml()}</div>
       </div>
       ${heroHtml()}
-      ${searchCardHtml()}
-      ${tabsHtml()}
+      ${pageCardsHtml()}
+    </div>`;
+}
+
+/** A card's page, pushed from the cards (KaPay 99ab88a pageScreen): its title and the claims button
+ *  on top; only the Marketplace has the name search. */
+function pageScreenHtml() {
+  const title = PAGES.find((page) => page.id === state.page)?.title || "";
+  return `
+    <div class="kmkt-root">
+      <div class="kaposts-header kmkt-header kmkt-page-header with-back">
+        <button class="kaposts-icon-button" type="button" data-kmkt-back aria-label="Back">${ICON.back}</button>
+        <h1 class="kaposts-title">${esc(title)}</h1>
+        <div class="kaposts-header-actions" data-kmkt-header-actions>${pageHeaderActionsHtml()}</div>
+      </div>
+      ${state.page === "market" ? searchCardHtml() : ""}
       <div data-kmkt-page-body>${pageHtml()}</div>
     </div>`;
 }
@@ -596,9 +631,6 @@ function screen() {
       marketEl.dataset.kmktBound = "1";
       marketEl.addEventListener("click", onMarketClick);
       marketEl.addEventListener("input", onMarketInput);
-      marketEl.addEventListener("touchstart", onMarketTouchStart, { passive: true });
-      marketEl.addEventListener("touchend", onMarketTouchEnd, { passive: true });
-      marketEl.addEventListener("touchcancel", () => { pageSwipe = null; }, { passive: true });
     }
   }
   return marketEl;
@@ -608,13 +640,14 @@ function render() {
   const el = screen();
   if (!el) return;
   if (state.view === "name" && state.detail) el.innerHTML = state.detail.html();
-  else el.innerHTML = state.view === "listing" ? listingHtml() : homeHtml();
+  else if (state.view === "listing") el.innerHTML = listingHtml();
+  else el.innerHTML = state.view === "page" ? pageScreenHtml() : homeHtml();
 }
 
 /** The live hub changed (kachat-names-live.js): re-render the parts that show it. */
 function onLiveChanged(kind) {
   const el = screen();
-  if (!el || state.view !== "home") return;
+  if (!el || (state.view !== "home" && state.view !== "page")) return;
   if (kind === "ready") {
     const scroll = el.scrollTop;
     render();
@@ -623,22 +656,24 @@ function onLiveChanged(kind) {
   }
   const set = (selector, html) => { const part = el.querySelector(selector); if (part) part.innerHTML = html; };
   if (kind === "search") { set("[data-kmkt-search-result]", searchResultHtml()); return; }
+  const actions = state.view === "page" ? pageHeaderActionsHtml() : headerActionsHtml();
   // a claim in flight shows in its own progress sheet and the claims list (iOS b219bb0), not on
   // this page: only the claims button's count follows it
-  if (kind === "pending") { set("[data-kmkt-header-actions]", headerActionsHtml()); return; }
-  set("[data-kmkt-header-actions]", headerActionsHtml());
+  if (kind === "pending") { set("[data-kmkt-header-actions]", actions); return; }
+  set("[data-kmkt-header-actions]", actions);
   set("[data-kmkt-hero-status]", liveHeroStatusHtml(comingSoonPill()));
   if (kind !== "refresh") {
     set("[data-kmkt-search-result]", searchResultHtml());
     set("[data-kmkt-page-body]", pageHtml());
+    el.querySelectorAll("[data-kmkt-count]").forEach((count) => { count.textContent = String(pageCountText(count.dataset.kmktCount)); });
   }
 }
 
-/** A live name (testnet): its detail replaces the home page, Back returns to it. */
+/** A live name (testnet): its detail replaces the screen, Back returns to what was there. */
 function openNameDetail(info) {
   const el = screen();
   if (!el) return;
-  if (state.view === "home") state.homeScroll = el.scrollTop;
+  rememberPlace(el);
   state.detail?.destroy();
   state.detail = createNameDetail(info, { mode: "market", owner: "market", host: () => screen() });
   state.view = "name";
@@ -647,87 +682,48 @@ function openNameDetail(info) {
   state.detail.attach();
 }
 
-function goHome() {
+/** The cards or a card's page is being covered: Back comes back to it, where it was scrolled to. */
+function rememberPlace(el) {
+  if (state.view === "home") { state.homeScroll = el.scrollTop; state.backTo = "home"; }
+  else if (state.view === "page") { state.pageScroll = el.scrollTop; state.backTo = "page"; }
+}
+
+/** A card opens its page (KaPay 99ab88a NavigationLink). */
+function openPage(page) {
+  const el = screen();
+  if (!el || !PAGES.some((p) => p.id === page)) return;
+  rememberPlace(el);
+  state.page = page;
+  state.view = "page";
+  render();
+  el.scrollTop = 0;
+}
+
+/** Back: a name or a listing to where it was opened from, a page to the cards. */
+function goBack() {
   state.detail?.destroy();
   state.detail = null;
-  state.view = "home";
+  const toPage = state.view !== "page" && state.backTo === "page";
+  state.view = toPage ? "page" : "home";
   render();
-  if (marketEl) marketEl.scrollTop = state.homeScroll;
-}
-
-/** Shows one of the home's tabs (Marketplace, Available, Expired, Activity): its tab button
- *  selected and its page under the tabs. */
-function selectPage(page) {
-  if (!marketEl || page === state.page || !PAGES.some((p) => p.id === page)) return;
-  state.page = page;
-  marketEl.querySelectorAll("[data-kmkt-page]").forEach((button) => {
-    const on = button.dataset.kmktPage === page;
-    button.classList.toggle("active", on);
-    button.setAttribute("aria-selected", String(on));
-  });
-  const body = marketEl.querySelector("[data-kmkt-page-body]");
-  if (body) body.innerHTML = pageHtml();
-}
-
-// Swipe left / right anywhere on the screen to the next / previous tab (iOS 040f91a
-// KachatMarketView.pageSwipe, "as on the Chess screen"): judged when the finger lifts, on a move
-// more than 50 px across and more than 1.5 times as far across as up or down. The touch is only
-// measured, never claimed (passive listeners, nothing prevented - iOS's simultaneousGesture), so
-// the page keeps scrolling up and down under it and a tap stays a tap. Touch only: a mouse drag
-// selects text, and the tabs are right there. Not from a text field or from a row that scrolls
-// sideways itself (the featured strip), whose drags are their own.
-const PAGE_SWIPE_MIN_PX = 50;
-const PAGE_SWIPE_RATIO = 1.5;
-/** the touch a page swipe is following: { id, x, y } */
-let pageSwipe = null;
-
-function scrollsSideways(target) {
-  for (let el = target; el && el !== marketEl; el = el.parentElement) {
-    if (el.scrollWidth > el.clientWidth + 1 && /(auto|scroll)/.test(getComputedStyle(el).overflowX)) return true;
-  }
-  return false;
-}
-
-function onMarketTouchStart(event) {
-  pageSwipe = null;
-  // one finger, on the home's tabs (a name's detail or a listing has no tabs)
-  if (event.touches.length !== 1 || state.view !== "home") return;
-  const target = event.target instanceof Element ? event.target : null;
-  if (!target || target.closest("input, textarea, select, [contenteditable]") || scrollsSideways(target)) return;
-  const t = event.touches[0];
-  pageSwipe = { id: t.identifier, x: t.clientX, y: t.clientY };
-}
-
-function onMarketTouchEnd(event) {
-  const start = pageSwipe;
-  pageSwipe = null;
-  if (!start || state.view !== "home" || event.touches.length) return;
-  const t = [...event.changedTouches].find((touch) => touch.identifier === start.id);
-  if (!t) return;
-  const dx = t.clientX - start.x;
-  const dy = t.clientY - start.y;
-  if (!(Math.abs(dx) > PAGE_SWIPE_MIN_PX && Math.abs(dx) > Math.abs(dy) * PAGE_SWIPE_RATIO)) return;
-  const index = PAGES.findIndex((p) => p.id === state.page);
-  if (index < 0) return;
-  if (dx < 0 && index + 1 < PAGES.length) selectPage(PAGES[index + 1].id);
-  else if (dx > 0 && index > 0) selectPage(PAGES[index - 1].id);
+  if (marketEl) marketEl.scrollTop = toPage ? state.pageScroll : state.homeScroll;
 }
 
 function onMarketClick(event) {
   const target = event.target;
-  if (target.closest("[data-kmkt-back]")) { goHome(); return; }
+  if (target.closest("[data-kmkt-back]")) { goBack(); return; }
   if (state.view === "name") { state.detail?.onClick(event); return; }
   if (target.closest("[data-kmkt-how]")) { openHowItWorksSheet(); return; }
   if (target.closest("[data-kmkt-refresh]")) { liveHubRefresh(); return; }
   if (target.closest("[data-kl-claims]")) { openClaimsList("market"); return; }
 
-  const tab = target.closest("[data-kmkt-page]");
-  if (tab) { selectPage(tab.dataset.kmktPage); return; }
+  const card = target.closest("[data-kmkt-open-page]");
+  if (card) { openPage(card.dataset.kmktOpenPage); return; }
 
   if (liveHubIsLive() && liveHubClick(event)) return;
 
   if (target.closest("[data-kmkt-open-listing]")) {
-    state.homeScroll = marketEl.scrollTop;
+    rememberPlace(marketEl);
     state.view = "listing";
     render();
     marketEl.scrollTop = 0;
@@ -1000,7 +996,7 @@ export function showKachatMarket() {
 }
 
 /** The .kachat screen went off: its own sheets close with it (the profile editor and the setup
- *  guide are not the market's and stay). Where you were - tab, listing, search - is kept. */
+ *  guide are not the market's and stay). Where you were - page, listing, search - is kept. */
 export function hideKachatMarket() {
   closeLayersOwnedBy("market");
   liveHubHide();

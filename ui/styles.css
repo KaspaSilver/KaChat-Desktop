@@ -6023,6 +6023,86 @@ body.session-logged-out [data-account-rename-modal] {
 .create-warning p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.4; }
 .create-warning-orange { background: rgba(242,189,92,.08); border-color: rgba(242,189,92,.25); }
 
+/* Create New Account in one tap, and what moved behind "Advanced" (iOS d063b897 OnboardingView). */
+.logged-out-actions button.logged-out-advanced { min-height: 28px; background: none; border: 0; color: var(--kaspa-ink, var(--kaspa)); font-size: 13px; font-weight: 600; }
+.logged-out-actions button:disabled { opacity: .6; }
+.logged-out-primary.is-busy span { visibility: hidden; position: relative; }
+.logged-out-primary.is-busy span::after { content: ""; visibility: visible; position: absolute; inset: 2px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: initial-sync-spin .8s linear infinite; }
+
+/* The passphrase screen's balance, as you type (iOS d063b897 previewBalanceRow). */
+.passphrase-preview-balance-row { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; font-size: 12px; color: var(--text-muted, #8b9691); }
+.passphrase-preview-balance-row strong { font-size: 13px; font-weight: 600; color: var(--text-primary, #e8f0ec); font-variant-numeric: tabular-nums; }
+.passphrase-preview-balance-row strong.has-funds { color: var(--ios-green); }
+.passphrase-preview-balance-row .sk-spinner { width: 11px; height: 11px; margin: 0; color: var(--muted); }
+.passphrase-preview-verdict { margin: 4px 0 0; font-size: 12px; line-height: 1.35; color: var(--ios-orange); }
+.passphrase-preview-verdict.has-funds { color: var(--ios-green); }
+
+/* Profile's card above Manage Addresses (iOS d063b897 AccountBackupCard, BackupHygieneCard). */
+.profile-card.account-backup-card { --tone: var(--ios-orange); display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px 16px; text-align: left; border: 1px solid color-mix(in srgb, var(--tone) 50%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--tone) 10%, transparent); color: var(--text); }
+.profile-card.account-backup-card[hidden] { display: none; }
+.profile-card.account-backup-card[data-tone="funds"] { --tone: var(--ios-red); }
+.profile-card.account-backup-card[data-tone="hygiene"] { --tone: var(--kaspa); }
+.account-backup-card-icon { flex: 0 0 auto; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 50%; background: color-mix(in srgb, var(--tone) 15%, transparent); color: var(--tone); }
+.account-backup-card-icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.account-backup-card:not([data-tone="hygiene"]) .account-backup-card-mark-hygiene, .account-backup-card[data-tone="hygiene"] .account-backup-card-mark-owed { display: none; }
+.account-backup-card-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.account-backup-card-copy strong { font-size: 14px; font-weight: 600; line-height: 1.25; }
+.account-backup-card-copy small { font-size: 12px; line-height: 1.3; color: var(--muted); }
+.account-backup-card-copy small[hidden] { display: none; }
+.account-backup-card[data-tone="funds"] .account-backup-card-copy small { color: var(--ios-red); }
+
+/* Receive's reminder (iOS d063b897 ReceiveKaspaQRView). */
+.receive-backup-reminder { margin: 0; padding: 10px 16px; font-size: 13px; font-weight: 600; line-height: 1.3; color: var(--ios-orange); background: rgba(255,159,10,.12); }
+.receive-backup-reminder[hidden] { display: none; }
+
+/* The Delete Account warning (iOS d063b897 DeleteAccountSheet). */
+.delete-account-warning { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.delete-account-warning-icon { color: var(--ios-red); }
+.delete-account-warning-icon svg { display: block; width: 34px; height: 34px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.delete-account-warning-strong { font-weight: 600; color: var(--ios-red); }
+
+/* Backing up an account (iOS d063b897 AccountBackupView, BackupHygieneView). */
+.account-backup-modal { display: flex; flex-direction: column; gap: 12px; width: min(100%, 460px); max-height: calc(100dvh - 44px); }
+.account-backup-bar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; }
+.account-backup-bar h2 { margin: 0; font-size: 17px; font-weight: 600; text-align: center; }
+.account-backup-bar h2 { grid-column: 2; grid-row: 1; }
+.account-backup-bar .account-backup-bar-button { grid-column: 1; grid-row: 1; width: auto; min-height: 32px; justify-self: start; }
+.account-backup-bar [data-account-backup-close] { grid-column: 3; justify-self: end; }
+.account-backup-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding: 2px; }
+.account-backup-scroll > div { display: flex; flex-direction: column; gap: 14px; }
+.account-backup-foot { display: flex; flex-direction: column; gap: 8px; }
+.account-backup-foot:empty { display: none; }
+.account-backup-progress { flex: 0 0 auto; height: 4px; border-radius: 999px; background: var(--fill-tertiary); overflow: hidden; }
+.account-backup-progress span { display: block; height: 100%; border-radius: inherit; background: var(--kaspa); transition: width .2s ease; }
+.account-backup-heading { margin: 0; font-size: 22px; font-weight: 700; line-height: 1.25; }
+.account-backup-detail { margin: 0; font-size: 14px; line-height: 1.4; color: var(--muted); }
+.account-backup-lead { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.4; }
+.account-backup-unavailable { margin: 0; padding: 24px; text-align: center; font-size: 14px; color: var(--muted); }
+.account-backup-point { display: flex; align-items: flex-start; gap: 14px; }
+.account-backup-point-icon { flex: 0 0 28px; color: var(--kaspa); }
+.account-backup-point-icon svg { display: block; width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.account-backup-point-copy { display: flex; flex-direction: column; gap: 3px; font-size: 14px; line-height: 1.35; color: var(--muted); }
+.account-backup-point-copy strong { font-weight: 600; color: var(--text); }
+.account-backup-link { display: inline-flex; align-items: center; gap: 6px; width: auto; align-self: flex-start; font-size: 14px; font-weight: 600; }
+.account-backup-link svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.account-backup-check { margin: 0; font-size: 14px; }
+.account-backup-range { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--kaspa-ink, var(--kaspa)); }
+.account-backup-words { display: flex; flex-direction: column; gap: 8px; }
+.account-backup-word { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border-radius: 10px; background: var(--fill-tertiary); }
+.account-backup-word-number { flex: 0 0 32px; text-align: right; font-size: 14px; color: var(--muted); }
+.account-backup-word-text { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 20px; font-weight: 600; }
+.account-backup-field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.account-backup-word-input.is-wrong { box-shadow: 0 0 0 1.5px var(--ios-red); }
+.account-backup-error { margin: 0; font-size: 13px; line-height: 1.35; color: var(--ios-red); }
+.account-backup-error[hidden] { display: none; }
+.account-backup-passphrase { padding: 14px; border-radius: 10px; background: var(--fill-tertiary); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 20px; font-weight: 600; white-space: pre-wrap; word-break: break-word; }
+.account-backup-explainer { max-height: none; overflow: visible; }
+.account-backup-hygiene-grid { max-height: none; }
+.account-backup-cant { justify-content: center; text-align: center; font-size: 14px; font-weight: 600; }
+.account-backup-passed { align-items: center; text-align: center; padding: 32px 0; }
+.account-backup-passed-icon { color: var(--kaspa); }
+.account-backup-passed-icon svg { display: block; width: 56px; height: 56px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
 .create-passphrase { margin: 6px 0 10px; }
 .create-passphrase summary { cursor: pointer; font-size: 13px; font-weight: 650; color: var(--kaspa-ink); }
 .create-passphrase .field-hint { margin: 8px 0; }
@@ -13800,7 +13880,9 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 }
 
 /* Long lists skip laying out rows that are off screen (a browser-native virtual list). */
-.chat-list > .chat-row { content-visibility: auto; contain-intrinsic-size: auto 74px; }
+/* 50px is the row's content, not its 74px: this size is what's inside the padding. At 74 every redraw
+   made the rows above the screen 24px too tall until they were next drawn, so the list jumped. */
+.chat-list > .chat-row { content-visibility: auto; contain-intrinsic-size: auto 50px; }
 
 /* Every button answers the touch the moment it lands, not when the finger lifts (Telegram-style
    press feedback). Zero specificity: a control's own pressed look wins; rows that already darken
@@ -13976,8 +14058,45 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .kaposts-settings-subheader .create-chat-nav-button { justify-self: start; }
 
 /* --- Chats list / Create chat / New Group / Add Members / Group Info / User Info (iOS parity) --- */
-/* The large "Chats" title over the search field (iOS navigationTitle, .large). */
+/* The fixed "Chats" title over the fixed search field (iOS PinnedListHeader, KaChat-iPhone d063b897). */
 .chats-list-title { margin: 6px 16px 0; }
+.pinned-search { display: flex; align-items: center; gap: 10px; }
+.pinned-search input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
+.pinned-search-cancel { flex: 0 0 auto; padding: 0; border: 0; background: none; color: var(--kaspa-ink); font-size: 17px; cursor: pointer; }
+.pinned-search-clear { flex: 0 0 auto; width: 18px; height: 18px; padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; }
+.pinned-search-cancel[hidden], .pinned-search-clear[hidden] { display: none; }
+.pinned-search-clear svg { display: block; width: 100%; height: 100%; fill: currentColor; }
+.pinned-search-clear svg .cutout-stroke { fill: none; stroke: var(--bg-plain); stroke-width: 2.4; stroke-linecap: round; }
+.chats-pinned-search { margin: 8px 16px; }
+.chats-pinned-search .search-wrap {
+  flex: 1; min-width: 0; margin: 0; height: 44px; padding: 0 12px 0 40px; border-radius: 999px;
+  background-position: 13px center; background-size: 18px 18px;
+}
+.chats-pinned-search .search-input { font-size: 17px; }
+/* Chat rows swipe (ui/row-swipe.js, iOS swipeActions). pan-y leaves a vertical drag to the list's
+   scroll and a sideways one to the row; the buttons fill the strip the row slides away from. */
+.sidebar-scroll { overflow-x: hidden; }
+.chat-list { position: relative; }
+.chat-list > .chat-row[data-conversation-id] { touch-action: pan-y pinch-zoom; }
+.chat-row.row-swipe-settling { transition: transform .22s cubic-bezier(.2,.9,.25,1), background-color .06s linear; }
+.chat-row-actions { position: absolute; z-index: 1; display: flex; overflow: hidden; }
+.chat-row-actions.left { right: 0; flex-direction: row-reverse; }
+.chat-row-actions.right { left: 0; }
+.chat-row-actions.row-swipe-settling { transition: width .22s cubic-bezier(.2,.9,.25,1); }
+.chat-row-action {
+  flex: 1 1 0; min-width: 0; padding: 0; border: 0; border-radius: 0; overflow: hidden;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  color: #fff; cursor: pointer;
+}
+.chat-row-action.red { background: var(--ios-red); }
+.chat-row-action.orange { background: var(--ios-orange); }
+.chat-row-action.accent { background: var(--kaspa); color: var(--on-accent); }
+.chat-row-action-icon { display: inline-grid; place-items: center; width: 22px; height: 22px; }
+.chat-row-action-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.chat-row-action-title { font-size: 12px; font-weight: 600; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  .chat-row.row-swipe-settling, .chat-row-actions.row-swipe-settling { transition-duration: .01s; }
+}
 /* Per-row history fetch (iOS ConversationRow): a mini spinner while loading, an orange triangle
    when the last fetch failed, just before the time. */
 .chat-row-fetch-slot { display: inline-flex; align-items: center; vertical-align: -2px; }
@@ -14340,6 +14459,7 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .settings-done-button { font-size: 17px; font-weight: 400; }
 /* Just under the toolbar: at 40px the list floated a hand's width below Done on a phone. */
 @media (max-width: 859px) { .settings-hub { margin-top: 12px; } }
+
 /* Pushed Settings page toolbar (iOS inline navigation title): round glass back button on the
    left, the page title centred, nothing else. */
 .settings-overlay-header.settings-pushed > .settings-health-button,
@@ -14356,6 +14476,12 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
   cursor: pointer;
 }
 .settings-nav-back[hidden], .settings-nav-title[hidden] { display: none; }
+/* The fixed "Settings" title over the hub (iOS PinnedListHeader, KaChat-iPhone d063b897): not on a
+   pushed page, which has its inline title, nor signed out, where the bar says App Settings. */
+.settings-large-title { flex: 0 0 auto; margin: 0 22px; }
+.settings-overlay-header.settings-pushed + .settings-large-title,
+.account-overlay.over-logged-out .settings-large-title { display: none; }
+@media (max-width: 859px) { .settings-large-title { margin: 0 16px; } }
 .settings-nav-back svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .settings-nav-title {
   /* Centred on the back button's row, not the whole bar: the bar's top padding carries the
@@ -14521,11 +14647,18 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .kaposts-search-scope button { border-radius: 999px; font-size: 15px; font-weight: 500; color: var(--text); min-height: 34px; }
 .kaposts-search-scope button.active { background: color-mix(in srgb, var(--text) 26%, transparent); }
 @media (max-width: 859px) {
-  /* iOS AddressBookView: an inline title the balance covers, so no large title. Its actions are
-     the glass + at the bottom (.ab-fab). */
-  .ab-list-header > .kaposts-title { display: none; }
+  /* iOS AddressBookView: its actions are the glass + at the bottom (.ab-fab), so the header holds
+     only the title. */
   .ab-list-header { min-height: 0; margin: 0; padding: 0; }
 }
+/* Contacts' title and search field stay put and the list scrolls under them (iOS PinnedListHeader,
+   KaChat-iPhone d063b897). The empty state has no list, and scrolls whole on a short screen. */
+.ab-screen.ab-list-mode:has(.ab-list-scroll) { overflow: hidden; padding-bottom: 0; }
+.ab-list-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: calc(var(--dock-inset, 124px) + 88px); }
+.ab-list-scroll > .ab-list { flex-shrink: 0; }
+.ab-pinned-search { flex: 0 0 auto; }
+.ab-search-field { position: relative; display: block; flex: 1; min-width: 0; }
+.ab-search-field .pinned-search-clear { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); }
 /* The always-visible search field: a capsule with the magnifier inside, as iOS draws it. */
 .ab-search {
   border-radius: 999px; font-size: 17px; min-height: 46px; padding-left: 44px;
@@ -14535,13 +14668,12 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .chess-t-game-card-icon:has(svg.filled) { color: #fff; }
 .chess-t-hero p, .chess-t-game-card .chess-t-row-main small { font-size: 15px; }
 @media (max-width: 859px) {
-  /* iOS Chess screens use inline titles: the home's sits under the balance (no large title), and
-     a pushed page shows its title centred with the round back chevron on the left. */
-  .chess-t-header-home > .kaposts-title { display: none; }
+  /* Every KaPlay screen has a fixed title (KaPlay ddec987 ScreenTitleToolbarLabel): inline, centred
+     under the balance, above the scrolling body. */
+  .chess-t-header-home > .kaposts-title, .chess-t-header-pushed > .kaposts-title { font-size: 17px; font-weight: 600; line-height: 22px; text-align: center; }
   .chess-t-header-home { min-height: 0; margin: 0; padding: 0; }
   /* A pushed Chess page: the back chevron takes the toolbar's leading slot (where the status
-     light sits) and the balance stays in the middle, so there is no title row. */
-  .chess-t-header-pushed > .kaposts-title { display: none; }
+     light sits) and the balance stays in the middle. */
   .chess-t-header-pushed { min-height: 0; margin: 0; padding: 0; }
   .chess-t-header-pushed > [data-chess-t-back] {
     position: fixed; z-index: 302; top: calc(10px + var(--safe-top, 0px)); left: calc(17px + var(--safe-left, 0px));

@@ -4,6 +4,9 @@ import { cssUrlValue } from "./css-url.js";
 import { readNextcloudAccount, writeNextcloudAccount, onKeyVaultStateChanged } from "./key-vault.js";
 import { talkCallsFromCapabilities } from "./talk.js";
 import { nextcloudOffReason, KASPA_QUICK_START_URL } from "./nextcloud-availability.js";
+import {
+  addressBookHasBackupData, addressBookHoldsWallet, addressBookWalletAddress, mergeSharedContactsFile, sharedContactsFileJson,
+} from "./address-book-store.js";
 // Nextcloud integration — desktop port of the iOS stack:
 // connect a server with an app password, browse it over WebDAV, send photos/videos in chats as
 // public /s/TOKEN share links (rendered by the link-preview feature), and keep the account's
@@ -24,6 +27,9 @@ import { nextcloudOffReason, KASPA_QUICK_START_URL } from "./nextcloud-availabil
 // device never costs another device its history. Since envelope v1 the file is encrypted at
 // rest (AES-256-GCM keyed off the identity private key — see ui/backup-crypto.js); every
 // device on the same seed derives the same key, and legacy plaintext files stay restorable.
+//
+// One file is outside the backup: KaPay's contacts, shared in the clear (see "Contacts shared with
+// KaPay" below).
 //
 // Browser reality: unlike the native apps, fetches here would be subject to CORS — solved by
 // routing all API traffic through vite.config.mjs's same-origin /nc-proxy passthrough (see
@@ -81,6 +87,18 @@ const AUTO_SYNC_MIN_MS = 90_000;
 // Coalescing window for the DOM change detector below — a render burst counts once.
 const ACTIVITY_COALESCE_MS = 400;
 
+// Contacts shared with KaPay (iOS 6c80aea3, NEXTCLOUD_SYNC.md §9). Always this folder at the root of
+// the user's files, whatever nc.backupFolder says: KaPay only looks here (its backupPath), and iOS
+// keeps it here even when the chat backup's folder was moved. So an account whose backup was found
+// in "Apps/KaChat" or "kachat" (Build 259) gets its contacts in "KaChat" all the same.
+const SHARED_CONTACTS_FOLDER = "KaChat";
+const SHARED_CONTACTS_FILENAME = "KaPay Contacts.json";
+// KaPay's earlier names for it: read when there's no file under the current name yet.
+const LEGACY_SHARED_CONTACTS_FILENAMES = ["KaPay Address Book.json", "KaChat Wallet Address Book.json"];
+const SHARED_CONTACTS_MAX_BYTES = 50_000_000;
+// Going in and out of the app, and each change-watcher tick, check the server at most this often.
+const SHARED_CONTACTS_CHECK_MS = 60_000;
+
 let deps = null;
 let nc = null;              // null = not connected (or locked); else the account, app password opened
 let ncLocked = null;        // a stored connection that cannot be used now: public fields only,
@@ -102,6 +120,8 @@ let autoRestoreTimer = null;
 let activityObserver = null;
 let activityCoalesceTimer = null;
 let lastActivityFingerprint = null;
+let lastSharedContactsCheck = 0; // when the app last looked at the contacts file shared with KaPay
+let sharedContactsInFlight = false; // one at a time: two PUTs at once get 423 Locked
 
 // Picker state
 let pickerOpen = false;
@@ -469,15 +489,19 @@ async function ensureFolder(davRoot, parts) {
  *  backup), creating the folder chain if needed, and returns the stored path. A file of the same
  *  name is replaced; exports carry a timestamp in their name, so each one is a new file.
  *  `keepSpaces` keeps a name the user gave (a portfolio's, "KaChat Contacts") readable in
- *  Nextcloud instead of turning its spaces into underscores (iOS 87b2a0b). */
-export async function uploadToKaChatFolder(body, filename, contentType, { keepSpaces = false } = {}) {
+ *  Nextcloud instead of turning its spaces into underscores (iOS 87b2a0b). `folder` puts it
+ *  somewhere other than backupFolderPath (the contacts file shared with KaPay), and `stillCurrent`,
+ *  asked right before the write, stops a body built for an account that has since been switched
+ *  away from. */
+export async function uploadToKaChatFolder(body, filename, contentType, { keepSpaces = false, folder: folderOverride = null, stillCurrent = null } = {}) {
   if (!nc) throw new Error("Nextcloud is not connected.");
   await ensureDavUser();
-  const folder = backupFolderPath();
+  const folder = folderOverride ?? backupFolderPath();
   const parts = folder.split("/").filter(Boolean);
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folderURL = await ensureFolder(davRoot, parts);
   const storedName = kaChatFolderFileName(filename, { keepSpaces });
+  if (stillCurrent && !stillCurrent()) throw new Error("The account changed before the upload.");
   const put = await ncFetch(`${folderURL}/${encodeURIComponent(storedName)}`, {
     method: "PUT",
     headers: { Authorization: authHeader(), "Content-Type": contentType || "application/octet-stream" },
@@ -509,10 +533,79 @@ export async function downloadNextcloudText(path, { maxBytes = 10_000_000 } = {}
     cache: "no-store",
   });
   if (response.status === 401) throw new Error("Nextcloud refused the download (HTTP 401).");
-  if (!response.ok) throw new Error(`Download failed (HTTP ${response.status}).`);
+  if (!response.ok) throw Object.assign(new Error(`Download failed (HTTP ${response.status}).`), { status: response.status });
   const blob = await response.blob();
   if (blob.size > maxBytes) throw new Error("That file is too large to import.");
   return blob.text();
+}
+
+// --- Contacts shared with KaPay (iOS 6c80aea3, NEXTCLOUD_SYNC.md §9) ---
+//
+// KaPay, KaChat's wallet app, never reads kachat-backup.json: it keeps its contacts as a plain JSON
+// file. KaChat reads, merges and writes that same file, which is how a contact added or deleted in
+// either app reaches the other. It holds one account: a file naming another account is left out of
+// the merge and replaced (the store's mergeSharedContactsFile), so two accounts on one Nextcloud
+// login take turns replacing it, and neither ever gets the other's contacts.
+
+/** With Automatic Sync on, brings in KaPay's changes when the app opens, on an account activation
+ *  and while the change watcher runs. A change it brings is passed on to the other KaChat clients
+ *  through the chat backup. */
+function syncSharedContactsIfDue() {
+  if (!nc?.autoBackup || sharedContactsInFlight || document.visibilityState === "hidden") return;
+  if (lastSharedContactsCheck && Date.now() - lastSharedContactsCheck < SHARED_CONTACTS_CHECK_MS) return;
+  lastSharedContactsCheck = Date.now();
+  const account = nc;
+  // After the other services have switched to this account.
+  window.setTimeout(async () => {
+    if (nc !== account) return;
+    try {
+      if (await syncSharedContacts() && nc === account) noteLocalActivity();
+    } catch (error) {
+      deps.appendEngineLog?.(`[Nextcloud] Syncing contacts with KaPay failed: ${error.message}`);
+    }
+  }, 1000);
+}
+
+/** One read, merge, write of the shared file; the write only when the file is missing something
+ *  this book has. A file that can't be read as contacts throws before any write, so it is never
+ *  overwritten, and so does any download failure other than the file not being there. No file is
+ *  created for an account with no contacts or deletions. Returns whether the merge changed this
+ *  book. Exported for tools/test-nextcloud-shared-contacts.mjs. */
+export async function syncSharedContacts() {
+  const account = nc;
+  const wallet = addressBookWalletAddress();
+  if (sharedContactsInFlight || !account || !wallet) return false;
+  // Both the connection and the book: an account switch replaces them one after the other.
+  const stillCurrent = () => nc === account && addressBookHoldsWallet(wallet);
+  sharedContactsInFlight = true;
+  try {
+    const remote = await downloadSharedContacts();
+    if (!stillCurrent()) return false;
+    const { changedHere, serverIsBehind } = remote == null
+      ? { changedHere: false, serverIsBehind: addressBookHasBackupData() }
+      : mergeSharedContactsFile(remote);
+    if (!serverIsBehind || !stillCurrent()) return changedHere;
+    await uploadToKaChatFolder(sharedContactsFileJson(), SHARED_CONTACTS_FILENAME, "application/json", {
+      keepSpaces: true,
+      folder: SHARED_CONTACTS_FOLDER,
+      stillCurrent,
+    });
+    return changedHere;
+  } finally {
+    sharedContactsInFlight = false;
+  }
+}
+
+/** The shared file under its name, else under an earlier one; null when neither is there. */
+async function downloadSharedContacts() {
+  for (const name of [SHARED_CONTACTS_FILENAME, ...LEGACY_SHARED_CONTACTS_FILENAMES]) {
+    try {
+      return await downloadNextcloudText(`${SHARED_CONTACTS_FOLDER}/${name}`, { maxBytes: SHARED_CONTACTS_MAX_BYTES });
+    } catch (error) {
+      if (error?.status !== 404) throw error;
+    }
+  }
+  return null;
 }
 
 let pickerAllowedExtensions = null;
@@ -704,6 +797,15 @@ async function repairableTruncation(error) {
 //   isn't a valid archive, or a file cut off at rest) is overwritten in place with this device's
 //   history. Every other device unions its own history back in on its next sync.
 async function performBackup() {
+  // KaPay's contacts first, so this backup carries them to the other KaChat clients. A problem with
+  // that file never stops the chat backup (iOS 6c80aea3).
+  const account = nc;
+  try {
+    await syncSharedContacts();
+  } catch (error) {
+    deps.appendEngineLog?.(`[Nextcloud] Syncing contacts with KaPay failed: ${error.message}`);
+  }
+  if (nc !== account) throw new Error("The account changed during the backup.");
   let existingRemoteJson = null;
   try {
     existingRemoteJson = await downloadBackupFile(BACKUP_FILENAME);
@@ -1078,6 +1180,7 @@ async function runChangeWatcher(epoch) {
     if (!nc?.autoBackup || document.visibilityState === "hidden") break;
     try {
       await checkForRemoteChangeAndImport();
+      syncSharedContactsIfDue();
       backoffFactor = 1;
     } catch (error) {
       backoffFactor = Math.min(backoffFactor * 3, CHANGE_WATCH_BACKOFF_FACTOR_MAX);
@@ -1268,6 +1371,7 @@ function armAutoBackup() {
   autoBackupIfDue(AUTO_CATCHUP_MS);
   startChangeWatcherIfNeeded();
   scheduleAutoRestoreIfNeeded();
+  syncSharedContactsIfDue();
 }
 
 // ---------------------------------------------------------------------------
@@ -1687,7 +1791,7 @@ function renderSettings() {
       <div class="settings-list-row settings-info-row" data-nc-backup-status-row hidden><span class="settings-row-copy"><small data-nc-backup-status></small></span></div>
       <div class="settings-list-row settings-info-row" data-nc-backup-result-row hidden><span class="settings-row-copy"><small data-nc-backup-result></small></span></div>
     </div>
-    <p class="settings-group-footer">Keeps your chat history in ${deps.escapeHtml(BACKUP_FILENAME)} in the folder above (choosing All Files resets to the default ${deps.escapeHtml(DEFAULT_BACKUP_FOLDER)} folder). Automatic Sync keeps your devices in near-live sync: new messages upload moments after they arrive, and while the app is open it also watches the server and quietly pulls in what your other devices upload, fastest while you are in a chat. A wallet that connects to an existing backup restores it once automatically. Every upload merges with what is already on the server, so no device can erase another's history. Restoring merges the archive into this device's history.</p>
+    <p class="settings-group-footer">Keeps your chat history in ${deps.escapeHtml(BACKUP_FILENAME)} in the folder above (choosing All Files resets to the default ${deps.escapeHtml(DEFAULT_BACKUP_FOLDER)} folder). Automatic Sync keeps your devices in near-live sync: new messages upload moments after they arrive, and while the app is open it also watches the server and quietly pulls in what your other devices upload, fastest while you are in a chat. A wallet that connects to an existing backup restores it once automatically. Every upload merges with what is already on the server, so no device can erase another's history. Restoring merges the archive into this device's history. Your contacts also sync with KaPay on the same account, through KaPay's contacts file in the KaChat folder. That file isn't encrypted, unlike your chat history.</p>
     <p class="settings-group-footer">Your contacts and portfolios are in the same backup and sync between your devices the same way.</p>
     <div class="settings-list-card danger-list-card">
       <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
@@ -2205,6 +2309,7 @@ export function resetNextcloudForAccount() {
   syncDirty = false;
   lastAutoSyncAt = 0;
   lastSeenConversationId = null;
+  lastSharedContactsCheck = 0;
   if (restore.phase !== "running") closeRestoreOverlay();
   for (const url of thumbCache.values()) { if (url) URL.revokeObjectURL(url); }
   thumbCache = new Map();
@@ -2253,6 +2358,7 @@ export function initNextcloud(dependencies) {
     startChangeWatcherIfNeeded();
     autoBackupIfDue(AUTO_CATCHUP_MS);
     scheduleAutoRestoreIfNeeded();
+    syncSharedContactsIfDue();
   });
 
   renderSettings();

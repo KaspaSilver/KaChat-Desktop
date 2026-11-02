@@ -14,6 +14,9 @@
 // Backup (NEXTCLOUD_SYNC.md §5): the archive carries optional `addressBook` (entries with ISO 8601
 // whole-second dates and `photo` as raw base64 JPEG) and `addressBookDeleted`. Per address the
 // newest edit or deletion wins; a tombstone at or after the entry's last edit deletes it.
+//
+// Shared with KaPay (NEXTCLOUD_SYNC.md §9, iOS 6c80aea3): the same rule against the plain JSON file
+// KaPay keeps on Nextcloud - the export file below plus `deleted`. ui/nextcloud.js moves the bytes.
 
 export const ADDRESS_BOOK_ENTRIES_KEY = "kachat-address-book-v1";
 export const ADDRESS_BOOK_DELETED_KEY = "kachat-address-book-deleted-v1";
@@ -543,10 +546,14 @@ function toArchiveEntry(entry, photoDataUrl) {
 export function archiveAddressBook() {
   const c = load();
   const addressBook = addressBookEntries().map((entry) => toArchiveEntry(entry, readPhoto(c.wallet, entry.address)));
-  const addressBookDeleted = [...c.deleted.entries()]
+  return { addressBook, addressBookDeleted: archiveTombstones(c) };
+}
+
+/** A book's tombstones in the archive's shape, sorted by address (iOS archiveTombstones). */
+function archiveTombstones(book) {
+  return [...book.deleted.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
     .map(([address, deletedAt]) => ({ address, deletedAt: addressBookIso(deletedAt) }));
-  return { addressBook, addressBookDeleted };
 }
 
 /**
@@ -621,6 +628,13 @@ export function importAddressBookArchive(incomingEntries, incomingTombstones) {
   const entriesIn = Array.isArray(incomingEntries) ? incomingEntries : [];
   const tombsIn = Array.isArray(incomingTombstones) ? incomingTombstones : [];
   if (!c.wallet || (!entriesIn.length && !tombsIn.length)) return false;
+  applyArchive(c, entriesIn, tombsIn);
+  persist();
+  emit("restore");
+  return true;
+}
+
+function applyArchive(c, entriesIn, tombsIn) {
   const before = new Map(c.entries);
   const localTombs = [...c.deleted.entries()].map(([address, deletedAt]) => ({ address, deletedAt }));
   const merged = mergeAddressBooks([[...c.entries.values()], entriesIn], [localTombs, tombsIn]);
@@ -641,7 +655,135 @@ export function importAddressBookArchive(incomingEntries, incomingTombstones) {
   for (const t of merged.tombstones) deletePhoto(c.wallet, t.address);
   c.entries = entries;
   c.deleted = new Map(merged.tombstones.map((t) => [t.address, t.deletedAt]));
-  persist();
-  emit("restore");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The contacts file shared with KaPay (iOS 6c80aea3 AddressBookManager, KaPay 99ab88a)
+// ---------------------------------------------------------------------------------------------
+//
+// { deleted: [{ address, deletedAt }], entries, exportedAt, type: "kachat-address-book", version: 1,
+//   walletAddress }: the export file with what was deleted, so a merge doesn't bring it back. Other
+// readers of the file ignore `deleted`. It is plain JSON, not encrypted, and it holds one account.
+
+// Any hex, as Swift's UUID decodes it; cleanEntry is stricter and gives anything else a new id.
+const FILE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SECONDS_TO_2001 = 978_307_200;
+
+/** This book is `address`'s, not still the last account's during a switch (iOS holdsWallet). */
+export function addressBookHoldsWallet(address) {
+  const wallet = normalizeAddressBookAddress(load().wallet);
+  return Boolean(wallet) && wallet === normalizeAddressBookAddress(address);
+}
+
+/** The wallet this book belongs to, as the file names it; "" with no wallet. */
+export function addressBookWalletAddress() {
+  return normalizeAddressBookAddress(load().wallet);
+}
+
+/** Anything worth putting in a shared contacts file (iOS hasBackupData). */
+export function addressBookHasBackupData() {
+  const c = load();
+  return c.entries.size > 0 || c.deleted.size > 0;
+}
+
+/** The shared file's text (iOS exportData(includingDeleted: true)). Never without a wallet: a file
+ *  naming no account merges into whichever account reads it. */
+export function sharedContactsFileJson() {
+  const c = load();
+  if (!c.wallet) throw new Error("Open a wallet first.");
+  return JSON.stringify({ deleted: archiveTombstones(c), ...addressBookExport() }, null, 2);
+}
+
+/** A date in the file, to ms: ISO 8601 as iOS writes it, or a bare number, which is what iOS's
+ *  fallback JSONDecoder takes as seconds since 2001. NaN when it is neither. */
+function sharedFileTime(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return (value + SECONDS_TO_2001) * 1000;
+  return typeof value === "string" ? Date.parse(value) : NaN;
+}
+
+/**
+ * The shared file's text with its dates in ms. Throws ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT for anything
+ * iOS's Codable decode of ExportFile would refuse, since a file that can't be read as contacts is
+ * never overwritten: one bad row refuses the whole file, unlike importing one.
+ */
+function parseSharedContactsFile(text) {
+  const refuse = () => { throw new Error(ADDRESS_BOOK_IMPORT_NOT_AN_EXPORT); };
+  let file = null;
+  try { file = JSON.parse(String(text ?? "").replace(/^\uFEFF/, "")); } catch { refuse(); }
+  if (!file || typeof file !== "object" || Array.isArray(file)
+    || file.type !== ADDRESS_BOOK_EXPORT_TYPE
+    || !Number.isInteger(file.version)
+    || !Number.isFinite(sharedFileTime(file.exportedAt))
+    || (file.walletAddress != null && typeof file.walletAddress !== "string")
+    || !Array.isArray(file.entries)
+    || (file.deleted != null && !Array.isArray(file.deleted))) refuse();
+  const entries = file.entries.map((raw) => {
+    const createdAt = sharedFileTime(raw?.createdAt);
+    const updatedAt = sharedFileTime(raw?.updatedAt);
+    if (!raw || typeof raw !== "object" || !FILE_UUID_PATTERN.test(String(raw.id ?? ""))
+      || typeof raw.address !== "string" || typeof raw.name !== "string" || typeof raw.note !== "string"
+      || !Number.isFinite(createdAt) || !Number.isFinite(updatedAt)
+      || (raw.photo != null && typeof raw.photo !== "string")) refuse();
+    return { ...raw, createdAt, updatedAt };
+  });
+  const deleted = (file.deleted ?? []).map((raw) => {
+    const deletedAt = sharedFileTime(raw?.deletedAt);
+    if (!raw || typeof raw !== "object" || typeof raw.address !== "string" || !Number.isFinite(deletedAt)) refuse();
+    return { address: raw.address, deletedAt };
+  });
+  return { walletAddress: file.walletAddress ?? null, entries, deleted };
+}
+
+function isOnActiveNetwork(address) {
+  try { return !config.otherNetworkReason(address) && config.isValidAddress(address) !== false; }
+  catch { return false; }
+}
+
+/** Each address's last edit and what's deleted, to the second (the file's dates are), to tell
+ *  whether two copies of the book say the same (iOS BookSummary). */
+function bookSummary(entries, deletedAddresses) {
+  const edits = new Map();
+  for (const entry of entries) {
+    const address = normalizeAddressBookAddress(entry.address);
+    edits.set(address, Math.max(edits.get(address) ?? 0, Math.floor(parseTime(entry.updatedAt) / 1000)));
+  }
+  return { edits, deleted: new Set([...deletedAddresses].map(normalizeAddressBookAddress)) };
+}
+
+function sameSummary(a, b) {
+  if (a.edits.size !== b.edits.size || a.deleted.size !== b.deleted.size) return false;
+  for (const [address, at] of a.edits) if (b.edits.get(address) !== at) return false;
+  for (const address of a.deleted) if (!b.deleted.has(address)) return false;
   return true;
+}
+
+/**
+ * Merges the shared file into this book, the newest edit or deletion winning per address. Unlike
+ * importing a file, a deletion stays deleted. A file another account uploaded (accounts can share a
+ * Nextcloud login) is left out, so one account's contacts never land in another. Throws, before
+ * anything changes, on a file that can't be read as contacts. `serverIsBehind`: this book has
+ * something the file doesn't, so it's worth uploading (iOS mergeBackup; KaPay's matches).
+ */
+export function mergeSharedContactsFile(text) {
+  // Read afresh: this runs by itself, and another tab may have saved since this one last looked.
+  cache = null;
+  const c = load();
+  if (!c.wallet) throw new Error("Open a wallet first.");
+  const file = parseSharedContactsFile(text);
+  if (file.walletAddress != null && normalizeAddressBookAddress(file.walletAddress) !== normalizeAddressBookAddress(c.wallet)) {
+    return { changedHere: false, serverIsBehind: addressBookHasBackupData() };
+  }
+  const incoming = file.entries.filter((entry) => isOnActiveNetwork(normalizeAddressBookAddress(entry.address)));
+  const before = bookSummary(c.entries.values(), c.deleted.keys());
+  if (incoming.length || file.deleted.length) {
+    applyArchive(c, incoming, file.deleted);
+    persist();
+  }
+  const after = bookSummary(c.entries.values(), c.deleted.keys());
+  const server = mergeAddressBooks([incoming], [file.deleted]);
+  const onServer = bookSummary(server.entries, server.tombstones.map((t) => t.address));
+  const changedHere = !sameSummary(after, before);
+  // "restore": it came FROM the server. The caller decides whether the chat backup owes an upload.
+  if (changedHere) emit("restore");
+  return { changedHere, serverIsBehind: !sameSummary(after, onServer) };
 }

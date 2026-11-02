@@ -1,19 +1,22 @@
-// Chess Online > Bots (iOS c3c04a1, ONLINE_CHESS.md §7): the #chess-bots codec against iOS's
-// bytes, the five bots and their settings, the search board against engine/chess.js's rules
+// KaPlay > Bots (iOS c3c04a1, KaPlay ddec987, ONLINE_CHESS.md §7): the #chess-bots stamp against
+// iOS's bytes, the five bots and their settings, the search board against engine/chess.js's rules
 // (every legal move, make/unmake), mate in one found at level 5, a repeated position scored as
-// a draw, every level's search inside its time limit, the unlock rules and the game loop (the
-// one-at-a-time outbox, five retries then Retry, resign). Pure: no DOM, no network. Run from the
-// repo root:
+// a draw, every level's search inside its time limit, the unlock rules, the game loop (free while
+// played, one stamp when it ends, five retries then Retry, resign), and a bot's board (fewest moves
+// to win, the player's own stamped wins merged in). Pure: no DOM, no network. Run from the repo
+// root:
 //
 //   node tools/test-chess-bot.mjs
 
 import * as Chess from "../engine/chess.js";
 import {
-  CHESS_BOTS, CHESS_BOTS_CHANNEL, chessBot, botSearchSettings, botMessages, encodeBotMessage, newBotGameId,
-  botRecord, isBotUnlocked, addBotResult, parseBotRecords, BotPosition, botMoveToChessMove, chessBotBestMove,
+  CHESS_BOTS, CHESS_BOTS_CHANNEL, chessBot, botSearchSettings, botResultMessage, encodeBotMessage, newBotGameId,
+  sampleStampContent, botRecord, isBotUnlocked, addBotResult, parseBotRecords, BotPosition, botMoveToChessMove, chessBotBestMove,
+  addStampedWin, bestStampedWin, parseStampedWins, indexerBotBoards, botBoardRows, botHasBeenPlayed,
   ChessBotGame, BOT_SEND_RETRIES,
 } from "../engine/chess-bot.js";
 import { broadcastPayloadBytes, isServiceBroadcastChannel } from "../engine/broadcasts.js";
+import { periodSinceMs } from "../engine/chess-tournament.js";
 
 const r = {
   pass: 0, fail: 0, failures: [],
@@ -48,22 +51,28 @@ function fen(text) {
 const moveText = (m) => `${Chess.algebraic(m.from)}${Chess.algebraic(m.to)}${m.promotion ? Chess.promotionLetter(m.promotion) : ""}`;
 const now = () => performance.now();
 
-// --- Codec: the bytes iOS's JSONEncoder (.sortedKeys, .withoutEscapingSlashes) emits ------------
-// The example in iOS ONLINE_CHESS.md §7, game id as printed there.
+// --- The stamp: the bytes iOS's JSONEncoder (.sortedKeys, .withoutEscapingSlashes) emits --------
+const uci = (text) => text.split(" ").map((m) => ({ from: Chess.squareFromAlgebraic(m.slice(0, 2)), to: Chess.squareFromAlgebraic(m.slice(2, 4)), promotion: Chess.promotionFromLetter(m[4]) || null }));
+// The example in iOS ONLINE_CHESS.md §7, game id as printed there; run through Swift's JSONEncoder
+// to check it.
 r.eq(
-  encodeBotMessage(botMessages.move("3b0f…", 2, { from: Chess.squareFromAlgebraic("g8"), to: Chess.squareFromAlgebraic("f6"), promotion: null })),
-  `{"a":"move","from":"g8","g":"3b0f…","n":2,"to":"f6","type":"chess_bot","v":1}`,
-  "move matches the iOS example byte for byte",
+  encodeBotMessage(botResultMessage("3b0f…", 3, Chess.WHITE, { kind: "won", why: "checkmate" }, uci("e2e4 e7e5 d1h5 b8c6 f1c4 g8f6 h5f7"))),
+  `{"a":"result","bot":3,"c":"w","g":"3b0f…","m":"e2e4 e7e5 d1h5 b8c6 f1c4 g8f6 h5f7","r":"won","type":"chess_bot","v":2,"why":"checkmate"}`,
+  "the stamp matches the iOS example byte for byte",
 );
 const gid = "9d2c7a54-1f0e-4b8a-a3c1-6e5f4d3b2a10";
-r.eq(encodeBotMessage(botMessages.start(gid, 3, Chess.BLACK)), `{"a":"start","bot":3,"c":"b","g":"${gid}","type":"chess_bot","v":1}`, "start: bot level and the player's colour");
-r.eq(encodeBotMessage(botMessages.start(gid, 1, Chess.WHITE)), `{"a":"start","bot":1,"c":"w","g":"${gid}","type":"chess_bot","v":1}`, "start as white");
 r.eq(
-  encodeBotMessage(botMessages.move(gid, 41, { from: Chess.squareFromAlgebraic("e7"), to: Chess.squareFromAlgebraic("e8"), promotion: "knight" })),
-  `{"a":"move","from":"e7","g":"${gid}","n":41,"promo":"n","to":"e8","type":"chess_bot","v":1}`,
-  "promotion letter sits between n and to",
+  encodeBotMessage(botResultMessage(gid, 5, Chess.BLACK, { kind: "drawn", why: "the fifty-move rule" }, uci("e7e8q"))),
+  `{"a":"result","bot":5,"c":"b","g":"${gid}","m":"e7e8q","r":"drawn","type":"chess_bot","v":2,"why":"the fifty-move rule"}`,
+  "black, a draw, a promotion: Swift's bytes",
 );
-r.eq(encodeBotMessage(botMessages.resign(gid)), `{"a":"resign","g":"${gid}","type":"chess_bot","v":1}`, "resign");
+r.eq(uci("e7e8n")[0].promotion, "knight", "the test's move reader takes a promotion");
+r.check(encodeBotMessage(botResultMessage(gid, 1, Chess.WHITE, { kind: "lost", why: "resignation" }, [])).includes(`"m":""`), "a game resigned before a move still has its m");
+{
+  const sample = JSON.parse(sampleStampContent());
+  r.eq(sample.m.split(" ").length, 80, "the fee sample is 40 moves a side");
+  r.eq(`${sample.r} ${sample.why} ${sample.bot} ${sample.c}`, "won checkmate 1 w", "the fee sample is iOS's");
+}
 r.check(!encodeBotMessage({ type: "chess_bot", v: 1, g: "a/b", a: "x" }).includes("\\/"), "slashes are not escaped");
 r.eq(CHESS_BOTS_CHANNEL, "chess-bots", "channel");
 r.eq(broadcastPayloadBytes(CHESS_BOTS_CHANNEL, "{}"), "kchat:1:bcast:chess-bots:{}".length, "payload prefix kchat:1:bcast:chess-bots:");
@@ -235,46 +244,101 @@ for (const [name, board] of timed.slice(0, 3)) {
   r.check(info && info.depth >= 1 && info.depth < 20, `depth 20 cut by the clock (${name}): stopped at depth ${info?.depth}`);
 }
 
-// --- The game loop (ChessBotGame.swift) --------------------------------------------------------
+// --- The bots' boards (ChessBotLeaderboardService) ---------------------------------------------
+{
+  const NOW = Date.UTC(2026, 10, 15);
+  const MONTH = periodSinceMs("month", NOW);
+  const ME = "kaspa:me", A = "kaspa:a", B = "kaspa:b";
+  r.eq(indexerBotBoards({ period: "all", bots: [] }, "month"), null, "an answer for another period is not used");
+  r.eq(indexerBotBoards({ bots: [] }, "all"), null, "an old indexer without a period is not used");
+  r.eq(indexerBotBoards({ period: "all" }, "all"), null, "nor an answer without bots");
+  const parsed = indexerBotBoards({ period: "all", since: 1, bots: [
+    { level: 3, games: 9, players: [{ address: A, moves: 20, at: 5 }, { address: "", moves: 1, at: 1 }, { address: B, moves: "x", at: 1 }] },
+    { level: 9, games: 1, players: [] },
+  ] }, "all");
+  r.eq(parsed[3].games, 9, "games read");
+  r.eq(parsed[3].rows.length, 1, "bad rows dropped");
+  r.eq(parsed[9], undefined, "a level with no bot is dropped");
+
+  const boards = { all: { 3: { games: 3, rows: [{ address: A, moves: 20, at: 5 }, { address: B, moves: 12, at: 9 }, { address: "kaspa:c", moves: 12, at: 7 }] } } };
+  const names = (rows) => rows.map((row) => `${row.address.slice(6)}${row.moves}`).join(",");
+  r.eq(names(botBoardRows({ boards, level: 3, period: "all", wins: {}, address: ME, nowMs: NOW })), "c12,b12,a20", "fewest moves first, the earlier win on a tie");
+  r.eq(botBoardRows({ boards, level: 2, period: "all", wins: {}, address: ME, nowMs: NOW }).length, 0, "nobody has beaten it");
+  r.eq(botBoardRows({ boards, level: 3, period: "month", wins: {}, address: ME, nowMs: NOW }).length, 0, "another period's rows do not leak");
+
+  let wins = addStampedWin({}, 3, 15, MONTH + 10);
+  r.eq(names(botBoardRows({ boards, level: 3, period: "all", wins, address: ME, nowMs: NOW })), "c12,b12,me15,a20", "my stamped win shows before the indexer has it");
+  wins = addStampedWin(wins, 3, 11, MONTH - 10);
+  r.eq(bestStampedWin(wins, 3, 0).moves, 11, "my best");
+  r.eq(bestStampedWin(wins, 3, MONTH).moves, 15, "my best this month leaves out last month's");
+  r.eq(bestStampedWin(wins, 3, NOW), null, "nothing since");
+  r.eq(bestStampedWin(addStampedWin(addStampedWin({}, 1, 8, 50), 1, 8, 40), 1, 0).at, 40, "the earlier win on a tie");
+  r.eq(names(botBoardRows({ boards, level: 3, period: "month", wins, address: ME, nowMs: NOW })), "me15", "the month board only counts this month's win");
+  const known = { all: { 3: { games: 1, rows: [{ address: "KASPA:ME", moves: 14, at: 3 }] } } };
+  r.eq(botBoardRows({ boards: known, level: 3, period: "all", wins: addStampedWin({}, 3, 20, MONTH), address: ME, nowMs: NOW })[0].moves, 14, "the indexer's better row stays");
+  r.eq(botBoardRows({ boards: known, level: 3, period: "all", wins: addStampedWin({}, 3, 10, MONTH), address: ME, nowMs: NOW })[0].moves, 10, "my better win replaces my row, whatever the case");
+  r.eq(botBoardRows({ boards: known, level: 3, period: "all", wins: addStampedWin({}, 3, 10, MONTH), address: ME, nowMs: NOW }).length, 1, "one row per player");
+  r.eq(botBoardRows({ boards: {}, level: 3, period: "all", wins: addStampedWin({}, 3, 10, MONTH), address: "", nowMs: NOW }).length, 0, "no account, no own row");
+
+  r.eq(JSON.stringify(parseStampedWins(JSON.stringify(addStampedWin({}, 2, 9, 77)))), `{"2":[{"moves":9,"at":77}]}`, "stamped wins round trip");
+  r.eq(JSON.stringify(parseStampedWins("nonsense")), "{}", "bad storage is empty");
+  r.eq(JSON.stringify(parseStampedWins(`{"2":[{"moves":"x"}],"9":[{"moves":1,"at":1}]}`)), `{"2":[]}`, "bad wins and levels dropped");
+
+  r.check(!botHasBeenPlayed({ records: {}, boards: {}, level: 4 }), "an unplayed bot");
+  r.check(botHasBeenPlayed({ records: addBotResult({}, 4, "drawn"), boards: {}, level: 4 }), "played here");
+  r.check(botHasBeenPlayed({ records: {}, boards: { all: { 4: { games: 1, rows: [] } } }, level: 4 }), "played by someone, by the indexer's all-time count");
+  r.check(!botHasBeenPlayed({ records: {}, boards: { month: { 4: { games: 1, rows: [] } } }, level: 4 }), "only the all-time count decides");
+}
+
+// --- The game loop (ChessBotGame.swift, KaPlay ddec987) ----------------------------------------
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function settle(times = 30) { for (let i = 0; i < times; i += 1) await tick(); }
+const sq = Chess.squareFromAlgebraic;
 
 {
-  // Player white, sends that land at once, a bot that answers instantly.
+  // Player white, a bot that answers instantly: nothing is sent while the game is on.
   const sent = [];
   let recorded = null;
+  let stampedMoves = null;
   const game = new ChessBotGame({
     bot: chessBot(1), playerColor: Chess.WHITE,
     send: async (content) => { sent.push(JSON.parse(content)); },
     think: async (board) => Chess.legalMoves(board)[0],
     record: (result) => { recorded = result; },
+    recordStampedWin: (moves) => { stampedMoves = moves; },
     sleep: async () => {},
     id: gid,
   });
-  r.check(!game.canPlayerMove || game.outbox.length === 0, "nothing before start");
+  r.check(!game.play({ from: sq("e2"), to: sq("e4"), promotion: null }), "nothing before start");
   game.start();
-  r.check(!game.canPlayerMove, "the player waits for the start to go on chain");
+  r.check(game.canPlayerMove, "the player moves at once: nothing has to land first");
+  r.check(!game.play({ from: sq("e2"), to: sq("e5"), promotion: null }), "an illegal move is refused");
+  r.check(game.play({ from: sq("e2"), to: sq("e4"), promotion: null }), "e2e4 played");
+  r.check(!game.canPlayerMove, "the bot's turn");
   await settle();
-  r.eq(sent[0]?.a, "start", "the start goes first");
-  r.eq(sent[0]?.c, "w", "start carries the player's colour");
-  r.check(game.canPlayerMove, "the player may move once the start is on chain");
-  r.check(!game.play({ from: Chess.squareFromAlgebraic("e2"), to: Chess.squareFromAlgebraic("e5"), promotion: null }), "an illegal move is refused");
-  r.check(game.play({ from: Chess.squareFromAlgebraic("e2"), to: Chess.squareFromAlgebraic("e4"), promotion: null }), "e2e4 played");
-  r.check(!game.canPlayerMove, "no second move while the first is sending");
-  await settle();
-  r.eq(sent.map((m) => `${m.a}${m.n ?? ""}`).join(","), "start,move1,move2", "the player's move, then the bot's, in order");
-  r.eq(game.movesOnChain, 2, "two moves on chain");
+  r.eq(game.moves.length, 2, "the bot answered");
   r.eq(game.board.sideToMove, Chess.WHITE, "the player's turn again");
+  r.eq(sent.length, 0, "a game on sends nothing");
+  r.eq(game.stamp, "none", "no stamp yet");
+  const played = game.moves.map((p) => moveText(p.move)).join(" ");
   game.resign();
   r.eq(recorded?.kind, "lost", "resigning records the loss at once");
   r.eq(recorded?.why, "resignation", "by resignation");
+  r.eq(game.stamp, "sending", "the stamp goes out");
   await settle();
-  r.eq(sent.at(-1)?.a, "resign", "then the resign goes on chain");
+  r.eq(sent.length, 1, "one transaction for the whole game");
+  r.eq(encodeBotMessage(sent[0]), `{"a":"result","bot":1,"c":"w","g":"${gid}","m":"${played}","r":"lost","type":"chess_bot","v":2,"why":"resignation"}`, "the stamp carries the result and every move");
+  r.eq(game.stamp, "stamped", "stamped");
+  r.eq(stampedMoves, null, "a loss is not a win that counts");
   r.check(!game.canPlayerMove, "no moves after the game is over");
+  game.resign();
+  game.retry();
+  await settle();
+  r.eq(sent.length, 1, "never stamped twice");
 }
 
 {
-  // Bot white: it moves once the start lands, never before.
+  // Bot white: it moves as the board opens.
   const sent = [];
   let thinks = 0;
   const game = new ChessBotGame({
@@ -284,36 +348,76 @@ async function settle(times = 30) { for (let i = 0; i < times; i += 1) await tic
     sleep: async () => {},
   });
   game.start();
-  r.eq(thinks, 0, "the bot does not think before the start is on chain");
+  r.check(!game.canPlayerMove, "the bot has white and is thinking");
   await settle();
-  r.eq(thinks, 1, "with white the bot moves after the start");
-  r.eq(sent.map((m) => `${m.a}${m.n ?? ""}`).join(","), "start,move1", "start then the bot's first move");
-  r.eq(sent[0]?.c, "b", "the player plays black");
+  r.eq(thinks, 1, "with white the bot moves first");
+  r.eq(sent.length, 0, "and it costs nothing");
   r.check(game.canPlayerMove, "then the player's turn");
+  r.eq(game.playerMoveCount, 0, "the bot's move is not the player's");
 }
 
 {
-  // A send that keeps failing: five retries, then the game holds until Retry.
+  // A stamp that keeps failing: five retries, then it holds until Retry. Then it counts.
   let attempts = 0;
   let failing = true;
   const sleeps = [];
+  const stamped = [];
   const game = new ChessBotGame({
     bot: chessBot(1), playerColor: Chess.WHITE,
     send: async () => { attempts += 1; if (failing) throw new Error("no spendable UTXO"); },
-    think: async (board) => Chess.legalMoves(board)[0],
+    think: async () => null,
+    recordStampedWin: (moves) => stamped.push(moves),
     sleep: async (ms) => { sleeps.push(ms); },
   });
+  // Mate in one for the player, from a position with a move already played.
+  game.board = fen("6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1");
   game.start();
+  r.check(game.play({ from: sq("a1"), to: sq("a8"), promotion: null }), "back rank mate");
+  r.eq(game.result?.kind, "won", "the player won");
   await settle(60);
   r.eq(attempts, 1 + BOT_SEND_RETRIES, "one send and five retries");
   r.check(sleeps.filter((ms) => ms === 1_200).length === BOT_SEND_RETRIES, "1.2 s between retries");
-  r.eq(game.sendError, "no spendable UTXO", "the error is held");
-  r.check(!game.canPlayerMove, "no moves while a send has failed");
+  r.eq(game.stamp, "failed", "the stamp failed");
+  r.eq(game.stampError, "no spendable UTXO", "the error is held");
+  r.eq(stamped.length, 0, "a win that is not on chain does not count");
   failing = false;
   game.retry();
+  r.eq(game.stampError, null, "Retry clears the error");
+  r.eq(game.stamp, "sending", "and sends again");
   await settle();
-  r.eq(game.sendError, null, "Retry clears the error");
-  r.check(game.canPlayerMove && game.outbox.length === 0, "and the game goes on");
+  r.eq(game.stamp, "stamped", "stamped on Retry");
+  r.eq(stamped.join(), "1", "the win counts with the player's own moves");
+  game.retry();
+  await settle();
+  r.eq(attempts, 1 + BOT_SEND_RETRIES + 1, "Retry does nothing once it is stamped");
+}
+
+{
+  // Another account: nothing more is sent or counted for this game.
+  let sends = 0;
+  let release = null;
+  const stamped = [];
+  const game = new ChessBotGame({
+    bot: chessBot(1), playerColor: Chess.WHITE,
+    send: () => { sends += 1; return new Promise((resolve) => { release = resolve; }); },
+    think: async () => null,
+    recordStampedWin: (moves) => stamped.push(moves),
+    sleep: async () => {},
+  });
+  game.board = fen("6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1");
+  game.start();
+  game.play({ from: sq("a1"), to: sq("a8"), promotion: null });
+  r.eq(sends, 1, "the stamp is in flight");
+  game.dispose();
+  release();
+  await settle();
+  r.eq(stamped.length, 0, "the old account's win is not counted under the new one");
+  const late = new ChessBotGame({ bot: chessBot(1), playerColor: Chess.WHITE, send: async () => { sends += 1; }, think: async () => null, sleep: async () => {} });
+  late.start();
+  late.dispose();
+  late.resign();
+  await settle();
+  r.eq(sends, 1, "a disposed game sends nothing");
 }
 
 {
@@ -333,35 +437,41 @@ async function settle(times = 30) { for (let i = 0; i < times; i += 1) await tic
 {
   // Fool's mate: the bot (black) mates, the player lost; results follow from the rules.
   const script = ["e7e5", "d8h4"];
+  const sent = [];
   let recorded = null;
+  const stamped = [];
   const game = new ChessBotGame({
     bot: chessBot(3), playerColor: Chess.WHITE,
-    send: async () => {},
+    send: async (content) => { sent.push(JSON.parse(content)); },
     think: async (board) => { const t = script.shift(); return Chess.legalMoves(board).find((m) => moveText(m) === t); },
     record: (result) => { recorded = result; },
+    recordStampedWin: (moves) => stamped.push(moves),
     sleep: async () => {},
   });
   game.start();
   await settle();
-  game.play({ from: Chess.squareFromAlgebraic("f2"), to: Chess.squareFromAlgebraic("f3"), promotion: null });
+  game.play({ from: sq("f2"), to: sq("f3"), promotion: null });
   await settle();
-  game.play({ from: Chess.squareFromAlgebraic("g2"), to: Chess.squareFromAlgebraic("g4"), promotion: null });
+  game.play({ from: sq("g2"), to: sq("g4"), promotion: null });
   await settle();
   r.eq(recorded && `${recorded.kind} ${recorded.why}`, "lost checkmate", "checkmate by the bot is a loss");
   r.eq(game.moves.length, 4, "four plies");
-  r.eq(game.movesOnChain, 4, "the mating move goes on chain too");
+  r.eq(sent.length, 1, "one stamp");
+  r.eq(sent[0].m, "f2f3 e7e5 g2g4 d8h4", "with every move, both sides");
+  r.eq(`${sent[0].r} ${sent[0].why} ${sent[0].c}`, "lost checkmate w", "the result as the player had it");
+  r.eq(stamped.length, 0, "a loss does not count");
 }
 
 {
-  // A pawn reaching the back rank without a choice is a queen (normalizingPromotion).
+  // A pawn reaching the back rank without a choice is a queen (normalizingPromotion), and it mates.
   const sent = [];
   const game = new ChessBotGame({ bot: chessBot(1), playerColor: Chess.WHITE, send: async (c) => { sent.push(JSON.parse(c)); }, think: async (b) => Chess.legalMoves(b)[0], sleep: async () => {} });
-  game.board = fen("k7/4P3/8/8/8/8/8/K7 w - - 0 1");
+  game.board = fen("7k/4P3/6K1/8/8/8/8/8 w - - 0 1");
   game.start();
+  game.play({ from: sq("e7"), to: sq("e8"), promotion: null });
   await settle();
-  game.play({ from: Chess.squareFromAlgebraic("e7"), to: Chess.squareFromAlgebraic("e8"), promotion: null });
-  await settle();
-  r.eq(sent.find((m) => m.a === "move")?.promo, "q", "promo q on chain");
+  r.eq(sent[0]?.m, "e7e8q", "promotion q in the stamp");
+  r.eq(game.playerMoveCount, 1, "one move");
 }
 
 if (r.fail) {

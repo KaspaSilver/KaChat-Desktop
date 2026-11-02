@@ -1,6 +1,7 @@
-// Chess Online > Bots (iOS c3c04a1, ONLINE_CHESS.md §7): five bots, level 1 to 5, played on this
-// device. Ports of iOS ChessBotModels.swift (the bots, the codec, the record),
-// ChessBotEngine.swift (the search) and ChessBotGame.swift (one game, every step on chain).
+// KaPlay > Bots (iOS c3c04a1, KaPlay ddec987, ONLINE_CHESS.md §7): five bots, level 1 to 5, played
+// on this device. Ports of iOS ChessBotModels.swift (the bots, the stamp, the record, the wins that
+// count), ChessBotEngine.swift (the search), ChessBotGame.swift (one game, stamped when it ends) and
+// the pure half of ChessBotLeaderboardService.swift (a bot's board).
 // Pure and UI-free: the search also runs in engine/chess-bot-worker.js, and the tests run all of
 // it under node (tools/test-chess-bot.mjs).
 //
@@ -14,7 +15,7 @@ import {
   WHITE, BLACK, opposite, algebraic, promotionLetter, initialBoard, legalMoves, applyMove, isLegalMove,
   normalizingPromotion, isCheckmate, isStalemate, isInsufficientMaterial, pieceAt, squareEquals,
 } from "./chess.js";
-import { positionKey } from "./chess-tournament.js";
+import { positionKey, periodSinceMs } from "./chess-tournament.js";
 
 // ---------------------------------------------------------------------------------------------
 // The bots (ChessBotModels.swift)
@@ -80,22 +81,25 @@ export function resolveSide(preference, random = Math.random) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// On chain (ONLINE_CHESS.md §7): plaintext broadcast JSON in `#chess-bots`, signed by the
-// player's address - the player's moves and the bot's replies alike.
+// On chain (ONLINE_CHESS.md §7, KaPlay ddec987): a finished game's stamp, plaintext broadcast JSON
+// in `#chess-bots`, signed by the player's address, sent once when the game ends. Earlier builds
+// sent `v: 1` messages per move; they are still on chain and count for nothing.
 // ---------------------------------------------------------------------------------------------
 
 export const CHESS_BOTS_CHANNEL = "chess-bots";
 
-export const botMessages = {
-  start: (id, level, playerColor) => ({ type: "chess_bot", v: 1, g: id, a: "start", bot: level, c: playerColor === WHITE ? "w" : "b" }),
-  /** `ply`: 1 = white's first move. `move`: { from, to, promotion } with board squares. */
-  move: (id, ply, move) => ({
-    type: "chess_bot", v: 1, g: id, a: "move", n: ply,
-    from: algebraic(move.from), to: algebraic(move.to),
-    promo: move.promotion ? promotionLetter(move.promotion) : null,
-  }),
-  resign: (id) => ({ type: "chess_bot", v: 1, g: id, a: "resign" }),
-};
+function botMoveText(move) {
+  return `${algebraic(move.from)}${algebraic(move.to)}${move.promotion ? promotionLetter(move.promotion) : ""}`;
+}
+
+/** The stamp (ChessBotCodec.result). `result`: { kind: "won" | "lost" | "drawn", why }. `moves`:
+ *  every move of the game, both sides, as { from, to, promotion } with board squares. */
+export function botResultMessage(id, level, playerColor, result, moves) {
+  return {
+    type: "chess_bot", v: 2, g: id, a: "result", bot: level, c: playerColor === WHITE ? "w" : "b",
+    r: result.kind, why: result.why, m: moves.map(botMoveText).join(" "),
+  };
+}
 
 /** Keys sorted, nil fields left out, slashes unescaped - the bytes iOS's JSONEncoder
  *  (`.sortedKeys, .withoutEscapingSlashes`) emits. */
@@ -121,10 +125,11 @@ export function newBotGameId() {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-/** The sample the "about 0.0017 KAS each" line is estimated for (ChessBotCodec.moveFeeText):
- *  ply 40, e2-e4, a fresh id. */
-export function sampleMoveContent() {
-  return encodeBotMessage(botMessages.move(newBotGameId(), 40, { from: { file: 4, rank: 1 }, to: { file: 4, rank: 3 }, promotion: null }));
+/** The sample the "about 0.0017 KAS" line is estimated for (ChessBotCodec.stampFeeText): a game
+ *  of 40 moves a side, a fresh id. A longer game's stamp costs a little more. */
+export function sampleStampContent() {
+  const e4 = { from: { file: 4, rank: 1 }, to: { file: 4, rank: 3 }, promotion: null };
+  return encodeBotMessage(botResultMessage(newBotGameId(), CHESS_BOTS[0].level, WHITE, { kind: "won", why: "checkmate" }, Array(80).fill(e4)));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -163,6 +168,88 @@ export function parseBotRecords(text) {
     }
     return out;
   } catch { return {}; }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The wins that count (ChessBotProgress.stampedWins): level -> [{ moves, at }], per address. Only a
+// stamped win counts, and the player's own show on the boards before the indexer has them. A win
+// is ranked by the player's own moves: a win as white in 7 plies is 4 moves.
+// ---------------------------------------------------------------------------------------------
+
+export function addStampedWin(wins, level, moves, at) {
+  const list = Array.isArray(wins?.[level]) ? wins[level] : [];
+  return { ...(wins || {}), [String(level)]: [...list, { moves, at }] };
+}
+
+/** The player's fewest moves against `level` since `since` (ms), the earlier win on a tie. */
+export function bestStampedWin(wins, level, since) {
+  let best = null;
+  for (const win of Array.isArray(wins?.[level]) ? wins[level] : []) {
+    if (win.at < since) continue;
+    if (!best || win.moves < best.moves || (win.moves === best.moves && win.at < best.at)) best = win;
+  }
+  return best;
+}
+
+export function parseStampedWins(text) {
+  try {
+    const parsed = JSON.parse(text || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out = {};
+    for (const bot of CHESS_BOTS) {
+      const list = parsed[bot.level];
+      if (!Array.isArray(list)) continue;
+      out[String(bot.level)] = list
+        .map((win) => ({ moves: Number(win?.moves), at: Number(win?.at) }))
+        .filter((win) => Number.isFinite(win.moves) && Number.isFinite(win.at));
+    }
+    return out;
+  } catch { return {}; }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The bots' boards (ChessBotLeaderboardService, ONLINE_CHESS.md §7.1): each player's fewest moves
+// to win, this month and all time.
+// ---------------------------------------------------------------------------------------------
+
+/** GET /chess/bots/leaderboard's answer for `period`, as level -> { games, rows } - or null when
+ *  it is for another period or not a board. */
+export function indexerBotBoards(json, period) {
+  if (!json || typeof json !== "object" || json.period !== period || !Array.isArray(json.bots)) return null;
+  const levels = {};
+  for (const bot of json.bots) {
+    if (!chessBot(bot?.level)) continue;
+    const rows = [];
+    for (const p of Array.isArray(bot.players) ? bot.players : []) {
+      const moves = Number(p?.moves);
+      const at = Number(p?.at);
+      if (typeof p?.address === "string" && p.address && Number.isFinite(moves) && Number.isFinite(at)) rows.push({ address: p.address, moves, at });
+    }
+    levels[String(bot.level)] = { games: Number(bot.games) || 0, rows };
+  }
+  return levels;
+}
+
+/** One bot's board in `period` (ChessBotLeaderboardService.rows): the indexer's rows with the
+ *  player's own stamped wins merged in, so a win shows the moment it is stamped. Fewest moves
+ *  first, the earlier win on a tie. */
+export function botBoardRows({ boards, level, period, wins, address, nowMs }) {
+  const rows = [...(boards?.[period]?.[level]?.rows || [])];
+  const mine = address ? bestStampedWin(wins, level, periodSinceMs(period, nowMs)) : null;
+  if (mine) {
+    const own = { address, moves: mine.moves, at: mine.at };
+    const index = rows.findIndex((row) => row.address.toLowerCase() === address.toLowerCase());
+    if (index < 0) rows.push(own);
+    else if (mine.moves < rows[index].moves) rows[index] = own;
+  }
+  return rows.sort((a, b) => (a.moves - b.moves) || (a.at - b.at));
+}
+
+/** Has anyone played this bot, as far as this device can tell? */
+export function botHasBeenPlayed({ records, boards, level }) {
+  const record = botRecord(records, level);
+  if (record.wins + record.losses + record.draws > 0) return true;
+  return (boards?.all?.[level]?.games || 0) > 0;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -728,11 +815,10 @@ export function chessBotBestMove(board, settings, avoiding = [], opts = {}) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// One game (ChessBotGame.swift). The board lives on this device, and every step of the game goes
-// on chain as it happens: the start, each move - the player's and the bot's, both signed by the
-// player's address - and a resignation. Sends go out one at a time, in order; the bot replies
-// only once the player's move is on chain, and the player moves only once the bot's is, so the
-// chain always holds the game up to the board. A send that fails holds the game until Retry.
+// One game (ChessBotGame.swift, KaPlay ddec987). The whole game lives on this device and costs
+// nothing while it is played; when it ends, its result and moves go on chain in one transaction,
+// the stamp. A stamp that fails holds until Retry, and only a stamped win counts toward the
+// player's best on the bot's board.
 // ---------------------------------------------------------------------------------------------
 
 export const BOT_SEND_RETRIES = 5;
@@ -747,15 +833,17 @@ export class ChessBotGame {
   /**
    * `send(content)`: one broadcast of `content` to #chess-bots; rejects on failure.
    * `think(board, settings, avoiding)`: resolves the bot's move (a Worker, off the main thread).
-   * `record(result)`: the result for the player's record, once. `onChange()`: repaint.
+   * `record(result)`: the result for the player's record, once. `recordStampedWin(moves)`: a win
+   * went on chain. `onChange()`: repaint.
    */
-  constructor({ bot, playerColor, send, think, record = () => {}, onChange = () => {}, log = () => {}, sleep = defaultSleep, now = defaultNow, id = newBotGameId() }) {
+  constructor({ bot, playerColor, send, think, record = () => {}, recordStampedWin = () => {}, onChange = () => {}, log = () => {}, sleep = defaultSleep, now = defaultNow, id = newBotGameId() }) {
     this.bot = bot;
     this.playerColor = playerColor;
     this.id = id;
     this.sendContent = send;
     this.think = think;
     this.recordResult = record;
+    this.recordStampedWin = recordStampedWin;
     this.onChange = onChange;
     this.log = log;
     this.sleep = sleep;
@@ -767,13 +855,10 @@ export class ChessBotGame {
     /** { kind: "won" | "lost" | "drawn", why } once the game is over. */
     this.result = null;
     this.isThinking = false;
-    /** Messages still to go on chain, the first one sending. */
-    this.outbox = [];
-    /** Moves on chain so far (the start message not counted). */
-    this.movesOnChain = 0;
-    this.sendError = null;
+    /** Where the result's transaction stands: none (the game is still on) | sending | stamped | failed. */
+    this.stamp = "none";
+    this.stampError = null;
 
-    this.isSending = false;
     this.started = false;
     this.disposed = false;
     this.positionCounts = new Map();
@@ -783,17 +868,23 @@ export class ChessBotGame {
   get botColor() { return opposite(this.playerColor); }
   get isOver() { return this.result != null; }
 
-  /** The player may move: their turn, the bot not thinking, everything before on chain. */
+  /** The player may move: their turn, the bot not thinking. */
   get canPlayerMove() {
-    return !this.isOver && this.board.sideToMove === this.playerColor && !this.isThinking && this.outbox.length === 0 && this.sendError == null;
+    return !this.isOver && this.board.sideToMove === this.playerColor && !this.isThinking;
   }
 
-  /** The board opened: the start goes on chain; if the bot has white it moves once that lands. */
+  /** The moves the player made, the number a win is ranked by. */
+  get playerMoveCount() {
+    return this.moves.filter((played) => played.color === this.playerColor).length;
+  }
+
+  /** The board opened: if the bot has white it moves now. */
   start() {
     if (this.started) return;
     this.started = true;
     this.positionCounts.set(positionKey(this.board), 1);
-    this.enqueue(botMessages.start(this.id, this.bot.level, this.playerColor));
+    this.changed();
+    this.botMoveIfDue();
   }
 
   play(move) {
@@ -805,13 +896,13 @@ export class ChessBotGame {
   resign() {
     if (!this.started || this.isOver) return;
     this.finish({ kind: "lost", why: "resignation" });
-    this.enqueue(botMessages.resign(this.id));
+    this.changed();
   }
 
   retry() {
-    this.sendError = null;
+    if (this.stamp !== "failed") return;
+    this.sendStamp();
     this.changed();
-    this.pump();
   }
 
   /** The account changed: nothing more is sent or played for this game. */
@@ -835,7 +926,6 @@ export class ChessBotGame {
     const mover = board.sideToMove;
     this.board = applyMove(board, move);
     this.moves.push({ move, color: mover, piece: piece.type, captured });
-    this.enqueue(botMessages.move(this.id, this.moves.length, move));
 
     this.halfmoveClock = (piece.type === "pawn" || captured) ? 0 : this.halfmoveClock + 1;
     const key = positionKey(this.board);
@@ -853,6 +943,7 @@ export class ChessBotGame {
       this.finish({ kind: "drawn", why: "threefold repetition" });
     }
     this.changed();
+    this.botMoveIfDue();
   }
 
   finish(result) {
@@ -860,12 +951,12 @@ export class ChessBotGame {
     this.result = result;
     if (this.disposed) return;
     try { this.recordResult(result); } catch { /* storage blocked: the game still ends */ }
+    this.sendStamp();
   }
 
-  /** The bot's turn and the chain caught up: think off the main thread (never quicker than a
-   *  beat), then play. */
+  /** The bot's turn: think off the main thread (never quicker than a beat), then play. */
   botMoveIfDue() {
-    if (this.disposed || this.isOver || this.board.sideToMove !== this.botColor || this.isThinking || this.outbox.length || this.sendError != null) return;
+    if (this.disposed || this.isOver || this.board.sideToMove !== this.botColor || this.isThinking) return;
     this.isThinking = true;
     this.changed();
     const position = this.board;
@@ -891,35 +982,31 @@ export class ChessBotGame {
 
   // --- On chain ---
 
-  enqueue(message) {
-    this.outbox.push(message);
-    this.pump();
-    // The outbox is on screen ("Putting the move on Kaspa…", the chain bar's spinner).
-    this.changed();
-  }
-
-  pump() {
-    if (this.disposed || this.isSending || this.sendError != null || !this.outbox.length) return;
-    this.isSending = true;
-    const next = this.outbox[0];
-    this.sendWithRetries(next).then((error) => {
-      this.isSending = false;
+  /** Goes on even if the player leaves the screen: only another account stops it. */
+  sendStamp() {
+    if (this.disposed || !this.result || this.stamp === "sending" || this.stamp === "stamped") return;
+    this.stamp = "sending";
+    this.stampError = null;
+    const result = this.result;
+    const message = botResultMessage(this.id, this.bot.level, this.playerColor, result, this.moves.map((played) => played.move));
+    this.sendWithRetries(message).then((error) => {
       if (this.disposed) return;
       if (error) {
-        this.sendError = error;
+        this.stamp = "failed";
+        this.stampError = error;
         this.changed();
         return;
       }
-      this.outbox.shift();
-      if (next.a === "move") this.movesOnChain += 1;
+      this.stamp = "stamped";
+      if (result.kind === "won") {
+        try { this.recordStampedWin(this.playerMoveCount); } catch { /* storage blocked: it is still on chain */ }
+      }
       this.changed();
-      this.pump();
-      this.botMoveIfDue();
     });
   }
 
-  /** One broadcast transaction, with the retries back-to-back sends need: the change of the last
-   *  transaction is not spendable until it is mined. Resolves the error to show, or null. */
+  /** One broadcast transaction, with the retries a send needs while the change of the last
+   *  transaction is not spendable yet. Resolves the error to show, or null once it is sent. */
   async sendWithRetries(message) {
     const content = encodeBotMessage(message);
     let attempt = 0;
@@ -932,7 +1019,7 @@ export class ChessBotGame {
         attempt += 1;
         if (attempt > BOT_SEND_RETRIES) {
           const text = error?.message || String(error);
-          this.log(`Chess bot game send failed after retries: ${text}`);
+          this.log(`Chess bot game stamp failed after retries: ${text}`);
           return text;
         }
         await this.sleep(BOT_SEND_RETRY_MS);

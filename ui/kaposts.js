@@ -80,8 +80,11 @@ import {
   kapostsDrawerDim,
   kapostsPaymentRequestIn,
 } from "./kaposts-format.js";
+import { botChallengeIn, botChallengeTitle } from "../engine/chess-bot-links.js";
 // The phone header's hamburger, its slide-out card and the swipeable feeds (iOS 865c9ab).
 import "./kaposts-drawer.css";
+import "./kapost-terms.css";
+import { postReportBody, sendContentReport, withBlockedAccount } from "./kapost-moderation.js";
 // Who a poster is: their .kachat name, avatar, banner and bio (iOS 3d6fb7c, KachatLive.identityName /
 // profileBanner / profileBio). Profiles are on every network (mainnet: profile-only identities).
 import { kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, kachatRetryImage, onKachatIdentityChange } from "./kachat-names-live.js";
@@ -1742,6 +1745,24 @@ function paymentRequestCardHtml(request, pid) {
     </button>`;
 }
 
+const BOT_CARD_CROWN_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5 7.5 11 12 4.5 16.5 11 21 7.5 19.5 18h-15Z"/><rect x="4.5" y="19" width="15" height="2" rx="1"/></svg>`;
+
+/// A KaPlay bot challenge link in a post, as a card instead of the link's long text (KaPost 9e22075
+/// KaPostBotChallengeCard). A click opens KaPlay on that bot.
+function botChallengeCardHtml(challenge, pid) {
+  return `
+    <button type="button" class="kaposts-bot-card" data-kaposts-bot-challenge="${pid}" title="Opens KaPlay to play this bot.">
+      <span class="kaposts-bot-card-top">
+        <span class="kaposts-bot-card-icon">${BOT_CARD_CROWN_SVG}</span>
+        <span class="kaposts-bot-card-copy">
+          <span class="kaposts-bot-card-eyebrow">KaPlay Challenge</span>
+          <span class="kaposts-bot-card-title">${deps.escapeHtml(botChallengeTitle(challenge))}</span>
+        </span>
+      </span>
+      <span class="kaposts-bot-card-pill">Challenge</span>
+    </button>`;
+}
+
 function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false, showReply = true, profileOf = "" } = {}) {
   const pid = deps.escapeHtml(String(post.id)); // DSK-015: never trust an id inside markup
   const name = posterName(post.posterAddress);
@@ -1761,7 +1782,9 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
   // A payment request link is drawn as a card under the text and left out of the text itself
   // (iOS 0b9fd28 paymentRequestLink / bodyText).
   const payLink = postPaymentRequestLink(post);
-  const shownText = payLink ? payLink.bodyText : postDisplayText(post);
+  // So is a KaPlay bot challenge link (KaPost 9e22075 botChallengeLink).
+  const botChallenge = botChallengeIn(payLink ? payLink.bodyText : postDisplayText(post));
+  const shownText = botChallenge ? botChallenge.bodyText : payLink ? payLink.bodyText : postDisplayText(post);
   const isLong = kapostsCharCount(shownText) > 280 || (shownText.slice(0, 281).match(/\n/g) || []).length >= 8;
   // Show more expands the post IN PLACE now. It used to open the thread, so the only way to read
   // a long post in a feed was to leave the feed - and on an ancestor it did nothing useful at
@@ -1813,6 +1836,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
         ${shownText ? `<div class="kaposts-cell-text${foldText ? " folded" : ""}">${linkifyPostText(foldText ? kapostsFoldedPrefix(shownText) : shownText)}</div>` : ""}
         ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${pid}">${foldText ? "Show more" : "Show less"}</button>` : ""}
         ${payLink ? paymentRequestCardHtml(payLink.request, pid) : ""}
+        ${botChallenge ? botChallengeCardHtml(botChallenge.challenge, pid) : ""}
         ${translateAffordanceHtml(post)}
         ${pollCardHtml(post)}
         ${quotedHtml}
@@ -1947,6 +1971,55 @@ function appendFeedRows() {
  *    OVER the thread — `panelOverThread` — and its Back returns to the thread, mirroring the
  *    nested sheets iOS presents from the thread's own hierarchy.
  */
+// The action row tightens its gaps instead of overflowing (KaPosts-iPhone a714c97, ViewThatFits): the
+// usual 18, then 12, then 8, so ordinary posts look exactly as before. Rows are measured when they
+// are drawn and when the screen changes width; the gaps themselves are in ui/kaposts-drawer.css. If
+// even 8 is too wide (a narrow window, four big counts) the row wraps, so Tip stays within reach.
+const ACTION_ROW_GAPS = ["", "12", "8"];
+function fitActionRow(row) {
+  delete row.dataset.kapostsWrap;
+  for (const gap of ACTION_ROW_GAPS) {
+    if (gap) row.dataset.kapostsGap = gap;
+    else delete row.dataset.kapostsGap;
+    if (row.scrollWidth <= row.clientWidth) return;
+  }
+  row.dataset.kapostsWrap = "";
+}
+function watchActionRows() {
+  const screen = document.querySelector('[data-app-tab-screen="kaposts"]');
+  if (!screen || typeof MutationObserver === "undefined") return;
+  let queued = new Set();
+  let frame = 0;
+  const fitQueued = () => {
+    frame = 0;
+    const rows = queued;
+    queued = new Set();
+    rows.forEach((row) => { if (row.isConnected) fitActionRow(row); });
+  };
+  const queue = (row) => {
+    queued.add(row);
+    if (!frame) frame = requestAnimationFrame(fitQueued);
+  };
+  new MutationObserver((records) => {
+    for (const record of records) {
+      const inside = record.target.closest?.(".kaposts-actions");
+      if (inside) queue(inside);
+      record.addedNodes.forEach((node) => {
+        if (node.nodeType !== 1) return;
+        if (node.matches(".kaposts-actions")) queue(node);
+        node.querySelectorAll(".kaposts-actions").forEach(queue);
+      });
+    }
+  }).observe(screen, { childList: true, subtree: true });
+  if (typeof ResizeObserver === "undefined") return;
+  let width = -1;
+  new ResizeObserver(() => {
+    if (screen.clientWidth === width) return;
+    width = screen.clientWidth;
+    screen.querySelectorAll(".kaposts-actions").forEach(queue);
+  }).observe(screen);
+}
+
 function syncSurfaces(threadPost) {
   const hasThread = Boolean(threadPost);
   const showPanel = Boolean(activePanel) && (!hasThread || panelOverThread);
@@ -2976,6 +3049,20 @@ function openComposer(quoteTarget = null, { replyTarget = null, editTarget = nul
   composerInput.focus();
 }
 
+/// A pre-written post from KaPlay's Share to KaPost (KaPost 9e22075 presentPendingComposeLink): the
+/// new-post composer, filled in; nothing is sent until the person clicks Post. A composer already
+/// open keeps what is being written, and this post opens when it closes. A confirmed 0 KAS gets the
+/// funding card, as the create-post button does.
+let pendingComposeText = null;
+export function openKaPostComposerWithText(text) {
+  if (!deps || !composerEl) return;
+  if (!composerEl.hidden) { pendingComposeText = text; return; }
+  if (deps.isChattingBalanceZero?.()) { deps.showFundingGate?.(); return; }
+  openComposer();
+  composerInput.value = String(text || "").slice(0, KAPOSTS_POST_CHARACTER_LIMIT);
+  composerInput.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 // Poll and Schedule (iOS 3b1aecf extrasAvailable) belong to a plain new post: never to a reply, a
 // quote, an edit, a thread - or a reopened draft, whose composer iOS opens without them.
 function composerExtrasAllowed() {
@@ -3123,6 +3210,11 @@ async function closeComposer({ keepDraft = null } = {}) {
   editingDraftId = null;
   renderComposerThreadUi();
   if (save) renderAll();
+  if (pendingComposeText != null) {
+    const text = pendingComposeText;
+    pendingComposeText = null;
+    openKaPostComposerWithText(text);
+  }
 }
 
 // Saving an edit (iOS 2d483a7, 90331bc): the new text shows at once, the usual 5s undo puts
@@ -4733,9 +4825,9 @@ function openMorePopover(anchor, post) {
   if (!isMine) {
     // Reporting (iOS dd58e26): the post goes to support by email. Posts are on a public chain and
     // cannot be taken down, so Mute and Block under it are the remedies that act at once.
-    options.push({ id: "report", title: "Report", subtitle: "Tell KaChat about abusive or objectionable content. Opens an email with this post attached.", destructive: true });
+    options.push({ id: "report", title: "Report", subtitle: "Report abusive or objectionable content. Opens an email with this post attached.", destructive: true });
     options.push({ id: "mute", title: `Mute ${name}`, subtitle: "Hides their posts everywhere. They can still interact with you." });
-    options.push({ id: "block", title: `Block ${name}`, subtitle: "Hides their posts and stops them interacting with you.", destructive: true });
+    options.push({ id: "block", title: `Block ${name}`, subtitle: "Hides their posts and room messages, and stops them interacting with you.", destructive: true });
   }
   if (!options.length) return;
   if (typeof deps.chooseDialog !== "function") {
@@ -4747,20 +4839,24 @@ function openMorePopover(anchor, post) {
   });
 }
 
+// Reporting (KaPosts-iPhone 9e22075 ContentReport): works with no mail app, see sendContentReport.
 function reportPost(post) {
-  const body = [
-    "I want to report this post.",
-    "",
-    `Post: ${post.remoteId || "not yet on chain"}`,
-    `Author: ${post.posterAddress}`,
-    `Text: ${String(post.text || "").slice(0, 500)}`,
-    "",
-    "What is wrong with it:",
-    "",
-  ].join("\n");
-  const link = document.createElement("a");
-  link.href = `mailto:kaspasilver@gmail.com?subject=${encodeURIComponent("KaPost report")}&body=${encodeURIComponent(body)}`;
-  link.click();
+  sendContentReport(postReportBody(post), { copyText: deps.copyText, confirm: deps.confirmDialog });
+}
+
+/** Block, from a post's menu or a room's (KaPosts-iPhone 9e22075): their posts go from KaPost, and
+ *  the rooms hear about it, so they leave every room and the room pushes stop. */
+export function blockKaPostAccount(address) {
+  if (!deps || !address) return;
+  prefs = withBlockedAccount(prefs, address);
+  savePrefs();
+  renderAll();
+  deps.onBlockedAccountsChanged?.();
+}
+
+/** Who this account has blocked. kaposts.js owns the list (iOS KaPostsModerationStore). */
+export function kaPostsBlockedAddresses() {
+  return deps ? prefs.blocked : [];
 }
 
 function handlePopoverAction(action, post) {
@@ -4779,11 +4875,7 @@ function handlePopoverAction(action, post) {
   else if (action === "delete") scheduleDelete(post);
   else if (action === "bookmark") { mutatePost(post.id, (p) => { p.bookmarkedByMe = !p.bookmarkedByMe; }); renderAll(); }
   else if (action === "mute") { prefs.muted = [...new Set([...prefs.muted, post.posterAddress])]; savePrefs(); renderAll(); }
-  else if (action === "block") {
-    prefs.blocked = [...new Set([...prefs.blocked, post.posterAddress])];
-    prefs.muted = prefs.muted.filter((a) => a !== post.posterAddress);
-    savePrefs(); renderAll();
-  }
+  else if (action === "block") blockKaPostAccount(post.posterAddress);
 }
 
 // ---------------------------------------------------------------------------
@@ -5831,6 +5923,26 @@ function openKaPostsSection(key) {
   syncRailActive();
 }
 
+/** Everything open over the feed closed at once (KaPosts-iPhone KaPostsView.closeAllCovers): threads,
+ *  profiles, the menu's screens and the hamburger's card. A composer keeps what is being written. */
+export function closeKaPostCovers() {
+  if (!deps) return;
+  closeFeedDrawer();
+  if (threadStack.length || activePanel) openKaPostsSection("feed");
+}
+
+/** The KaPost tab tapped on the dock, or Feed on the rail: the feed, at its top (KaPosts-iPhone
+ *  45de945), whether it was already showing or you came from elsewhere. */
+export function kaPostsFeedToTop({ animated = true } = {}) {
+  if (!deps) return;
+  const covered = threadStack.length > 0 || Boolean(activePanel);
+  closeKaPostCovers();
+  savedFeedScroll = 0;
+  requestAnimationFrame(() => {
+    kapostsScrollEl()?.scrollTo({ top: 0, behavior: animated && !covered ? "smooth" : "auto" });
+  });
+}
+
 // --- Phone header, the hamburger's card and swipeable feeds (iOS 865c9ab) --------------------------
 // At phone width the row of section icons above the feed tabs is gone (iOS 494751a): a hamburger
 // sits before the KaPosts title and slides out a card over most of the screen (KaPostsFeedDrawer)
@@ -6156,6 +6268,7 @@ export function initKaPosts(dependencies) {
   // .kachat names, avatars, banners and bios land on their own (iOS 3d6fb7c), on every network.
   if (!initKaPosts.identityWired) {
     initKaPosts.identityWired = true;
+    watchActionRows();
     document.addEventListener("error", handlePosterImageError, true);
     if (kachatNamesUiEnabled()) onKachatIdentityChange(() => schedulePosterRepaint());
   }
@@ -6219,7 +6332,10 @@ export function initKaPosts(dependencies) {
   });
   // X-style persistent rail: the sections are always visible on the left.
   document.querySelectorAll("[data-kaposts-rail]").forEach((button) => {
-    button.addEventListener("click", () => openKaPostsSection(button.dataset.kapostsRail));
+    button.addEventListener("click", () => {
+      if (button.dataset.kapostsRail === "feed") kaPostsFeedToTop();
+      else openKaPostsSection(button.dataset.kapostsRail);
+    });
   });
   // Phone width: the hamburger header and its card instead of the rail, and the feeds swipe
   // (iOS 865c9ab).
@@ -6458,6 +6574,16 @@ export function initKaPosts(dependencies) {
 
   // Delegated feed/thread/toast interactions
   const screen = document.querySelector('[data-app-tab-screen="kaposts"]');
+  // The challenge card's Copy Link (KaPost 9e22075 contextMenu): the card stands in for the link.
+  screen?.addEventListener("contextmenu", (event) => {
+    const botCard = event.target.closest("[data-kaposts-bot-challenge]");
+    const post = botCard ? findPost(botCard.dataset.kapostsBotChallenge) : null;
+    const found = post ? botChallengeIn(postDisplayText(post)) : null;
+    if (!found) return;
+    event.preventDefault();
+    openPopover(botCard, `<button type="button" class="kaposts-pop-row" data-kaposts-link-copy="${deps.escapeHtml(found.challenge.url)}"><strong>Copy Link</strong><small>Copies the address to your clipboard.</small></button>`);
+    setKaPostsScrollLock(true);
+  });
   screen?.addEventListener("click", (event) => {
     const vote = event.target.closest("[data-kaposts-poll-vote]");
     if (vote) {
@@ -6474,6 +6600,15 @@ export function initKaPosts(dependencies) {
       const post = findPost(payCard.dataset.kapostsPayCard);
       const link = post ? postPaymentRequestLink(post) : null;
       if (link) deps.openPaymentRequest?.(link.request);
+      return;
+    }
+    // A post's KaPlay challenge card (KaPost 9e22075): KaPlay, on that bot.
+    const botCard = event.target.closest("[data-kaposts-bot-challenge]");
+    if (botCard) {
+      event.stopPropagation();
+      const post = findPost(botCard.dataset.kapostsBotChallenge);
+      const found = post ? botChallengeIn(postDisplayText(post)) : null;
+      if (found) deps.openKaChatLink?.(found.challenge.url);
       return;
     }
     const link = event.target.closest("[data-kaposts-link]");
@@ -6629,6 +6764,7 @@ export function initKaPosts(dependencies) {
       savePrefs();
       renderPanel();
       renderFeed();
+      if (unhide.dataset.kapostsUnhideKind !== "muted") deps.onBlockedAccountsChanged?.();
       return;
     }
 

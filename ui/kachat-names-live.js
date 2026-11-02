@@ -1250,6 +1250,16 @@ function activityPageHtml() {
 
 /** The selected tab's live page: Marketplace, Available, Expired or Activity (iOS 73128b3). Your
  *  own names and the offers you made live in Profile > Your Domains (iOS 0765ce0). */
+/** How many live on a page, for its card; null until the registry has answered (KaPay 99ab88a
+ *  KachatMarketView.count(of:)). The Available page is the lapsed names, Expired the ones in grace. */
+export function livePageCount(page) {
+  if (!liveHubIsLive() || !hub.loaded || hub.loadError) return null;
+  if (page === "available") return hub.lapsed.length;
+  if (page === "expired") return hub.grace.length;
+  if (page === "activity") return hub.activity.length;
+  return hub.listings.length;
+}
+
 export function livePageHtml(page) {
   if (page === "available") return availablePageHtml();
   if (page === "expired") return expiredPageHtml();

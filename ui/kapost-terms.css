@@ -1,0 +1,47 @@
+/* The Terms of Use (KaPosts-iPhone 9e22075 TermsOfUseView): the first-open screen and the text
+   Settings shows. Built by ui/kapost-moderation.js, imported from ui/kaposts.js. */
+
+.kapost-terms-text { display: flex; flex-direction: column; gap: 18px; text-align: left; }
+.kapost-terms-text section { display: flex; flex-direction: column; gap: 6px; }
+.kapost-terms-text h3 { margin: 0; font-size: 17px; font-weight: 600; line-height: 22px; color: var(--text); }
+.kapost-terms-text p { margin: 0; font-size: 15px; line-height: 20px; color: var(--muted); }
+
+/* Above every sheet (.modal-backdrop is z 2000), since a link can ask from behind one. */
+.kapost-terms-cover {
+  position: fixed; inset: 0; z-index: 2100;
+  display: grid; place-items: center;
+  background: rgba(0, 0, 0, .55);
+}
+.kapost-terms-card {
+  width: min(560px, calc(100vw - 44px)); max-height: min(760px, calc(100dvh - 44px));
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--sheet-bg); color: var(--text);
+  border: .5px solid var(--line); border-radius: 22px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden;
+}
+.kapost-terms-title {
+  margin: 0; padding: 16px 16px 6px;
+  font-size: 34px; font-weight: 700; line-height: 41px; letter-spacing: 0;
+  border-bottom: .5px solid var(--line);
+}
+.kapost-terms-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 16px; -webkit-overflow-scrolling: touch; }
+.kapost-terms-footer {
+  flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 16px; border-top: .5px solid var(--line);
+}
+.kapost-terms-footer p { margin: 0; font-size: 13px; line-height: 18px; color: var(--muted); }
+.kapost-terms-agree { width: 100%; min-height: 50px; border-radius: 12px; font-size: 17px; font-weight: 600; }
+.kapost-terms-later {
+  border: 0; background: transparent; padding: 2px 12px; cursor: pointer;
+  font: inherit; font-size: 15px; font-weight: 600; color: var(--kaspa-ink);
+}
+
+/* The whole screen on a phone, as iOS draws it. */
+@media (max-width: 859px) {
+  .kapost-terms-cover { display: block; background: var(--bg-grouped, var(--bg)); }
+  .kapost-terms-card {
+    width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; box-shadow: none;
+    background: var(--bg-grouped, var(--bg));
+    padding: var(--safe-top, 0px) var(--safe-right, 0px) var(--safe-bottom, 0px) var(--safe-left, 0px);
+    box-sizing: border-box;
+  }
+}

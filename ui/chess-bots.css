@@ -1,7 +1,8 @@
-/* Chess Online > Bots (iOS c3c04a1 ChessBotsView / ChessBotGameView). The board, the header,
-   the hero, the cards and the end overlay are Chess Online's own (.chess-board, .chess-t-*, in
-   styles.css); what is here is only what the bots add: their faces, stars, records, the Play as
-   picker, the on-chain bar and the move list. */
+/* KaPlay > Bots (iOS c3c04a1 ChessBotsView / ChessBotGameView, KaPlay ddec987). The board, the
+   header, the hero, the cards and the end overlay are Chess Online's own (.chess-board, .chess-t-*,
+   in styles.css); what is here is only what the bots add: their faces, stars, records, the Play as
+   picker, the stamp's bar, the move list, the challenge banner, the Leaderboard's squares and the
+   challenge card in a KaPost. */
 
 /* --- A bot's face: initials on its gradient, its level in a badge (ChessBotAvatar) --- */
 .chess-bot-avatar {
@@ -70,7 +71,6 @@
 .chess-bot-game-head .chess-bot-card-main small { font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chess-bot-status { margin: 0; font-size: 15px; font-weight: 600; }
 .chess-bot-status.muted { color: var(--muted); }
-.chess-bot-status.error { color: var(--ios-red); }
 .chess-bot-spinner {
   flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; box-sizing: border-box;
   border: 2px solid var(--line); border-top-color: var(--muted);
@@ -84,7 +84,7 @@
 .chess-bot-board .chess-sq.check { background-image: linear-gradient(rgba(255, 59, 48, .45), rgba(255, 59, 48, .45)); }
 .chess-bot-board.locked .chess-sq { cursor: default; }
 
-/* How much of the game is on chain (chainBar). */
+/* Where the stamp stands (chainBar). */
 .chess-bot-chain {
   display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: 12px;
   background: var(--surface-1, rgba(255,255,255,.04)); border: 1px solid var(--card-border, rgba(255,255,255,.08));
@@ -115,6 +115,58 @@
 .chess-bot-end-actions button { flex: 1; padding: 10px 0; border-radius: 12px; font-size: 15px; font-weight: 600; }
 .chess-bot-end-actions .chess-bot-done { color: #fff; background: rgba(255,255,255,.2); }
 .chess-bot-see { border: 0; background: transparent; color: rgba(255,255,255,.8); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; padding: 4px 8px; }
+
+/* Share to KaPost, or the wait for the stamp, or its Retry (shareButton). */
+.chess-bot-share {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin-top: 6px; padding: 10px 0;
+  border: 0; border-radius: 12px; background: var(--ios-orange); color: #fff; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.chess-bot-share:disabled { opacity: .65; cursor: default; }
+.chess-bot-share svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* What a challenge asks (ChessBotChallengeBanner). */
+.chess-bot-challenge {
+  display: flex; align-items: flex-start; gap: 12px; padding: 14px; border-radius: 16px;
+  background: rgba(255, 149, 0, .14); font-size: 15px; font-weight: 600;
+}
+.chess-bot-challenge svg { flex: 0 0 22px; width: 22px; height: 22px; fill: none; stroke: var(--ios-orange); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* The Leaderboard's squares (ChessLeaderboardSquare): switch the board under them, or open a screen. */
+.chess-t-squares { display: grid; grid-template-columns: repeat(3, minmax(0, 150px)); justify-content: center; gap: 12px; padding: 12px 0; flex-shrink: 0; }
+.chess-t-square {
+  position: relative; aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 6px; min-width: 0;
+  border: 1.5px solid transparent; border-radius: 16px; background: var(--surface-1, rgba(255,255,255,.04)); color: var(--text); font: inherit; cursor: pointer;
+}
+.chess-t-square:hover { background: var(--surface-2, rgba(255,255,255,.07)); }
+.chess-t-square.selected { color: var(--kaspa-ink); border-color: var(--kaspa-ink); background: rgba(112,199,186,.16); }
+.chess-t-square > svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.chess-t-square > svg.filled { fill: currentColor; stroke: none; }
+.chess-t-square > span:not(.chess-t-square-chevron) { max-width: 100%; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* iOS minimumScaleFactor: "Tournaments" fits rather than cuts off on a phone. */
+@media (max-width: 420px) { .chess-t-square > span:not(.chess-t-square-chevron) { font-size: 13px; } }
+.chess-t-square-chevron { position: absolute; top: 10px; right: 10px; display: flex; }
+.chess-t-square-chevron svg { width: 12px; height: 12px; fill: none; stroke: var(--muted); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+
+/* A board's "14 moves" (ChessBotLeaderboardView). */
+.chess-bot-board-moves { flex: 0 0 auto; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ios-green); }
+
+/* A bot challenge link in a KaPost, drawn as a card (KaPost 9e22075 KaPostBotChallengeCard). */
+.kaposts-bot-card {
+  display: flex; flex-direction: column; gap: 12px; width: 100%; margin-top: 4px; padding: 14px;
+  border: 1px solid rgba(112,199,186,.35); border-radius: 16px; background: rgba(112,199,186,.08);
+  color: var(--text); font: inherit; text-align: start; cursor: pointer;
+}
+.kaposts-bot-card:hover { background: rgba(112,199,186,.13); }
+.kaposts-bot-card-top { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.kaposts-bot-card-icon { flex: none; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: rgba(112,199,186,.15); color: var(--kaspa-ink); }
+.kaposts-bot-card-icon svg { width: 22px; height: 22px; fill: currentColor; }
+.kaposts-bot-card-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kaposts-bot-card-eyebrow { color: var(--kaspa-ink); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .02em; }
+.kaposts-bot-card-title {
+  font-size: 15px; font-weight: 650; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.kaposts-bot-card-pill { align-self: flex-end; padding: 8px 16px; border-radius: 999px; background: var(--kaspa-ink); color: #fff; font-size: 14px; font-weight: 750; }
 
 /* The promotion card closes when the board around it is clicked (iOS sheet swiped away). */
 .chess-bot-promo { cursor: pointer; }

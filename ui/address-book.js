@@ -17,6 +17,7 @@ import {
 import { scanKaspaAddress } from "./qr-scan.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { onContextGesture } from "./touch.js";
+import { attachPinnedSearch } from "./pinned-search.js";
 import { userFacingError } from "./dialogs.js";
 import { saveFile } from "./save-file.js";
 import { KASPA_QUICK_START_URL } from "./nextcloud-availability.js";
@@ -141,14 +142,22 @@ function emptyStateHtml() {
 
 function listHtml() {
   const empty = addressBookIsEmpty();
+  // The title and search field stay put, above the list's own scroll (iOS PinnedListHeader,
+  // KaChat-iPhone d063b897); no field until there is something to search.
   return `
     <div class="kaposts-header ab-header ab-list-header">
       <h1 class="kaposts-title">Contacts</h1>
     </div>
     <button class="new-chat-fab ab-fab" type="button" data-ab-import-export aria-label="Contacts actions" title="Contacts actions">${ICONS.plus}</button>
     ${empty ? emptyStateHtml() : `
-      <div class="ab-body">
-        <input class="ab-search" type="search" data-ab-search placeholder="Search names and addresses" autocomplete="off" spellcheck="false" value="${esc(searchText)}" aria-label="Search names and addresses" />
+      <div class="pinned-search ab-pinned-search">
+        <span class="ab-search-field">
+          <input class="ab-search" type="search" data-ab-search placeholder="Search names and addresses" autocomplete="off" spellcheck="false" value="${esc(searchText)}" aria-label="Search names and addresses" />
+          <button class="pinned-search-clear" type="button" data-pinned-search-clear aria-label="Clear"${searchText ? "" : " hidden"}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path class="cutout-stroke" d="m8.5 8.5 7 7m0-7-7 7"/></svg></button>
+        </span>
+        <button class="pinned-search-cancel" type="button" data-pinned-search-cancel hidden>Cancel</button>
+      </div>
+      <div class="ab-body ab-list-scroll" data-ab-scroll>
         <div class="ab-list" data-ab-list>${listRowsHtml()}</div>
       </div>`}`;
 }
@@ -202,9 +211,11 @@ function detailHtml(address) {
 function render() {
   if (!screenEl || !active) return;
   const focusSearch = document.activeElement?.matches?.("[data-ab-search]");
-  const scrollTop = screenEl.scrollTop;
+  // The list has its own scroll, under its fixed title and search field; a contact's page scrolls whole.
+  const scrollTop = (screenEl.querySelector("[data-ab-scroll]") || screenEl).scrollTop;
+  screenEl.classList.toggle("ab-list-mode", !detailAddress);
   screenEl.innerHTML = detailAddress ? detailHtml(detailAddress) : listHtml();
-  screenEl.scrollTop = scrollTop;
+  (screenEl.querySelector("[data-ab-scroll]") || screenEl).scrollTop = scrollTop;
   if (focusSearch) {
     const input = screenEl.querySelector("[data-ab-search]");
     if (input) { input.focus(); try { input.setSelectionRange(input.value.length, input.value.length); } catch { /* not a text input */ } }
@@ -284,6 +295,7 @@ function attachScreen() {
     searchText = String(event.target.value || "");
     renderListRowsOnly();
   });
+  attachPinnedSearch(screenEl);
   // Right-click (long-press on touch) a saved address to delete it - iOS's swipe to delete.
   onContextGesture(screenEl, async (event) => {
     const row = event.target?.closest?.("[data-ab-open]");
