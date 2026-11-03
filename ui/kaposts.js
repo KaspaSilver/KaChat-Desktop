@@ -79,6 +79,7 @@ import {
   kapostsDrawerShouldClose,
   kapostsDrawerDim,
   kapostsPaymentRequestIn,
+  kachatSiteLinkIn,
 } from "./kaposts-format.js";
 import { botChallengeIn, botChallengeTitle } from "../engine/chess-bot-links.js";
 // The phone header's hamburger, its slide-out card and the swipeable feeds (iOS 865c9ab).
@@ -1763,6 +1764,21 @@ function botChallengeCardHtml(challenge, pid) {
     </button>`;
 }
 
+/// Puts each post's site link card in place of its link once painted: the card is DOM, its image
+/// loading through the relay, and the app's cache makes a repaint instant.
+function fillSiteLinkCards(root) {
+  for (const holder of root.querySelectorAll("[data-kaposts-site-card]:not([data-filled])")) {
+    holder.dataset.filled = "1";
+    const url = holder.dataset.kapostsSiteCard;
+    const place = () => {
+      const card = deps.buildLinkPreviewCard?.(url, { autoLoad: true });
+      if (card && holder.isConnected) holder.replaceChildren(card);
+    };
+    place();
+    if (!holder.querySelector(".message-link-card")) deps.resolveLinkPreview?.(url).then(place).catch(() => {});
+  }
+}
+
 function postCellHtml(post, { inThread = false, isRoot = false, replyInline = true, openByRemote = false, truncates = false, showReply = true, profileOf = "" } = {}) {
   const pid = deps.escapeHtml(String(post.id)); // DSK-015: never trust an id inside markup
   const name = posterName(post.posterAddress);
@@ -1784,7 +1800,10 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
   const payLink = postPaymentRequestLink(post);
   // So is a KaPlay bot challenge link (KaPost 9e22075 botChallengeLink).
   const botChallenge = botChallengeIn(payLink ? payLink.bodyText : postDisplayText(post));
-  const shownText = botChallenge ? botChallenge.bodyText : payLink ? payLink.bodyText : postDisplayText(post);
+  const textWithoutCards = botChallenge ? botChallenge.bodyText : payLink ? payLink.bodyText : postDisplayText(post);
+  // And a link to KaChat's own site: its preview, or the link itself if that can't load (KaPost f81c467).
+  const siteLink = kachatSiteLinkIn(textWithoutCards);
+  const shownText = siteLink ? siteLink.bodyText : textWithoutCards;
   const isLong = kapostsCharCount(shownText) > 280 || (shownText.slice(0, 281).match(/\n/g) || []).length >= 8;
   // Show more expands the post IN PLACE now. It used to open the thread, so the only way to read
   // a long post in a feed was to leave the feed - and on an ancestor it did nothing useful at
@@ -1837,6 +1856,7 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
         ${(!inThread || truncates) && isLong ? `<button class="kaposts-show-more" type="button" data-kaposts-expand="${pid}">${foldText ? "Show more" : "Show less"}</button>` : ""}
         ${payLink ? paymentRequestCardHtml(payLink.request, pid) : ""}
         ${botChallenge ? botChallengeCardHtml(botChallenge.challenge, pid) : ""}
+        ${siteLink ? `<div class="kaposts-site-card" data-kaposts-site-card="${deps.escapeHtml(siteLink.url)}"><a href="${deps.escapeHtml(siteLink.url)}" target="_blank" rel="noopener noreferrer">${deps.escapeHtml(siteLink.raw)}</a></div>` : ""}
         ${translateAffordanceHtml(post)}
         ${pollCardHtml(post)}
         ${quotedHtml}
@@ -3476,7 +3496,7 @@ function renderPanel() {
             </span>
             ${profile.bio ? `<span class="kaposts-profile-bio" data-kaposts-profile-bio>${deps.escapeHtml(profile.bio)}</span><button type="button" class="kaposts-bio-more" data-kaposts-bio-more hidden>More</button>` : ""}
             ${isMine ? `<span class="kaposts-profile-buttons"><button class="kaposts-edit-kns" type="button" data-kaposts-edit-kns><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${PANEL_ICONS.idCard}"/></svg>Edit KaChat Profile</button>${/* Beside it, Wallet (iOS 865c9ab): the chatting address's balance, history and coins -
-                 Desktop's Manage Address screen. */ ""}${deps.openChattingWallet && deps.engine.address ? `<button class="kaposts-edit-kns kaposts-wallet-button" type="button" data-kaposts-wallet>${WALLET_SVG}Wallet</button>` : ""}</span>` : ""}
+                 Desktop's Manage Address screen. */ ""}${deps.openChattingWallet && deps.engine.address ? `<button class="kaposts-edit-kns kaposts-wallet-button" type="button" data-kaposts-wallet>${WALLET_SVG}Wallet</button>` : ""}${/* And Request (KaPost 9653c04): a payment request link to copy or share. */ ""}${deps.openRequestPayment && deps.engine.address ? `<button class="kaposts-edit-kns kaposts-wallet-button" type="button" data-kaposts-request aria-label="Request Payment">${REQUEST_SVG}Request</button>` : ""}</span>` : ""}
           </div>
           ${!isMine ? `<span class="kaposts-profile-actions">
             <button class="kaposts-follow${isFollowing ? " following" : ""}" type="button" data-kaposts-profile-follow>${isFollowing ? "Following" : "Follow"}</button>
@@ -5956,6 +5976,7 @@ const GEAR_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy
 const PERSON_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z"/></svg>`;
 // wallet.bifold, for the Wallet button beside Edit Profile (iOS 865c9ab).
 const WALLET_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h11.5A1.5 1.5 0 0 1 19 6.5V8"/><path d="M3.5 7.5v10A2.5 2.5 0 0 0 6 20h12.5a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 18.5 8H6a2.5 2.5 0 0 1-2.5-2.5"/><path d="M16.5 14h.01"/></svg>`;
+const REQUEST_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h7.5L19 8v12.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5Z"/><path d="M9 11.5h6.5M9 14.5h6.5M9 17.5h4"/></svg>';
 // The card's rows carry iOS's own symbols (SideMenuItem.icon): magnifyingglass, square.and.pencil,
 // bookmark, speaker.slash, hand.raised, clock.
 const FEED_MENU_ICONS = {
@@ -6301,6 +6322,15 @@ export function initKaPosts(dependencies) {
   panelEl = document.querySelector("[data-kaposts-panel]");
   panelTitleEl = document.querySelector("[data-kaposts-panel-title]");
   panelBodyEl = document.querySelector("[data-kaposts-panel-body]");
+  if (!initKaPosts.siteCardsWired) {
+    initKaPosts.siteCardsWired = true;
+    const siteCards = new MutationObserver((changes) => {
+      for (const root of new Set(changes.map((change) => change.target))) fillSiteLinkCards(root);
+    });
+    for (const root of [feedEl, threadRootEl, threadRepliesEl, panelBodyEl]) {
+      if (root) siteCards.observe(root, { childList: true, subtree: true });
+    }
+  }
   popoverEl = document.querySelector("[data-kaposts-popover]");
 
   loadPrefs();
@@ -6718,6 +6748,7 @@ export function initKaPosts(dependencies) {
     }
     if (event.target.closest("[data-kaposts-edit-kns]")) { deps.editKnsProfile?.(); return; }
     if (event.target.closest("[data-kaposts-wallet]")) { deps.openChattingWallet?.(); return; }
+    if (event.target.closest("[data-kaposts-request]")) { deps.openRequestPayment?.(); return; }
     if (event.target.closest("[data-kaposts-bio-more]") && activePanel?.type === "profile") {
       const bio = posterProfilePieces(activePanel.address).bio || "";
       deps.alertDialog?.({ title: "Bio", message: bio, confirmLabel: "Done" });

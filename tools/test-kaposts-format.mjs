@@ -16,6 +16,8 @@ import {
   kapostsDrawerWidth,
   kapostsDrawerShouldClose,
   kapostsDrawerDim,
+  isKaChatSiteLink,
+  kachatSiteLinkIn,
 } from "../ui/kaposts-format.js";
 
 // Code points, not UTF-16 units.
@@ -94,5 +96,24 @@ assert.equal(kapostsPagerTarget({ selection: 1, pageCount: 3, dx: 140, width: W 
 assert.equal(kapostsPagerTarget({ selection: 0, pageCount: 3, dx: 300, width: W }), 0, "nothing before the first");
 assert.equal(kapostsPagerTarget({ selection: 2, pageCount: 3, dx: -300, width: W }), 2, "nothing after the last");
 assert.equal(kapostsPagerTarget({ selection: 1, pageCount: 3, dx: -140, dy: 200, width: W }), 1, "ended more vertical than sideways");
+
+// A link to KaChat's own site (KaPost f81c467 KaChatSiteLink): this host and no other.
+assert.equal(isKaChatSiteLink("https://home.kachat.app/news/"), true);
+assert.equal(isKaChatSiteLink("http://HOME.kachat.app"), true);
+assert.equal(isKaChatSiteLink("https://home.kachat.app.evil.com/"), false);
+assert.equal(isKaChatSiteLink("https://home.kachat.app@evil.com/"), false);
+assert.equal(isKaChatSiteLink("https://evil.com@home.kachat.app/"), false, "a user part is out");
+assert.equal(isKaChatSiteLink("https://home.kachat.app:8443/"), false, "any port is another host");
+assert.equal(isKaChatSiteLink("ftp://home.kachat.app/"), false);
+assert.equal(isKaChatSiteLink("not a url"), false);
+
+assert.deepEqual(kachatSiteLinkIn("Read https://home.kachat.app/news/ today"), { url: "https://home.kachat.app/news/", raw: "https://home.kachat.app/news/", bodyText: "Read  today" });
+assert.deepEqual(kachatSiteLinkIn("home.kachat.app/news/"), { url: "https://home.kachat.app/news/", raw: "home.kachat.app/news/", bodyText: "" }, "no scheme");
+assert.equal(kachatSiteLinkIn("see home.kachat.app/news/.").raw, "home.kachat.app/news/", "prose punctuation stays out");
+assert.equal(kachatSiteLinkIn("home.kachat.app").url, "https://home.kachat.app");
+assert.equal(kachatSiteLinkIn("a home.kachat.app/a and home.kachat.app/a/b").bodyText, "a  and home.kachat.app/a/b", "only the first goes");
+for (const other of ["https://home.kachat.app.evil.com/x", "me@home.kachat.app", "https://evil.com/home.kachat.app", "xhome.kachat.app", "home.kachat.app:8443/x", "https://kachat.app/", "nothing here"]) {
+  assert.equal(kachatSiteLinkIn(other), null, other);
+}
 
 console.log("kaposts-format: ok");

@@ -1,12 +1,13 @@
 // Which accounts on this device still owe the backup steps (iOS d063b897 / KaPay 99ab88a
 // AccountBackupStatus). An account created here starts with it owed, since nobody has seen its seed
-// phrase yet; an imported one never does, since whoever typed the words has them. Accounts from
+// phrase yet; an imported one never does, since whoever imported it has its seed. Accounts from
 // before this existed have no entry at all, so they are never owed one and have no Backup Hygiene
 // timer. Kept for an account's addresses on both networks, so a switch to testnet doesn't lose or
 // bring back the card.
 //
-// Finishing the backup steps also starts a timer: six months later the Backup Hygiene card asks for
-// a few of the words again, and passing that or redoing the backup starts it over.
+// Finishing the backup steps or importing the account also starts a timer (iOS 836b62bc): six months
+// later the Backup Hygiene card asks for a few of the words again, and passing that or redoing the
+// backup starts it over.
 //
 // Only addresses and times live here, never a word of the seed phrase. The logic the backup steps
 // run on (ui/account-backup.js) is here too, without a DOM, for tools/test-account-backup.mjs.
@@ -74,7 +75,7 @@ export function createAccountBackupStatus({ storage, variants = (address) => [ad
       for (const entry of addressesOf(address)) pending.delete(entry);
       writePending(pending);
     },
-    /** Six months since this account's backup was last finished or checked. */
+    /** Six months since this account was imported, or its backup last finished or checked. */
     isHygieneDue(address, now = new Date()) {
       const clean = String(address || "").trim();
       if (!clean || status.isPending(clean)) return false;
@@ -82,8 +83,8 @@ export function createAccountBackupStatus({ storage, variants = (address) => [ad
       if (!Number.isFinite(stamp) || stamp <= 0) return false;
       return now >= addCalendarMonths(new Date(stamp * 1000), HYGIENE_MONTHS);
     },
-    /** The backup steps were finished or the words checked: nothing is owed, and the six months
-     *  start over. */
+    /** The account was imported, the backup steps finished or the words checked: nothing is owed,
+     *  and the six months start over. */
     markConfirmed(address, now = new Date()) {
       status.markDone(address);
       const confirmed = readConfirmed();

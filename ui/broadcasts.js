@@ -8,6 +8,7 @@
 // via Nextcloud media upload.
 
 import { IS_TESTNET, KAS_UNIT } from "../engine/network.js";
+import { isKaChatSiteLink } from "./kaposts-format.js";
 import { sompiFromUserText, kasTextFromSompi } from "../engine/amounts.js";
 import {
   BROADCAST_RETENTION_MS,
@@ -1212,6 +1213,9 @@ function renderChannelList() {
   deps.onUnreadChanged?.();
 }
 
+/** Site links whose preview has been asked for: each repaints the room once, when it lands. */
+const siteLinkPreviewsAsked = new Set();
+
 /** One broadcast bubble: header, linkified body (+ the same preview card treatment as 1:1
  *  bubbles — Nextcloud shares get the progressive video→audio→img→attachment probe), hover
  *  reaction bar, and aggregated reaction chips. */
@@ -1332,10 +1336,18 @@ function buildMessageElement(m) {
   // A message that is nothing but a link: the preview card replaces the bubble (iOS loneLinkURL).
   const loneLink = !audioEnvelope && !internalLink && withinInline && !isEnvelopeText ? entirelyLinkUrl(originalText) : null;
   // Public rooms are open to anyone, so no preview loads by itself - your own links included
-  // (iOS autoFetch: false): a card is tap-to-load until this session has it.
-  const previewCardFor = (url) => (deps.previewApproved?.(url)
-    ? deps.buildLinkPreviewCard?.(url, { autoLoad: true, outgoing: mine })
-    : deps.buildTapToLoadCard?.(url, () => renderRoom()));
+  // (iOS autoFetch: false): a card is tap-to-load until this session has it. Only KaChat's own site
+  // loads by itself (KaPost f81c467).
+  const previewCardFor = (url) => {
+    const siteLink = isKaChatSiteLink(url);
+    if (!siteLink && !deps.previewApproved?.(url)) return deps.buildTapToLoadCard?.(url, () => renderRoom());
+    const card = deps.buildLinkPreviewCard?.(url, { autoLoad: true, outgoing: mine });
+    if (!card && siteLink && !siteLinkPreviewsAsked.has(url)) {
+      siteLinkPreviewsAsked.add(url);
+      deps.resolveLinkPreview?.(url).then(() => renderRoom()).catch(() => {});
+    }
+    return card;
+  };
 
   const loneCard = !internalCard && loneLink && deps.isPreviewableUrl?.(loneLink) ? previewCardFor(loneLink) : null;
 

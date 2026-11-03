@@ -125,6 +125,7 @@ import addressExplainerUrl from "./assets/address-explainer.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, PROMPT_EXTRA, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 import { attachRowSwipes, chatRowSwipeActions } from "./row-swipe.js";
+import { IMPORT_ADDRESS_SEARCH_DEPTH, foundChattingAddresses, firstFundedAddress, rediscoveredGroupIsRead } from "./account-import.js";
 import { attachPinnedSearch } from "./pinned-search.js";
 import { edgeBackWouldClaim } from "./edge-back.js";
 import { startAppUpdateChecks } from "./app-update.js";
@@ -12437,7 +12438,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 262;
+const APP_BUILD = 263;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -20546,7 +20547,6 @@ const SETTINGS_HUB_ICONS = {
   // stethoscope
   "Diagnostics": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5H5.5a1 1 0 0 0-1 1V9a4.25 4.25 0 0 0 8.5 0V4.5a1 1 0 0 0-1-1h-1"/><path d="M8.75 13.25v1.95a4.6 4.6 0 0 0 9.2 0v-2"/><circle cx="17.95" cy="10.9" r="2.2"/></svg>',
   // exclamationmark.triangle
-  "Danger Zone": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4 21 19.5H3z"/><path d="M12 10v4.2"/><circle cx="12" cy="16.6" r=".3"/></svg>',
 };
 
 
@@ -20559,26 +20559,28 @@ const settingsHubEl = (() => {
   settingsGroupsEls.forEach((group, index) => {
     if (group.dataset.settingsSubscreen) return; // sub-screens open from their parent page, not the hub
     const label = group.querySelector(".settings-group-label")?.textContent?.trim() || `Section ${index + 1}`;
-    const danger = group.classList.contains("danger-zone-group");
-    if (danger) {
-      // Terms of Use (KaPosts-iPhone 9e22075): to read again, after Diagnostics as on iOS.
-      rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-settings-hub-terms>
-        <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3.5h7.5L19 8v12.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5Z"/><path d="M9 11.5h6.5M9 14.5h6.5M9 17.5h4"/></svg></span>
-        <span class="settings-hub-label">Terms of Use</span>
-        ${chevron}
-      </button>`);
-      // View Seed Phrase: a direct action right above Danger Zone, not a sub-page (matches iOS).
-      rows.push(`<button class="settings-list-row settings-hub-row seed" type="button" data-settings-hub-seed>
-        <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="7.25" r="4.5"/><circle cx="12" cy="5.6" r="1"/><path d="M12 11.75v9l1.9-1.6-1.9-1.6 1.9-1.6-1.9-1.6"/></svg></span>
-        <span class="settings-hub-label">View Seed Phrase</span>
-      </button>`);
-    }
-    rows.push(`<button class="settings-list-row settings-hub-row${danger ? " danger" : ""}" type="button" data-settings-hub-row="${index}">
+    rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-settings-hub-row="${index}">
       <span class="settings-hub-icon" aria-hidden="true">${SETTINGS_HUB_ICONS[label] || ""}</span>
       <span class="settings-hub-label">${label}</span>
       ${chevron}
     </button>`);
   });
+  // Terms of Use (KaPosts-iPhone 9e22075): to read again, after Diagnostics as on iOS.
+  rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-settings-hub-terms>
+    <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3.5h7.5L19 8v12.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5Z"/><path d="M9 11.5h6.5M9 14.5h6.5M9 17.5h4"/></svg></span>
+    <span class="settings-hub-label">Terms of Use</span>
+    ${chevron}
+  </button>`);
+  // View Seed Phrase and the wipe: direct actions, not sub-pages, in plain text with green icons
+  // now there's no Danger Zone (iOS 76aec44f). The wipe's half sheet asks first.
+  rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-settings-hub-seed>
+    <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="7.25" r="4.5"/><circle cx="12" cy="5.6" r="1"/><path d="M12 11.75v9l1.9-1.6-1.9-1.6 1.9-1.6-1.9-1.6"/></svg></span>
+    <span class="settings-hub-label">View Seed Phrase</span>
+  </button>`);
+  rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-shell-action="resync">
+    <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5.2 10a7 7 0 0 1 12.6-2.6"/><path class="fill" d="m19.6 5.2-.2 4.6-4.3-1.6z"/><path d="M18.8 14a7 7 0 0 1-12.6 2.6"/><path class="fill" d="m4.4 18.8.2-4.6 4.3 1.6z"/></svg></span>
+    <span class="settings-hub-label">Wipe and re-sync incoming messages</span>
+  </button>`);
   // Log Out (iOS 84f9bb02): back in Settings from Profile, its own card at the very bottom, apart
   // from the category rows, so it is easy to find and hard to hit by accident.
   // Delete Account above it (iOS d063b897).
@@ -20903,6 +20905,8 @@ function setSettingsAppOnlyMode(appOnly) {
   if (seedRow) seedRow.hidden = appOnly;
   const termsRow = settingsHubEl?.querySelector("[data-settings-hub-terms]");
   if (termsRow) termsRow.hidden = appOnly;
+  const resyncRow = settingsHubEl?.querySelector("[data-shell-action=\"resync\"]");
+  if (resyncRow) resyncRow.hidden = appOnly;
   const deleteRow = settingsHubEl?.querySelector("[data-shell-action=\"delete-account\"]");
   if (deleteRow) deleteRow.hidden = appOnly;
   // iOS AppSettingsView: titled "App Settings" (no connection dot or balance), and its
@@ -27132,8 +27136,49 @@ function passphrasePreviewNodes(flow) {
     note: root.querySelector("[data-passphrase-preview-note]"),
     balance: root.querySelector("[data-passphrase-preview-balance]"),
     verdict: root.querySelector("[data-passphrase-preview-verdict]"),
+    found: root.querySelector("[data-passphrase-preview-found]"),
   };
 }
+
+// On import the chatting address isn't known yet: the preview checks the first addresses on the
+// identity chain, picks the first with funds, and lets the user pick another (iOS 836b62bc
+// PassphraseAddressPreview.selectedIndex). What's picked here is what commitImport imports onto.
+let importFoundAddresses = [];
+let importChattingIndex = 0;
+
+function clearImportFoundAddresses(nodes) {
+  importFoundAddresses = [];
+  importChattingIndex = 0;
+  if (nodes?.found) { nodes.found.hidden = true; nodes.found.innerHTML = ""; }
+}
+
+function renderImportFoundAddresses(nodes) {
+  if (!nodes.found) return;
+  nodes.found.hidden = importFoundAddresses.length < 2;
+  nodes.found.innerHTML = nodes.found.hidden ? "" : `
+    <p class="passphrase-found-hint">We picked the first address with funds. Tap another if that's not the one you chat from.</p>
+    ${importFoundAddresses.map(({ index, address, sompi }) => `
+      <button type="button" class="passphrase-found-row${index === importChattingIndex ? " selected" : ""}" data-passphrase-found="${index}" aria-pressed="${index === importChattingIndex}">
+        <span class="passphrase-found-check" aria-hidden="true"></span>
+        <span class="passphrase-found-copy"><strong>Address #${index}</strong><small>${escapeHtml(address.slice(0, 14))}...${escapeHtml(address.slice(-6))}</small></span>
+        <span class="passphrase-found-balance${sompi > 0 ? " has-funds" : ""}">${escapeHtml(formatSompiPlain(BigInt(Math.round(sompi))))} ${KAS_UNIT}</span>
+      </button>`).join("")}`;
+}
+
+function selectImportFoundAddress(nodes, found) {
+  importChattingIndex = found.index;
+  nodes.address.textContent = found.address;
+  delete nodes.address.dataset.pending;
+  renderPassphrasePreviewBalance(nodes, "import", { sompi: BigInt(Math.round(found.sompi)) });
+  renderImportFoundAddresses(nodes);
+}
+
+document.querySelector('[data-passphrase-preview="import"]')?.addEventListener("click", (event) => {
+  const row = event.target.closest("[data-passphrase-found]");
+  if (!row) return;
+  const found = importFoundAddresses.find((entry) => entry.index === Number(row.dataset.passphraseFound));
+  if (found) selectImportFoundAddress(passphrasePreviewNodes("import"), found);
+});
 
 /** The seed words the flow is about to commit, or "" when there are none to derive from. */
 function passphrasePreviewPhrase(flow) {
@@ -27166,6 +27211,7 @@ function schedulePassphrasePreview(flow) {
   const token = ++passphrasePreviewTokens[flow];
   nodes.address.dataset.pending = "1";
   renderPassphrasePreviewBalance(nodes, flow, { looking: true });
+  if (flow === "import") clearImportFoundAddresses(nodes);
   passphrasePreviewTimers[flow] = setTimeout(async () => {
     try {
       const derived = await engine.deriveIdentityAddressRange(phrase, passphrase, {
@@ -27187,6 +27233,18 @@ function schedulePassphrasePreview(flow) {
       // a further pause, so only the passphrase someone stopped typing is looked up (iOS d063b897)
       await new Promise((resolve) => { setTimeout(resolve, 450); });
       if (token !== passphrasePreviewTokens[flow]) return;
+      if (flow === "import") {
+        const family = passphrasePreviewFamily(flow);
+        const range = await engine.deriveIdentityAddressRange(phrase, passphrase, { family, start: 0, count: IMPORT_ADDRESS_SEARCH_DEPTH });
+        if (token !== passphrasePreviewTokens[flow]) return;
+        const balances = await spendingBalancesBatchSompi(range.map((entry) => entry.address));
+        if (token !== passphrasePreviewTokens[flow]) return;
+        importFoundAddresses = foundChattingAddresses(range, balances);
+        const first = firstFundedAddress(importFoundAddresses);
+        if (!first) throw new Error("no addresses to check");
+        selectImportFoundAddress(nodes, first);
+        return;
+      }
       const byAddress = await spendingBalancesBatchSompi([address]);
       if (token !== passphrasePreviewTokens[flow]) return;
       renderPassphrasePreviewBalance(nodes, flow, { sompi: BigInt(Math.round(Number(byAddress.get(address)) || 0)) });
@@ -27225,6 +27283,7 @@ function resetPassphrasePreview(flow) {
   nodes.address.textContent = "Checking...";
   nodes.address.dataset.pending = "1";
   renderPassphrasePreviewBalance(nodes, flow, { looking: true });
+  if (flow === "import") clearImportFoundAddresses(nodes);
 }
 
 /// The passphrase fields' eye (iOS eye / eye.slash): shows or hides both fields at once.
@@ -28784,10 +28843,12 @@ async function commitImport(passphrase) {
   if (importAccountModal) importAccountModal.dataset.busy = "1";
   if (importPassphraseError) importPassphraseError.hidden = true;
   try {
-    const imported = await importAndEnterAccount({ ...pendingImport, passphrase });
+    // Only the passphrase screen looks for a funded address; No imports onto #0 (iOS 836b62bc).
+    const imported = await importAndEnterAccount({ ...pendingImport, passphrase, chattingIndex: passphrase ? importChattingIndex : 0 });
     pendingImport = null;
-    // whoever typed the words has them (iOS d063b897)
-    accountBackupStatus.markDone(imported?.address || engine.address);
+    // Whoever imported it has its seed, so nothing is owed, and the six months start (iOS d063b897,
+    // 836b62bc).
+    accountBackupStatus.markConfirmed(imported?.address || engine.address);
     // A restored seed finds its spending addresses by itself - legacy and quantum, the same sweep as
     // Manage Addresses' Discover Addresses - in the background (iOS da2c8e2, owner's call
     // 2026-10-21). Only this path, a typed-in recovery phrase: creating or switching accounts (the
@@ -29114,7 +29175,7 @@ async function deleteCurrentAccount() {
 document.querySelectorAll('[data-shell-action="delete-account"]').forEach((button) => button.addEventListener("click", openDeleteAccountSheet));
 
 // ---------------------------------------------------------------------------
-// Danger Zone (Settings), matching iOS's Danger Zone: only "Wipe and re-sync incoming
+// Settings' wipe (iOS 76aec44f moved it out of Danger Zone): only "Wipe and re-sync incoming
 // messages" (wipe incoming messages, keep account + sent, re-sync from chain).
 // ---------------------------------------------------------------------------
 
@@ -29122,12 +29183,15 @@ document.querySelectorAll('[data-shell-action="delete-account"]').forEach((butto
 // blockchain. Your account info and sent messages are preserved." Desktop has no iCloud; the
 // rest maps 1:1 — drop incoming messages, reset each conversation's sync cursor to 0 and the
 // handshake scan, then run a silent backfill sweep.
-async function dangerWipeAndResyncIncoming() {
+async function wipeAndResyncIncoming() {
   if (resyncRun.phase === "running") return;
   const choice = await chooseDialog({
-    title: "Wipe and re-sync incoming messages",
+    title: "Wipe and re-sync incoming messages?",
+    // Only while a sync is failing (iOS 76aec44f): a failed read moves no cursor, and the sweep
+    // keeps retrying, so nobody should need to wipe to repair sync.
+    message: lastSweepFailed ? "KaChat is having trouble syncing right now. It keeps retrying, and your messages catch up on their own once the connection is back, so you shouldn't need to wipe." : "",
     options: [
-      { id: "all", title: "All Chats", subtitle: "Removes every incoming message locally, then re-syncs them from the blockchain. Sent messages and account info are kept.", destructive: true },
+      { id: "all", title: "Yes, All Chats", subtitle: "Removes every incoming message locally, then re-syncs them from the blockchain. Sent messages and account info are kept." },
       { id: "select", title: "Select Chats...", subtitle: "Pick which chats to wipe and re-sync. Everything else is left alone." },
       { id: "cancel", title: "Cancel", subtitle: "Leave your messages as they are." },
     ],
@@ -29271,7 +29335,7 @@ async function runIncomingResync(conversationIds) {
     pendingInitialCatchUp = false;
     Object.assign(resyncRun, { phase: "success", fraction: 1, chats: targets.length, messages: added });
   } catch (error) {
-    appendEngineLog(`Danger Zone re-sync failed: ${error.message}`);
+    appendEngineLog(`Re-sync failed: ${error.message}`);
     Object.assign(resyncRun, { phase: "failure", error: error?.message || "Re-sync failed." });
   }
   renderResyncProgress();
@@ -29398,7 +29462,7 @@ function exportDiagnosticsFile() {
 }
 
 const DANGER_ZONE_ACTIONS = {
-  resync: dangerWipeAndResyncIncoming,
+  resync: wipeAndResyncIncoming,
   "export-history": exportChatHistoryFile,
   "import-history": () => document.querySelector("[data-chat-history-file]")?.click(),
   "diagnostics-export": exportDiagnosticsFile,
@@ -30069,6 +30133,11 @@ queueMicrotask(async () => {
       editKnsProfile: () => openKachatProfileEditor(),
       // Wallet beside Edit Profile (iOS 865c9ab): the chatting address's balance, history and coins.
       openChattingWallet: () => openManageAddressScreen(),
+      // Request beside it (KaPost 9653c04).
+      openRequestPayment: () => openCreatePaymentRequest(),
+      // A link to KaChat's own site draws its preview card under the post (KaPost f81c467).
+      buildLinkPreviewCard,
+      resolveLinkPreview,
       showFeeEstimate: () => feeEstimateEnabled(),
       // iOS KaPostsAPIClient.estimatePostFee: the real post payload with a dummy pubkey and
       // signature of the right width, so the estimate is for the bytes that will actually go.
@@ -30152,6 +30221,7 @@ queueMicrotask(async () => {
       // progressive Nextcloud video→audio→img→attachment probe).
       renderTextWithLinks,
       buildLinkPreviewCard,
+      resolveLinkPreview,
       buildVoicePlayer,
       isPreviewableUrl,
       // Voice notes: same MediaRecorder wrapper + Nextcloud upload as the 1:1 composer. A room
@@ -31382,6 +31452,10 @@ function openGroupMemberMenu(address, x, y) {
 }
 
 function loadGroupUnreadAll() { try { return JSON.parse(localStorage.getItem(GROUP_UNREAD_KEY) || "{}") || {}; } catch { return {}; } }
+/** When this account last landed on this device, 0 for an account from before that was kept. */
+function accountImportedAtMs() {
+  try { return Date.parse(loadAccountMetaMap()[engine.address || ""]?.createdAt || "") || 0; } catch { return 0; }
+}
 function groupUnreadFor(groupId) { const all = loadGroupUnreadAll(); return Number(all?.[engine.address || ""]?.[groupId] || 0); }
 function setGroupUnread(groupId, count) {
   const all = loadGroupUnreadAll();
@@ -33384,6 +33458,9 @@ function applyGroupSyncResult(result, { catchUp = false } = {}) {
     if (!ev || !ev.groupId) continue;
     const evRaw = Number(ev.blockTime || 0);
     const evMs = evRaw > 1e12 ? evRaw : evRaw > 0 ? evRaw * 1000 : 0;
+    // A group an import or restore found again isn't new (iOS 7916f5cd): it never shows as unread
+    // while the catch-up runs, or when a later catch-up finds it. An invite mined since is news.
+    if (ev.kind === "joined" && rediscoveredGroupIsRead({ inviteAtMs: evMs, importedAtMs: accountImportedAtMs() })) markGroupOpened(ev.groupId);
     const isNews = !catchUp && (!evMs || Date.now() - evMs <= GROUP_SYSTEM_MESSAGE_LIFETIME_MS);
     const lineAt = evMs || Date.now();
     // A group photo the admin changed — system line + refresh the open header/list.

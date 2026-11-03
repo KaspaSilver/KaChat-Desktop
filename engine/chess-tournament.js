@@ -15,7 +15,9 @@ export const ARENA_CHANNEL = "chess-arena";
 export const PLAYER_COUNT = 8;
 export const CLOCK_MS = 5 * 60 * 1000;
 export const NAME_MAX_LENGTH = 40;
-export const CHAT_MAX_LENGTH = 280;
+// Private rooms are never named by a player (KaPlay 45f28d9): nothing a player types reaches others.
+export const PRIVATE_DUEL_NAME = "Private 1v1";
+export const PRIVATE_TOURNAMENT_NAME = "Private tournament";
 /** Propagation is nobody's thinking time: ten seconds off every move's charge. */
 export const MOVE_DELAY_MS = 10 * 1000;
 /** A side's first move (ply 1 and 2) has 25 s before its clock runs - the gate on a
@@ -120,7 +122,7 @@ export function decodeMessage(content) {
     n: Number.isInteger(parsed.n) ? parsed.n : null,
     p: Number.isInteger(parsed.p) ? parsed.p : null,
     from: str(parsed.from), to: str(parsed.to), promo: str(parsed.promo),
-    text: str(parsed.text), k: str(parsed.k),
+    k: str(parsed.k),
   };
 }
 
@@ -134,7 +136,6 @@ export const messages = {
   move: (id, game, ply, from, to, promo) => ({ type: "chess_t", v: 1, t: id, a: "move", g: game, n: ply, from, to, promo: promo || null }),
   resign: (id, game) => ({ type: "chess_t", v: 1, t: id, a: "resign", g: game }),
   claim: (id, game) => ({ type: "chess_t", v: 1, t: id, a: "claim", g: game }),
-  chat: (id, game, text) => ({ type: "chess_t", v: 1, t: id, a: "chat", g: game || "", text: String(text).slice(0, CHAT_MAX_LENGTH) }),
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -262,7 +263,7 @@ export function reduce(events) {
 }
 
 function newTournament({ id, name, creator, createdAt, createTxId, capacity }) {
-  return { id, name, creator, createdAt, createTxId, capacity, players: [], joinedAt: dict(), startedAt: null, cancelled: false, games: dict(), chat: [], whiteCount: dict() };
+  return { id, name, creator, createdAt, createTxId, capacity, players: [], joinedAt: dict(), startedAt: null, cancelled: false, games: dict(), whiteCount: dict() };
 }
 
 /** Seats that ran out while the room waited are given back - judged at a join's block time,
@@ -282,10 +283,11 @@ export function apply(event, tournaments) {
       // key; a private 1v1 (2) is open to anyone.
       const capacity = m.p === 2 ? 2 : PLAYER_COUNT;
       if (tournaments[m.t] || isPublicId(m.t) || !(capacity === 2 || isValidCreateKey(m.k, m.t))) return;
-      const trimmed = String(m.name || "").trim();
       const t = newTournament({
         id: m.t,
-        name: trimmed ? trimmed.slice(0, NAME_MAX_LENGTH) : (capacity === 2 ? "1v1" : "Tournament"),
+        // Never the name in the message: other apps let players type one, and nothing a player types
+        // is shown here (KaPlay 45f28d9).
+        name: capacity === 2 ? PRIVATE_DUEL_NAME : PRIVATE_TOURNAMENT_NAME,
         creator: event.sender, createdAt: event.blockTime, createTxId: event.txId, capacity,
       });
       t.players = [event.sender];
@@ -404,15 +406,8 @@ export function apply(event, tournaments) {
       advance(t, game);
       return;
     }
-    case "chat": {
-      const t = tournaments[m.t];
-      if (!t) return;
-      const text = String(m.text || "").trim();
-      if (!text) return;
-      t.chat.push({ id: event.txId, sender: event.sender, text: text.slice(0, CHAT_MAX_LENGTH), blockTime: event.blockTime, game: m.g || "" });
-      return;
-    }
     default:
+      // Includes `chat`, which other apps still send: KaPlay shows no chat (KaPlay 45f28d9).
       return;
   }
 }

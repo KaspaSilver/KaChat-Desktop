@@ -3192,7 +3192,6 @@ button.message-delivery-icon:hover .message-delivery-text { text-decoration: und
 .switch-control span::after { content:""; position:absolute; width:22px; height:22px; left:2px; top:2px; border-radius:50%; background:#f5f6f7; transition:.2s; box-shadow:0 2px 7px rgba(0,0,0,.3); }
 .switch-control input:checked + span { background:rgba(112,199,186,.72); }
 .switch-control input:checked + span::after { transform:translateX(18px); }
-.danger-zone-group { padding-bottom:8px; }
 .danger-row, .danger-row .settings-row-icon { color:var(--ios-red); }
 .danger-row .settings-row-copy small { color:#b6878c; }
 
@@ -6036,6 +6035,17 @@ body.session-logged-out [data-account-rename-modal] {
 .passphrase-preview-balance-row .sk-spinner { width: 11px; height: 11px; margin: 0; color: var(--muted); }
 .passphrase-preview-verdict { margin: 4px 0 0; font-size: 12px; line-height: 1.35; color: var(--ios-orange); }
 .passphrase-preview-verdict.has-funds { color: var(--ios-green); }
+.passphrase-found { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.passphrase-found[hidden] { display: none; }
+.passphrase-found-hint { margin: 0; font-size: 12px; line-height: 16px; color: var(--muted); }
+.passphrase-found-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.passphrase-found-check { flex: 0 0 18px; width: 18px; height: 18px; border: 1.5px solid var(--kaspa-ink); border-radius: 50%; }
+.passphrase-found-row.selected .passphrase-found-check { background: radial-gradient(circle, var(--kaspa-ink) 0 5px, transparent 5.5px); }
+.passphrase-found-copy { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.passphrase-found-copy strong { font-size: 12px; font-weight: 600; }
+.passphrase-found-copy small { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--muted); }
+.passphrase-found-balance { flex: 0 0 auto; font-size: 12px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.passphrase-found-balance.has-funds { color: var(--ios-green); }
 
 /* Profile's card above Manage Addresses (iOS d063b897 AccountBackupCard, BackupHygieneCard). */
 .profile-card.account-backup-card { --tone: var(--ios-orange); display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px 16px; text-align: left; border: 1px solid color-mix(in srgb, var(--tone) 50%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--tone) 10%, transparent); color: var(--text); }
@@ -6093,6 +6103,9 @@ body.session-logged-out [data-account-rename-modal] {
 .account-backup-word-text { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 20px; font-weight: 600; }
 .account-backup-field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
 .account-backup-word-input.is-wrong { box-shadow: 0 0 0 1.5px var(--ios-red); }
+.account-backup-field .account-backup-word-box { padding: 12px; border: 1.5px solid color-mix(in srgb, var(--muted) 50%, transparent); border-radius: 10px; }
+.account-backup-field .account-backup-word-box:focus { border-color: var(--kaspa-ink); outline: none; }
+.account-backup-field .account-backup-word-box.is-wrong { border-color: var(--ios-red); box-shadow: none; }
 .account-backup-error { margin: 0; font-size: 13px; line-height: 1.35; color: var(--ios-red); }
 .account-backup-error[hidden] { display: none; }
 .account-backup-passphrase { padding: 14px; border-radius: 10px; background: var(--fill-tertiary); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 20px; font-weight: 600; white-space: pre-wrap; word-break: break-word; }
@@ -7434,8 +7447,6 @@ button.quick-reaction-slot { cursor: pointer; padding: 0; line-height: 1; }
 .settings-hub-row svg { width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 .settings-hub-row.danger span { color: var(--ios-red); }
 /* View Seed Phrase: red text and key, no chevron (iOS SettingsView). */
-.settings-hub-row.seed span { color: var(--ios-red); }
-.settings-hub-row.seed .settings-hub-icon svg { stroke: var(--ios-red); }
 .settings-hub-back {
   display: inline-flex; align-items: center; gap: 10px;
   border: 0; background: transparent; color: var(--kaspa-ink);
@@ -7458,6 +7469,7 @@ button.quick-reaction-slot { cursor: pointer; padding: 0; line-height: 1; }
 .settings-hub-icon svg,
 .settings-hub-row .settings-hub-icon svg { width: 18px; height: 18px; fill: none; stroke: var(--kaspa-ink); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .settings-hub-label { flex: 1; min-width: 0; }
+.settings-hub-icon svg .fill { fill: var(--kaspa-ink); stroke: none; }
 .settings-hub-row.danger .settings-hub-icon svg { stroke: var(--ios-red); }
 
 /* Profile > About card (iOS aboutSection: Created / Version / Website /
@@ -10683,17 +10695,6 @@ body.call-active .sidebar-tabbar { display: none; }
 .chess-t-clock.running { background: rgba(112,199,186,.2); }
 .chess-t-clock.low { color: var(--ios-red); }
 .chess-t-board { width: min(480px, 52vh, calc(100% - 12px)); }
-.chess-t-chat { display: flex; flex-direction: column; gap: 6px; }
-.chess-t-line { display: flex; flex-direction: column; gap: 1px; padding: 4px 10px; }
-.chess-t-line small { font-size: 12px; font-weight: 600; color: var(--muted); }
-.chess-t-line span { font-size: 14px; }
-.chess-t-chat.bubbles { padding: 0 6px; }
-.chess-t-bubble { align-self: flex-start; max-width: 80%; display: flex; flex-direction: column; gap: 1px; padding: 8px 12px; border-radius: 14px; background: rgba(255,255,255,.08); }
-.chess-t-bubble small { font-size: 11px; font-weight: 600; color: var(--muted); }
-.chess-t-bubble span { font-size: 14px; }
-.chess-t-bubble.mine { align-self: flex-end; background: var(--kaspa-ink); color: #06201c; }
-.chess-t-composer { display: flex; gap: 8px; align-items: center; padding: 6px 0; }
-.chess-t-composer .kaposts-reply-input { flex: 1; }
 .chess-t-error { color: var(--ios-red); }
 .chess-t-segment { margin: 4px 0 6px; }
 .chess-t-wl { display: inline-flex; gap: 10px; font-variant-numeric: tabular-nums; font-weight: 600; }
@@ -10755,15 +10756,6 @@ body.call-active .sidebar-tabbar { display: none; }
 .chess-t-resign { border: 0; background: transparent; color: var(--ios-red); font: inherit; font-weight: 700; cursor: pointer; padding: 6px 8px; }
 /* One chat line: the bubble, and under ours its state - green check sent, clock on the way,
    red mark failed (iOS chatBubble). */
-.chess-t-msg { align-self: flex-start; max-width: 80%; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
-.chess-t-msg.mine { align-self: flex-end; align-items: flex-end; }
-.chess-t-msg .chess-t-bubble { align-self: auto; max-width: 100%; }
-.chess-t-tick { display: inline-flex; width: 12px; height: 12px; }
-.chess-t-tick svg { width: 12px; height: 12px; }
-.chess-t-tick.sent { color: var(--ios-green); }
-.chess-t-tick.pending { color: var(--muted); }
-.chess-t-tick.failed { color: var(--ios-red); }
-.chess-t-composer button[disabled] { opacity: .5; cursor: default; }
 /* The result screen's top five (iOS leaderboardTop): plain counts, the lost tournaments small. */
 .chess-t-wl.plain { color: inherit; white-space: nowrap; }
 .chess-t-wl-lost { font-size: 12px; font-weight: 600; color: inherit; align-self: center; }
@@ -11936,8 +11928,6 @@ button.chess-t-row { cursor: pointer; }
 .chess-t-clock.low, .chess-t-countdown.low { color: var(--ios-red); }
 .chess-t-chip { background: var(--fill-tertiary); border-color: transparent; }
 .chess-t-chip.low { background: color-mix(in srgb, var(--ios-red) 14%, transparent); border-color: color-mix(in srgb, var(--ios-red) 55%, transparent); }
-.chess-t-bubble { background: var(--ios-gray5); border-radius: 16px; }
-.chess-t-bubble.mine { background: var(--bubble-out); color: var(--bubble-out-text); }
 .chess-t-br-champion { border-color: color-mix(in srgb, var(--ios-yellow) 50%, transparent); background: color-mix(in srgb, var(--ios-yellow) 14%, transparent); }
 .chess-t-br-card { background: var(--grouped-row); border: 0; border-radius: 12px; }
 .chess-t-br-card:hover:not([disabled]) { background-color: var(--row-hover); }
@@ -11961,8 +11951,8 @@ button.chess-t-row { cursor: pointer; }
 
 /* ==== iOS theme: Settings sheet ==== */
 .settings-hub-row { font-weight: 400; font-size: 17px; }
-.settings-hub-row.danger span, .settings-hub-row.seed span { color: var(--ios-red); }
-.settings-hub-row.danger .settings-hub-icon svg, .settings-hub-row.seed .settings-hub-icon svg { stroke: var(--ios-red); }
+.settings-hub-row.danger span { color: var(--ios-red); }
+.settings-hub-row.danger .settings-hub-icon svg { stroke: var(--ios-red); }
 .settings-hub-icon { width: 28px; }
 .settings-hub-icon svg { width: 20px; height: 20px; stroke: var(--kaspa-ink); }
 .danger-row, .danger-row .settings-row-icon { color: var(--ios-red); }
@@ -15313,6 +15303,8 @@ body.settings-tab [data-account-overlay] .account-overlay-card {
   height: 100%; max-height: none; width: min(100%, 560px); border: 0; border-radius: 0; box-shadow: none; background: transparent;
 }
 body.settings-tab [data-account-overlay] .settings-done-button { visibility: hidden; pointer-events: none; }
+.sidebar-tab-icon svg.tab-glyph-controller { fill: currentColor; stroke: none; }
+.hub-tile-icon svg.tab-glyph-controller, .dock-row-icon svg.tab-glyph-controller { fill: var(--kaspa-ink); stroke: none; }
 .sidebar-tab-icon .tab-glyph-gear { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 /* A chat pinned to the top row (iOS 7abc06e8): its own avatar, filling the circle. */
 .chat-circle-person { width: 100%; height: 100%; display: grid; place-items: center; overflow: hidden; border-radius: 50%; }

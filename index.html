@@ -13,7 +13,7 @@
   <!-- Too-old browsers (no WebAssembly / modern JS, e.g. iOS 10) get a clear message, not a blank layout. -->
   <script src="/browser-check.js"></script>
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=394" />
+  <link rel="stylesheet" href="./ui/styles.css?v=395" />
   <meta name="theme-color" content="#000000" />
   <link rel="manifest" href="manifest.json" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
@@ -945,9 +945,8 @@
         <span>Swap</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="chess" hidden>
-        <!-- A rook and a knight as text, tinted like a symbol (iOS ChessTabIcon renders "♜♞";
-             SF Symbols has no chess pieces). U+FE0E keeps each a text glyph, never an emoji. -->
-        <span class="sidebar-tab-icon" aria-hidden="true"><b class="chess-tab-glyph">&#x265C;&#xFE0E;&#x265E;&#xFE0E;</b></span>
+        <!-- The logo's controller (KaPlay 45f28d9 ControllerTabIcon, design/app-icon/kachat-chess-tab.svg). -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-controller" viewBox="96 293 832 520"><path fill-rule="evenodd" d="M330 300 L694 300 C800 300 858 336 880 412 C910 512 932 640 924 728 C916 806 836 832 786 784 C748 748 722 696 682 672 C604 652 420 652 342 672 C302 696 276 748 238 784 C188 832 108 806 100 728 C92 640 114 512 144 412 C166 336 224 300 330 300 Z M240 448 L240 416 C240 409.4 245.4 404 252 404 L272 404 C278.6 404 284 409.4 284 416 L284 448 L316 448 C322.6 448 328 453.4 328 460 L328 480 C328 486.6 322.6 492 316 492 L284 492 L284 524 C284 530.6 278.6 536 272 536 L252 536 C245.4 536 240 530.6 240 524 L240 492 L208 492 C201.4 492 196 486.6 196 480 L196 460 C196 453.4 201.4 448 208 448 Z M532.7 375.1 L568.7 370.0 L582.5 470.0 L568.7 570.0 L532.7 564.9 L543.5 491.2 L464.4 552.0 L442.5 523.5 L512.0 470.0 L442.5 416.5 L464.4 388.0 L543.5 448.8 Z M762 399 C774.703 399 785 409.297 785 422 C785 434.703 774.703 445 762 445 C749.297 445 739 434.703 739 422 C739 409.297 749.297 399 762 399 Z M810 447 C822.703 447 833 457.297 833 470 C833 482.703 822.703 493 810 493 C797.297 493 787 482.703 787 470 C787 457.297 797.297 447 810 447 Z M762 495 C774.703 495 785 505.297 785 518 C785 530.703 774.703 541 762 541 C749.297 541 739 530.703 739 518 C739 505.297 749.297 495 762 495 Z M714 447 C726.703 447 737 457.297 737 470 C737 482.703 726.703 493 714 493 C701.297 493 691 482.703 691 470 C691 457.297 701.297 447 714 447 Z"/></svg></span>
         <!-- The app is KaPlay (iOS 1d23002); the game in it is still Chess. -->
         <span>KaPlay</span>
       </button>
@@ -1413,11 +1412,6 @@
             <p class="settings-group-footer">Logs every indexer request with full connection and timing detail. Leave off for normal use: failed and slow requests are always logged, and heavy logging slows the app down.</p>
           </section>
 
-          <section class="settings-group danger-zone-group">
-            <p class="settings-group-label">Danger Zone</p>
-            <div class="settings-list-card danger-list-card">
-              <button class="settings-list-row danger-row" type="button" data-shell-action="resync"><span class="settings-row-icon settings-row-icon-accent settings-row-icon-red" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5.2 10a7 7 0 0 1 12.6-2.6"/><path class="fill" d="m19.6 5.2-.2 4.6-4.3-1.6z"/><path d="M18.8 14a7 7 0 0 1-12.6 2.6"/><path class="fill" d="m4.4 18.8.2-4.6 4.3 1.6z"/></svg></span><span class="settings-row-copy"><strong>Wipe and re-sync incoming messages</strong></span></button>            </div>
-          </section>
 
 
           <details class="diagnostics-panel">
@@ -1855,6 +1849,7 @@
           <p class="passphrase-preview-address" data-passphrase-preview-address>Checking...</p>
           <p class="passphrase-preview-balance-row"><span>Balance</span> <strong data-passphrase-preview-balance></strong></p>
           <p class="passphrase-preview-verdict" data-passphrase-preview-verdict hidden></p>
+          <div class="passphrase-found" data-passphrase-preview-found hidden></div>
           <p class="passphrase-preview-note" data-passphrase-preview-note>This is the account your seed phrase opens on its own.</p>
         </div>
         <p class="field-error" data-import-passphrase-error hidden></p>

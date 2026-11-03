@@ -219,3 +219,36 @@ export function kapostsPaymentRequestIn(text, parseLink) {
   if (!request) return null;
   return { request, raw, bodyText: value.split(raw).join("").trim() };
 }
+
+// A link to KaChat's own site (home.kachat.app, any page; KaPost f81c467 KaChatSiteLink). Unlike a
+// stranger's link it previews by itself: fetching it tells nobody but us who is reading, so a post
+// draws it as a card, and a public room doesn't wait for a tap as it does for other links.
+const KACHAT_SITE_HOST = "home.kachat.app";
+// With or without a scheme, as "home.kachat.app/news/" is how people write it. The lookbehind and
+// lookahead keep it from matching inside a longer host, an email or another site's path.
+const KACHAT_SITE_LINK_RE = /(?<![\w.@/-])(?:https?:\/\/)?home\.kachat\.app(?![\w@:-]|\.\w)(?:[/?#][^\s<>"']*)?/gi;
+
+/** Exactly this host over the web. home.kachat.app.evil.com and home.kachat.app@evil.com are other
+ *  hosts, and so is any port. */
+export function isKaChatSiteLink(url) {
+  try {
+    const parsed = new URL(String(url));
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    return parsed.hostname.toLowerCase() === KACHAT_SITE_HOST && !parsed.username && !parsed.password && !parsed.port;
+  } catch { return false; }
+}
+
+/** The first link to the site in a post's text: `{ url, raw, bodyText }`, `bodyText` being the post
+ *  without that one link (the same text can also start a longer link to another page), or null.
+ *  Trailing prose punctuation is not part of the link. */
+export function kachatSiteLinkIn(text) {
+  const value = String(text ?? "");
+  if (!value.toLowerCase().includes(KACHAT_SITE_HOST)) return null;
+  for (const match of value.matchAll(KACHAT_SITE_LINK_RE)) {
+    const raw = match[0].replace(/[.,;:!?)\]}'"*]+$/, "");
+    const url = /^https?:/i.test(raw) ? raw : `https://${raw}`;
+    if (!isKaChatSiteLink(url)) continue;
+    return { url, raw, bodyText: (value.slice(0, match.index) + value.slice(match.index + raw.length)).trim() };
+  }
+  return null;
+}

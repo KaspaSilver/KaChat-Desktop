@@ -345,7 +345,7 @@ function renderWords(body, foot) {
 
 function renderWordCheck(body, foot) {
   const positions = flow.checkPositions;
-  body.append(htmlBlock(headingHtml("Check your paper", "Enter these words from what you wrote down, to be sure your copy is right.")));
+  body.append(htmlBlock(headingHtml("Check your paper", "Tap each box and type that word from what you wrote down, to be sure your copy is right.")));
   const filled = () => positions.every((position) => normalizedWord(flow.answers[position]));
   let button = null;
   const inputs = positions.map((position) => {
@@ -354,6 +354,9 @@ function renderWordCheck(body, foot) {
     const caption = document.createElement("span");
     caption.textContent = `Word ${position + 1}`;
     const input = makeWordInput(`Word ${position + 1}`, flow.answers[position] || "");
+    // They look like fields (iOS d693d40e): a border, a prompt inside. The whole box takes the click.
+    input.classList.add("account-backup-word-box");
+    input.placeholder = `Type word ${position + 1} here`;
     input.classList.toggle("is-wrong", flow.wrong.includes(position));
     input.addEventListener("input", () => {
       flow.answers[position] = input.value;

@@ -1,10 +1,10 @@
 // Chess Online (CHESS_TOURNAMENTS.md; iOS 334cdd1 … 01af8bc): Kaspa Hub > Chess Online.
 // The `#chess-arena` room is read through the broadcast indexer and the live block scan,
 // reduced by engine/chess-tournament.js into the rooms every device agrees on, and every
-// action a player takes - join, leave, move, resign, claim, chat - is one broadcast
+// action a player takes - join, leave, move, resign, claim - is one broadcast
 // transaction. Screens: home (choose 1v1 or Tournament), one screen per kind with four tabs
 // (play, Active games to watch, Finished games), the Leaderboard (KaPlay ddec987), the waiting room,
-// the tournament bracket, the game (board, clocks, chat beneath) and the result screen.
+// the tournament bracket, the game (board and clocks) and the result screen.
 
 import * as T from "../engine/chess-tournament.js";
 import * as Chess from "../engine/chess.js";
@@ -66,17 +66,14 @@ let now = Date.now();
 let lastError = "";
 const pendingMoveGames = new Set();   // "<tournament>|<game>" sent and not yet seen back
 const claimedGames = new Set();       // game keys whose claim was posted - one is enough; the chain confirms it (iOS)
-/** Our chat lines on their way (sending, or failed): { id, tournament, game, text, failed }.
- *  A line the chain returned is in the tournament's chat instead (iOS pendingChat). */
-let pendingChat = [];
-let pendingChatSerial = 0;
 let queuedPublicRoomId = null;
 let joinFeeText = null;               // "0.0017 KAS" once estimated this session
 
 // Navigation. mode: "duel" | "tournament". tab: play | active | finished.
-// name "leaderboard": the Leaderboard; its squares switch `mode` (KaPlay ddec987).
+// name "games": a card per game, where KaPlay opens (KaPlay 45f28d9). name "home": Chess.
+// name "leaderboard": the Leaderboard's squares; name "board": 1v1's or Tournaments' page, by `mode`.
 // name "bots": Play > Bots and Leaderboard > Bots (ui/chess-bots.js paints and drives its own screens).
-let view = { name: "home", mode: "duel", tab: "play", tournamentId: null, gameId: null };
+let view = { name: "games", mode: "duel", tab: "play", tournamentId: null, gameId: null };
 let autoOpenedGameId = null;
 let spectatorSwitchedFor = null;  // the player's game the board-watching spectator was sent to the bracket for
 let selectedSquare = null;
@@ -88,7 +85,6 @@ let endHandledFor = null;
 let recordBeforeEnd = null;    // the player's row as it stood while the game was on
 let resultRevealed = false;
 let resultRevealTimer = null;
-const drafts = {};             // chat drafts per game, kept while the screen is up
 
 const me = () => deps?.engine?.address || "";
 const esc = (v) => deps.escapeHtml(String(v ?? ""));
@@ -447,9 +443,9 @@ async function joinPublicRoom(duel) {
   return send(T.messages.join(id));
 }
 
-/** The create alert (iOS ChessTournamentsView): Name - and for a tournament the Creator code -
- *  in one dialog, Cancel or Create; Create reads "Creating…" while the transaction goes out.
- *  `onCreate(name, code)` runs the send; the dialog closes when it is done. */
+/** The create alert (iOS ChessTournamentsView): for a tournament the Creator code, Cancel or
+ *  Create; Create reads "Creating…" while the transaction goes out. Rooms get automatic names
+ *  (KaPlay 45f28d9). `onCreate(code)` runs the send; the dialog closes when it is done. */
 function createPrivateDialog(duel, onCreate) {
   return new Promise((resolve) => {
     const host = document.createElement("div");
@@ -464,7 +460,6 @@ function createPrivateDialog(duel, onCreate) {
           ? "You get a code to share with the person you want to play. The game starts when they join. Creating it is one transaction."
           : "You take the first seat and get a code to share. It starts when eight players have joined. Creating it is one transaction.")}</p>
         <div class="portfolio-editor-body">
-          <label class="portfolio-editor-field"><input type="text" name="name" placeholder="Name" aria-label="Name" maxlength="${T.NAME_MAX_LENGTH}" autocomplete="off" /></label>
           ${duel ? "" : `<label class="portfolio-editor-field"><input type="text" name="code" placeholder="Creator code" aria-label="Creator code" maxlength="64" autocomplete="off" /></label>`}
         </div>
         <div class="modal-actions">
@@ -486,25 +481,24 @@ function createPrivateDialog(duel, onCreate) {
       const button = form.querySelector('button[type="submit"]');
       button.textContent = "Creating…";
       button.disabled = true;
-      Promise.resolve(onCreate(String(form.elements.name?.value || ""), String(form.elements.code?.value || "")))
+      Promise.resolve(onCreate(String(form.elements.code?.value || "")))
         .catch(() => {})
         .finally(close);
     });
-    form.elements.name?.focus();
+    (form.elements.code || form.querySelector('button[type="submit"]'))?.focus();
   });
 }
 
 async function createPrivate(duel) {
   let createdId = null;
-  await createPrivateDialog(duel, async (name, code) => {
+  await createPrivateDialog(duel, async (code) => {
     const id = T.newPrivateId();
-    const clean = name.trim();
     let message;
-    if (duel) message = T.messages.createDuel(id, clean || "1v1");
+    if (duel) message = T.messages.createDuel(id, T.PRIVATE_DUEL_NAME);
     else {
       // Checked before anything is sent (iOS createPrivateTournament).
       if (T.createKey(code, "check") !== T.createKey(T.PRIVATE_CREATE_CODE, "check")) { deps.showToast?.("That creator code is not right."); return; }
-      message = T.messages.create(id, clean || "Private tournament", code);
+      message = T.messages.create(id, T.PRIVATE_TOURNAMENT_NAME, code);
     }
     busy = true; render();
     const ok = await send(message);
@@ -601,20 +595,6 @@ async function resign(t, game, { leaving = false } = {}) {
   return true;
 }
 
-/** Our line shows at once with a clock, a red mark if it failed, and gives way to the chain's
- *  line (green check) once sent (iOS chatSection). */
-async function sendChat(t, gameId, text) {
-  const clean = String(text || "").trim();
-  if (!clean) return;
-  const line = { id: `pending_${++pendingChatSerial}`, tournament: t.id, game: gameId, text: clean, failed: false };
-  pendingChat = [...pendingChat, line];
-  render();
-  const ok = await send(T.messages.chat(t.id, gameId, clean));
-  if (ok) pendingChat = pendingChat.filter((l) => l !== line);
-  else line.failed = true;
-  render();
-}
-
 /** The opponent flagged in one of our games: post the claim (once). Runs on every tick. */
 function claimTimeoutsIfDue() {
   const my = me();
@@ -708,28 +688,15 @@ function render() {
     case "tournament": html = renderTournament(); break;
     case "kind": html = renderKind(); break;
     case "leaderboard": html = renderLeaderboard(); break;
+    case "board": html = renderLeaderboardPage(); break;
     case "bots": html = renderChessBots(); break;
-    default: html = renderHome();
+    case "home": html = renderHome(); break;
+    default: html = renderGames();
   }
-  // The chat composer survives a repaint: its draft, focus and caret come back on the new node.
-  const focused = document.activeElement?.closest?.("[data-chess-t-chat-input]") || null;
-  const focusKey = focused?.dataset?.chessTChatInput ?? null;
-  const caret = focused ? [focused.selectionStart, focused.selectionEnd] : null;
   screenEl.innerHTML = html;
   const body = screenEl.querySelector(".chess-t-body");
   if (body) body.scrollTop = y;
   if (view.name === "bots") afterChessBotsRender(screenEl);
-  for (const [key, text] of Object.entries(drafts)) {
-    const input = screenEl.querySelector(`[data-chess-t-chat-input="${key}"]`);
-    if (input && !input.value) input.value = text;
-  }
-  if (focusKey !== null) {
-    const input = screenEl.querySelector(`[data-chess-t-chat-input="${focusKey}"]`);
-    if (input) {
-      input.focus({ preventScroll: true });
-      try { if (caret) input.setSelectionRange(caret[0], caret[1]); } catch { /* fine */ }
-    }
-  }
 }
 
 function headerHtml(title, { back = null, trailing = "", home = false } = {}) {
@@ -753,13 +720,28 @@ function rowHtml({ icon, title, subtitle, action = "", attrs = "", trailing = ""
 }
 const errorHtml = () => (lastError ? `<p class="field-hint chess-t-error">${esc(lastError)}</p>` : "");
 
-// --- Home: choose your game (iOS e86868e) ---
+// --- Games: a card per game, where KaPlay opens (KaPlay 45f28d9 GamesView). A new game is one more
+// card here. ---
+
+function renderGames() {
+  return `
+    ${headerHtml("KaPlay", { home: true })}
+    <div class="chess-t-body chess-t-home">
+      <button class="chess-t-game-card" type="button" data-chess-t-chess>
+        <span class="chess-t-game-card-icon">${ICON_CHESS}</span>
+        <span class="chess-t-row-main"><strong>Chess</strong><small>1v1, tournaments and five bots. Online moves and bot results go on Kaspa.</small></span>
+        <span class="chess-t-row-chevron">${ICON_CHEVRON}</span>
+      </button>
+    </div>`;
+}
+
+// --- Chess: choose your game (iOS e86868e) ---
 
 function renderHome() {
   const mine = myActiveTournament();
   const waiting = mine && T.tournamentStatus(mine) === "open";
   return `
-    ${headerHtml("KaPlay", { home: true })}
+    ${headerHtml("Chess", { back: true })}
     <div class="chess-t-body chess-t-home">
       <div class="chess-t-hero">
         <span class="chess-t-hero-icon">${ICON_CHESS}</span>
@@ -903,7 +885,7 @@ function renderActiveTab() {
   }
   if (duel) {
     return `<p class="screen-kicker">Live now</p><div class="chess-t-list">${live.map((t) => { const g = Object.values(t.games)[0]; return g ? liveGameRowHtml(g, t) : ""; }).join("")}</div>
-      <p class="field-hint">Watching is free - nothing is sent. Only the two players can move or chat.</p>`;
+      <p class="field-hint">Watching is free - nothing is sent. Only the two players can move.</p>`;
   }
   return live.map((t) => {
     const games = Object.values(t.games).filter((g) => !T.isDecided(g, now)).sort((a, b) => a.round - b.round || a.index - b.index);
@@ -973,14 +955,14 @@ function renderLeaderboardRows() {
     </div>`;
 }
 
-// --- The Leaderboard (KaPlay ddec987 ChessLeaderboardTabView): three squares. 1v1 and Tournaments
-// switch the board under them; Bots opens its own screen, a board per bot (ui/chess-bots.js). ---
+// --- The Leaderboard (KaPlay ddec987, 45f28d9 ChessLeaderboardTabView): three squares, each opening
+// its own page. 1v1 and Tournaments their board; Bots a board per bot (ui/chess-bots.js). ---
 
-function squareHtml({ title, icon, selected = false, opensScreen = false, attrs }) {
+function squareHtml({ title, icon, attrs }) {
   return `
-    <button class="chess-t-square${selected ? " selected" : ""}" type="button" ${selected ? `aria-current="true"` : ""} ${attrs}>
+    <button class="chess-t-square" type="button" ${attrs}>
       ${icon}<span>${esc(title)}</span>
-      ${opensScreen ? `<span class="chess-t-square-chevron">${ICON_CHEVRON}</span>` : ""}
+      <span class="chess-t-square-chevron">${ICON_CHEVRON}</span>
     </button>`;
 }
 
@@ -988,10 +970,16 @@ function renderLeaderboard() {
   return `
     ${headerHtml("Leaderboard", { back: true })}
     <div class="chess-t-squares">
-      ${squareHtml({ title: "1v1", icon: ICON_TWO_FILLED, selected: modeIsDuel(), attrs: `data-chess-t-board="duel"` })}
-      ${squareHtml({ title: "Tournaments", icon: ICON_TROPHY_FILLED, selected: !modeIsDuel(), attrs: `data-chess-t-board="tournament"` })}
-      ${squareHtml({ title: "Bots", icon: ICON_CPU, opensScreen: true, attrs: "data-chess-t-board-bots" })}
+      ${squareHtml({ title: "1v1", icon: ICON_TWO_FILLED, attrs: `data-chess-t-board="duel"` })}
+      ${squareHtml({ title: "Tournaments", icon: ICON_TROPHY_FILLED, attrs: `data-chess-t-board="tournament"` })}
+      ${squareHtml({ title: "Bots", icon: ICON_CPU, attrs: "data-chess-t-board-bots" })}
     </div>
+    <div class="chess-t-body">${errorHtml()}</div>`;
+}
+
+function renderLeaderboardPage() {
+  return `
+    ${headerHtml(modeIsDuel() ? "1v1" : "Tournaments", { back: true })}
     <div class="chess-t-body">
       ${renderLeaderboardRows()}
       ${errorHtml()}
@@ -1211,7 +1199,7 @@ function bracketHtml_(t) {
     </div>`;
 }
 
-// --- Game: board, clocks, chat beneath (iOS b27b4c8, 759a2d3, 4152bf0, 01af8bc) ---
+// --- Game: board and clocks (iOS b27b4c8, 759a2d3, 4152bf0, 01af8bc; no chat since KaPlay 45f28d9) ---
 
 function isLockedIn() {
   const t = tournaments[view.tournamentId];
@@ -1278,29 +1266,6 @@ function renderGame() {
       </div></div>
     </div>` : "";
 
-  // Lines the chain returned (green check on ours), then ours still on the way (clock) or
-  // failed (red) - the three states a 1:1 bubble has (iOS chatSection).
-  const lines = [
-    ...t.chat.filter((l) => l.game === game.id).slice(-120).map((l) => ({ line: l, status: "sent" })),
-    ...pendingChat.filter((p) => p.tournament === t.id && p.game === game.id).map((p) => ({ line: { id: p.id, sender: my, text: p.text }, status: p.failed ? "failed" : "pending" })),
-  ];
-  const tickIcon = {
-    sent: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="m7.5 12.3 3 3 6-6.3" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-    pending: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
-    failed: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 7v6" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><circle cx="12" cy="16.8" r="1.4" fill="#fff"/></svg>`,
-  };
-  const draft = String(drafts[game.id] || "").trim();
-  const chat = game.winner
-    ? `<p class="field-hint center">Chat was live only.</p>`
-    : `<div class="chess-t-chat bubbles">
-        ${lines.length ? lines.map(({ line: l, status }) => `<div class="chess-t-msg${l.sender === my ? " mine" : ""}"><div class="chess-t-bubble${l.sender === my ? " mine" : ""}">${l.sender === my ? "" : `<small>${esc(nameFor(l.sender))}</small>`}<span>${esc(l.text)}</span></div>${l.sender === my ? `<i class="chess-t-tick ${status}" aria-hidden="true">${tickIcon[status]}</i>` : ""}</div>`).join("") : `<p class="field-hint">No messages yet. Each message is one transaction.</p>`}
-      </div>
-      ${myColor ? `
-      <form class="chess-t-composer" data-chess-t-chat="${esc(game.id)}">
-        <input class="kaposts-reply-input" type="text" data-chess-t-chat-input="${esc(game.id)}" placeholder="Message (one transaction)" maxlength="${T.CHAT_MAX_LENGTH}" autocomplete="off" />
-        <button class="primary-button" type="submit" data-chess-t-chat-send ${draft ? "" : "disabled"}>Send</button>
-      </form>` : ""}`;
-
   return `
     ${headerHtml(roundName(game, t), {
       back: true,
@@ -1314,7 +1279,6 @@ function renderGame() {
       ${clockChip(flipped ? Chess.WHITE : Chess.BLACK)}
       <div class="chess-board-wrap"><div class="chess-board chess-t-board">${board}</div>${waitingOverlay}${endOverlay}${promo}</div>
       ${clockChip(flipped ? Chess.BLACK : Chess.WHITE)}
-      ${chat}
       ${errorHtml()}
     </div>`;
 }
@@ -1500,6 +1464,8 @@ function goBack() {
       ? { ...view, name: "tournament", gameId: null }
       : { ...view, name: "kind", tournamentId: null, gameId: null };
   } else if (view.name === "tournament" || view.name === "result") view = { ...view, name: "kind", tournamentId: null, gameId: null };
+  else if (view.name === "board") view = { ...view, name: "leaderboard" };
+  else if (view.name === "home") view = { ...view, name: "games" };
   else view = { ...view, name: "home", tournamentId: null, gameId: null };
   selectedSquare = null;
   pendingPromotion = null;
@@ -1582,8 +1548,13 @@ function tapSquare(file, rank) {
 function onClick(event) {
   // The bots' screens are their own (ui/chess-bots.js), Back included.
   if (view.name === "bots") { chessBotsClick(event); return; }
+  if (event.target.closest("[data-chess-t-chess]")) {
+    view = { ...view, name: "home", tournamentId: null, gameId: null };
+    render();
+    return;
+  }
   if (event.target.closest("[data-chess-t-leaderboard]")) {
-    // Comes up on 1v1 and This month, and asks the indexer for fresh boards.
+    // Comes up on This month, and asks the indexer for fresh boards.
     view = { ...view, name: "leaderboard", mode: "duel", tournamentId: null, gameId: null };
     leaderboardPeriod = "month";
     refreshIndexerLeaderboards();
@@ -1591,7 +1562,7 @@ function onClick(event) {
     return;
   }
   const board = event.target.closest("[data-chess-t-board]");
-  if (board) { view = { ...view, mode: board.dataset.chessTBoard }; render(); return; }
+  if (board) { view = { ...view, name: "board", mode: board.dataset.chessTBoard }; render(); return; }
   if (event.target.closest("[data-chess-t-board-bots]")) {
     view = { ...view, name: "bots" };
     openChessBotBoards();
@@ -1704,31 +1675,6 @@ function onClick(event) {
   }
 }
 
-function onSubmit(event) {
-  const form = event.target.closest("[data-chess-t-chat]");
-  if (!form) return;
-  event.preventDefault();
-  const gameId = form.dataset.chessTChat || "";
-  const input = form.querySelector("[data-chess-t-chat-input]");
-  const text = String(input?.value || "").trim();
-  const t = tournaments[view.tournamentId];
-  if (!t || !text) return;
-  if (input) input.value = "";
-  delete drafts[gameId];
-  const sendButton = form.querySelector("[data-chess-t-chat-send]");
-  if (sendButton) sendButton.disabled = true;
-  sendChat(t, gameId, text).catch(() => {});
-}
-
-function onInput(event) {
-  const input = event.target.closest("[data-chess-t-chat-input]");
-  if (!input) return;
-  drafts[input.dataset.chessTChatInput || ""] = input.value;
-  // Send waits for something to send (iOS composer).
-  const sendButton = input.closest("[data-chess-t-chat]")?.querySelector("[data-chess-t-chat-send]");
-  if (sendButton) sendButton.disabled = !input.value.trim();
-}
-
 // ---------------------------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------------------------
@@ -1745,8 +1691,6 @@ export function initChessTournaments(dependencies) {
   loadCache();
   reduceArena();
   screenEl.addEventListener("click", onClick);
-  screenEl.addEventListener("submit", onSubmit);
-  screenEl.addEventListener("input", onInput);
 }
 
 /** The Chess screen came on: keep the arena scanned and polled while it is up. */
@@ -1825,11 +1769,10 @@ export function resetChessTournamentsForAccount() {
   resetChessBotsForAccount();
   pendingMoveGames.clear();
   claimedGames.clear();
-  pendingChat = [];
   spectatorSwitchedFor = null;
   queuedPublicRoomId = null;
   joinFeeText = null;
-  view = { name: "home", mode: "duel", tab: "play", tournamentId: null, gameId: null };
+  view = { name: "games", mode: "duel", tab: "play", tournamentId: null, gameId: null };
   leaderboardPeriod = "month";
   selectedSquare = null;
   pendingPromotion = null;

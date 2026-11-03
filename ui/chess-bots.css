@@ -138,7 +138,6 @@
   border: 1.5px solid transparent; border-radius: 16px; background: var(--surface-1, rgba(255,255,255,.04)); color: var(--text); font: inherit; cursor: pointer;
 }
 .chess-t-square:hover { background: var(--surface-2, rgba(255,255,255,.07)); }
-.chess-t-square.selected { color: var(--kaspa-ink); border-color: var(--kaspa-ink); background: rgba(112,199,186,.16); }
 .chess-t-square > svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .chess-t-square > svg.filled { fill: currentColor; stroke: none; }
 .chess-t-square > span:not(.chess-t-square-chevron) { max-width: 100%; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
