@@ -253,16 +253,33 @@ async function explainCallsOffOnThisSite() {
   if (choice === "quickstart") window.open(KASPA_QUICK_START_URL, "_blank", "noopener,noreferrer");
 }
 
-export async function requestCallFromHeader(address) {
+/** The sheets before a call starts, the same from a chat's call button and a Contacts entry (iOS
+ *  d1844582 CallConfirmationSheets): with no Nextcloud on this account, what calling needs; while
+ *  calls are off for this person, whether to enable them; then voice or video. `prepare` runs once
+ *  past the first sheet (Contacts: the chat contact, which only then exists). */
+export async function requestCallFromHeader(address, { prepare = null } = {}) {
   if (!deps || !address) return;
   if (session) { deps.showToast?.("You are already on a call."); return; }
   if (callsOffOnThisSite()) { await explainCallsOffOnThisSite(); return; }
+  if (!deps.isNextcloudConnected?.()) {
+    // iOS callsNeedTalkSheet: every attempt while no server is connected.
+    const choice = await deps.chooseDialog({
+      title: "Calling only works if you or the person you are trying to talk to has Nextcloud Talk set up. If neither side has it set up, you cannot make calls.",
+      message: "Continue?",
+      options: [
+        { id: "continue", title: "Continue", subtitle: "Go on to calling this person." },
+        { id: "back", title: "Back", subtitle: "Close this and stay in the chat." },
+      ],
+    });
+    if (choice !== "continue") return;
+  }
+  prepare?.(address);
   const name = deps.displayNameFor(address);
   if (!deps.callsEnabledFor(address)) {
-    // iOS ChatDetailView.enableCallsSheet.
+    // iOS CallConfirmationSheets.enableCallsSheet.
     const choice = await deps.chooseDialog({
       title: `Enable calls and video calls with ${name}?`,
-      message: "They will be able to call you too. You can turn this off any time in User Info.",
+      message: "They will be able to call you too.",
       options: [
         { id: "enable", title: "Enable calls", subtitle: `Saves this for ${name} and lets you call now.` },
         { id: "later", title: "Not now", subtitle: "Calls stay off for this contact." },
@@ -272,7 +289,7 @@ export async function requestCallFromHeader(address) {
     deps.setCallsEnabled(address, true);
     await primeCallPermissions();
   }
-  // iOS ChatDetailView.callOptionsSheet.
+  // iOS CallConfirmationSheets.callOptionsSheet.
   const kind = await deps.chooseDialog({
     title: `Call ${name}`,
     options: [

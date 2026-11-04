@@ -2,7 +2,7 @@
 // MenuVisibilityView's red minus and green plus).
 import assert from "node:assert/strict";
 import {
-  DOCK_ASSIGNABLE, DOCK_DEFAULT, DOCK_MAX_ITEMS, DOCK_PINNED, HUB_DEFAULT,
+  DOCK_ASSIGNABLE, DOCK_DEFAULT, DOCK_DEFAULT_ORDER, DOCK_MAX_ITEMS, DOCK_PINNED, HUB_DEFAULT,
   normalizeDockPrefs as norm, dockIsFull, removeFromDock, addToDock, reorderVisible,
 } from "../ui/dock-arrangement.js";
 
@@ -15,8 +15,8 @@ const everyPlaced = ({ dock, hub }) => {
   assert.ok(!hub.some((t) => DOCK_PINNED.includes(t)), "the Hub never holds a pinned tab");
 };
 
-// A fresh install: the default dock (Kaspa Hub, Portfolio, Chats, KaPosts, Profile) and Hub, unchanged.
-assert.deepEqual(DOCK_DEFAULT, ["hub", "portfolio", "chats", "kaposts", "profile"]);
+// A fresh install: the default dock (Kaspa Hub, Wallet, Chats, KaPosts, Profile) and Hub, unchanged.
+assert.deepEqual(DOCK_DEFAULT, ["hub", "wallet", "chats", "kaposts", "profile"]);
 const fresh = norm({ dock: DOCK_DEFAULT, hub: HUB_DEFAULT });
 assert.deepEqual(fresh.dock, DOCK_DEFAULT);
 assert.deepEqual(fresh.hub, HUB_DEFAULT);
@@ -44,9 +44,9 @@ everyPlaced(norm({}));
 everyPlaced(norm({ dock: "x", hub: null }));
 
 // Red minus: to the top of Kaspa Hub. Pinned tabs never leave.
-const minus = removeFromDock(fresh, "portfolio");
+const minus = removeFromDock(fresh, "wallet");
 assert.deepEqual(minus.dock, ["hub", "chats", "kaposts", "profile"]);
-assert.deepEqual(minus.hub, ["portfolio", ...HUB_DEFAULT]);
+assert.deepEqual(minus.hub, ["wallet", ...HUB_DEFAULT]);
 assert.equal(removeFromDock(fresh, "chats"), fresh);
 assert.equal(removeFromDock(fresh, "hub"), fresh);
 assert.equal(removeFromDock(fresh, "profile"), fresh);
@@ -87,8 +87,8 @@ assert.equal(HUB_DEFAULT.indexOf("swaps"), HUB_DEFAULT.indexOf("kachat-bots") + 
 const beforeSwap = { dock: ["hub", "portfolio", "chats", "kaposts", "profile"], hub: ["cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "apps", "chess"] };
 const restoredSwap = norm(beforeSwap);
 assert.deepEqual(restoredSwap.dock, beforeSwap.dock);
-// (Settings, added after Swap, follows it - iOS d54ea87c.)
-assert.deepEqual(restoredSwap.hub, [...beforeSwap.hub, "swaps", "settings"]);
+// (Wallet and Settings, added after Swap, come in around it - iOS bfe9f022, d54ea87c.)
+assert.deepEqual(restoredSwap.hub, [...beforeSwap.hub, "wallet", "swaps", "settings"]);
 everyPlaced(restoredSwap);
 // It can be put in the dock like any other pick, and sent back.
 const swapInDock = addToDock(removeFromDock(restoredSwap, "kaposts"), "swaps");
@@ -112,4 +112,27 @@ console.log("dock arrangement: ok");
   assert.ok(!docked.hub.includes("settings"));
 }
 console.log("dock arrangement: settings ok");
+
+// Wallet (iOS bfe9f022): a pick in a fresh dock, where Portfolio was, and Portfolio is in the Hub. A
+// saved dock is untouched: its picks stay and Wallet lands at the end of its Hub.
+{
+  const fresh = norm({ dock: DOCK_DEFAULT, hub: HUB_DEFAULT });
+  assert.deepEqual(fresh.dock, ["hub", "wallet", "chats", "kaposts", "profile"]);
+  assert.ok(fresh.hub.includes("portfolio"));
+  assert.ok(!fresh.hub.includes("wallet"));
+  assert.deepEqual(DOCK_DEFAULT_ORDER.filter((t) => !DOCK_PINNED.includes(t) && !DOCK_DEFAULT.includes(t)), HUB_DEFAULT, "the default order lists the Hub in its order");
+
+  const saved = { dock: ["hub", "portfolio", "chats", "kaposts", "profile"], hub: ["cold-storage", "address-book", "kachat-names", "kachat-stats", "kachat-bots", "swaps", "apps", "chess", "settings"] };
+  const after = norm(saved);
+  assert.deepEqual(after.dock, saved.dock);
+  assert.deepEqual(after.hub, [...saved.hub, "wallet"]);
+  everyPlaced(after);
+
+  // It moves like any other pick, and Simple Mode keeps it.
+  const swapped = addToDock(removeFromDock(after, "portfolio"), "wallet");
+  assert.deepEqual(swapped.dock, ["hub", "chats", "kaposts", "profile", "wallet"]);
+  assert.equal(swapped.hub[0], "portfolio");
+  everyPlaced(swapped);
+}
+console.log("dock arrangement: wallet ok");
 

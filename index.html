@@ -13,7 +13,7 @@
   <!-- Too-old browsers (no WebAssembly / modern JS, e.g. iOS 10) get a clear message, not a blank layout. -->
   <script src="/browser-check.js"></script>
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=395" />
+  <link rel="stylesheet" href="./ui/styles.css?v=396" />
   <meta name="theme-color" content="#000000" />
   <link rel="manifest" href="manifest.json" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
@@ -91,15 +91,25 @@
         </button>
         <button type="button" class="chat-select-toggle" data-chat-select-toggle>Select</button>
       </div>
-      <!-- Profile's notification bell sits on the right of the bar, as in the iOS Profile toolbar
-           (dot left, balance centre, bell right). Shown only while Profile is on screen. -->
+      <!-- Help sits on the right of the bar, as in the iOS Profile toolbar (bfe9f022: dot left, balance
+           centre, Help right). Shown only while Profile is on screen. -->
       <div class="topbar-profile-cluster">
-        <button class="topbar-bell-button profile-bell-button" type="button" data-open-notif-center aria-label="Notifications" title="Notifications">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a5.5 5.5 0 0 1 5.5 5.5c0 3.2.8 5 1.8 6.2.4.5.05 1.3-.6 1.3H5.3c-.65 0-1-.8-.6-1.3 1-1.2 1.8-3 1.8-6.2A5.5 5.5 0 0 1 12 4Z"/><path d="M10 19.5a2 2 0 0 0 4 0"/></svg>
-          <span class="profile-notif-badge profile-bell-dot" data-notif-badge hidden></span>
+        <button class="topbar-bell-button" type="button" data-open-help-screen aria-label="Help" title="Help">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/><path d="M9.7 9.4a2.4 2.4 0 0 1 4.66.8c0 1.6-2.36 2-2.36 3.3"/><circle cx="12" cy="16.8" r=".2"/></svg>
         </button>
       </div>
     </header>
+    <!-- The strip under the bar on every main screen until this account's backup steps are finished
+         (iOS bfe9f022 AccountBackupBanner). Out of the flow like the bar; the screens below reserve
+         its height (--backup-banner-h, published by ui/app.js). -->
+    <button class="account-backup-banner app-backup-banner" type="button" data-account-backup-banner hidden>
+      <svg class="account-backup-banner-shield" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l8 3.1v5.8c0 4.8-3.2 8.7-8 9.9-4.8-1.2-8-5.1-8-9.9V5.9z"/><path class="mark" d="M12 8v5M12 16.2v.1"/></svg>
+      <span class="account-backup-banner-copy">
+        <strong>Backup Your Account To Prevent Loss Of Funds</strong>
+        <small data-account-backup-banner-note></small>
+      </span>
+      <svg class="account-backup-banner-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+    </button>
 
     <div class="app-body" data-app-body>
       <aside class="app-sidebar" data-app-sidebar>
@@ -276,7 +286,6 @@
             <!-- A Message Request: read it all, then Accept or Reject - in place of the composer
                  (iOS 5.2, NO_HANDSHAKE_MESSAGING.md). Accept sends nothing. -->
             <div class="message-request-bar" data-message-request-bar hidden>
-              <p data-message-request-text></p>
               <div class="message-request-actions">
                 <button type="button" class="message-request-reject" data-message-request-reject>Reject</button>
                 <button type="button" class="message-request-accept" data-message-request-accept>Accept</button>
@@ -399,6 +408,8 @@
                 <canvas width="360" height="360" data-funding-gate-qr></canvas>
                 <button type="button" class="chat-funding-gate-address" data-funding-gate-address title="Copy address"></button>
               </div>
+              <!-- A payment request link in the text being typed (iOS bfe9f022 ComposerPaymentRequestPreview). -->
+              <div class="composer-pay-preview" data-composer-pay-preview hidden></div>
               <div class="composer-row">
                 <!-- iOS inputBar: [field][emoji][+], and the "+" turns into Send once there is
                      something to send (text, a pending photo, a recording). A pending photo and
@@ -417,12 +428,6 @@
                     <span class="composer-declined-field" data-composer-declined hidden>Conversation declined</span>
                   </div>
                   <button type="button" class="composer-tool composer-emoji" data-composer-emoji aria-label="Emoji picker" title="Emoji"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5c.9 1.2 2.1 1.8 3.5 1.8s2.6-.6 3.5-1.8M9 10h.01M15 10h.01"/></svg></button>
-                  <!-- Audio mode with nothing recorded (iOS audioModeSwitchActions): back to a text
-                       message, or to Send KAS. -->
-                  <span class="composer-audio-switch" data-composer-audio-switch hidden>
-                    <button type="button" class="composer-tool" data-composer-audio-text aria-label="Send message" title="Send message"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h-1A.5.5 0 0 1 4 15.5z"/><path d="M8 8h8M8 11.5h5"/></svg></button>
-                    <button type="button" class="composer-tool" data-composer-audio-pay aria-label="Send KAS" title="Send KAS"><img src="./ui/assets/kaspa-logo.png" alt="" /></button>
-                  </span>
                   <button class="composer-tool composer-plus" type="button" data-composer-plus aria-label="More options">+</button>
                   <button class="composer-send" type="submit" aria-label="Send message">
                     <svg viewBox="0 0 24 24" aria-hidden="true" data-composer-send-icon><path d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5"/></svg>
@@ -490,7 +495,10 @@
 
                 <div class="mention-suggestions" data-group-mention-suggestions hidden></div>
 
-                <!-- iOS composeBar: [field][+], the "+" turning into Send with text in the field. A
+                <!-- A payment request link in the text being typed, while no photo is waiting (iOS bfe9f022). -->
+                <div class="composer-pay-preview" data-group-composer-pay-preview hidden></div>
+
+                <!-- iOS composeBar: [field][emoji][+], the "+" turning into Send with text in the field. A
                      pending photo ("Photo ready to send") and the recorder ("Recording... Ns", sent
                      in one step) take the field's place. -->
                 <form class="composer kachat-composer" data-group-composer>
@@ -504,6 +512,7 @@
                     </div>
                     <div class="voice-recording-panel composer-field-row" data-group-voice-panel hidden></div>
                   </div>
+                  <button type="button" class="composer-tool composer-emoji" data-group-composer-emoji aria-label="Emoji picker" title="Emoji"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5c.9 1.2 2.1 1.8 3.5 1.8s2.6-.6 3.5-1.8M9 10h.01M15 10h.01"/></svg></button>
                   <button class="composer-tool composer-plus" type="button" data-group-plus aria-label="More options">+</button>
                   <button class="composer-send" type="submit" aria-label="Send message">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5"/></svg>
@@ -757,12 +766,78 @@
           </div>
         </div>
 
-        <div class="profile-screen" data-app-tab-screen="profile" hidden>
-          <!-- Send and Receive (iOS 7abc06e8): the floating up/down arrow, bottom right, opening Send
-               Kaspa, Receive Kaspa and Request Payment - which left the Chats + sheet for it. -->
-          <button class="new-chat-fab ab-fab profile-send-receive-fab" type="button" data-profile-send-receive aria-label="Send and Receive" title="Send and Receive">
-            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M7.5 19.5v-15M3.5 8.5l4-4 4 4M16.5 4.5v15M12.5 15.5l4 4 4-4"/></svg>
+        <!-- The Wallet tab (iOS bfe9f022 WalletView): everything this account holds and what you can do
+             with it. The total, split into the chatting and spending addresses; Send, Receive and
+             Request; then the two ways into the addresses themselves. -->
+        <div class="profile-screen wallet-screen" data-app-tab-screen="wallet" hidden>
+          <div class="kaposts-header profile-title-row">
+            <h1 class="kaposts-title">Wallet</h1>
+            <!-- Refresh: the platform's stand-in for iOS's pull-to-refresh, as on Your Domains. -->
+            <button class="chatting-address-back domains-refresh wallet-refresh" type="button" data-wallet-refresh aria-label="Refresh" title="Refresh">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 12.6A7.5 7.5 0 1 1 17 6.6"/><path d="M19.6 3.8v4.6H15"/></svg>
+            </button>
+          </div>
+
+          <div class="wallet-balance-card">
+            <div class="wallet-balance-head">
+              <span class="wallet-balance-label">Total Balance</span>
+              <button class="wallet-total" type="button" data-wallet-total>--</button>
+              <span class="wallet-fiat" data-wallet-fiat hidden></span>
+            </div>
+            <div class="wallet-balance-divider"></div>
+            <div class="wallet-balance-parts">
+              <div class="wallet-balance-part"><span>Chatting</span><strong data-wallet-chatting>--</strong></div>
+              <div class="wallet-balance-part"><span>Spending</span><strong data-wallet-spending>--</strong></div>
+            </div>
+          </div>
+
+          <div class="wallet-actions">
+            <button class="wallet-action" type="button" data-wallet-send>
+              <span class="wallet-action-circle" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 20V4M5.5 10.5 12 4l6.5 6.5"/></svg></span>
+              <span>Send</span>
+            </button>
+            <button class="wallet-action" type="button" data-wallet-receive>
+              <span class="wallet-action-circle" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v16M5.5 13.5 12 20l6.5-6.5"/></svg></span>
+              <span>Receive</span>
+            </button>
+            <button class="wallet-action" type="button" data-wallet-request>
+              <span class="wallet-action-circle" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6.5 3h7.8L18.5 7.2V20a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v4.5h4.5M8.5 12h7M8.5 16h7"/></svg></span>
+              <span>Request</span>
+            </button>
+          </div>
+
+          <!-- Every six months (iOS d063b897, 836b62bc BackupHygieneCard). -->
+          <button class="profile-card account-backup-card" type="button" data-tone="hygiene" data-backup-hygiene-card hidden>
+            <span class="account-backup-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.5-3 8.2-7.5 9.5-4.5-1.3-7.5-5-7.5-9.5V6z"/><path class="account-backup-card-mark-hygiene" d="m8.6 12.2 2.4 2.4 4.4-4.6"/></svg></span>
+            <span class="account-backup-card-copy"><strong>Backup Hygiene</strong></span>
+            <svg class="profile-manage-addresses-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
           </button>
+
+          <!-- Testnet only (iOS 182ae68, 2a81767): free TN10 coins for the chatting address from the
+               official faucet. It sits behind a Cloudflare check, so it opens in a new tab with the
+               kaspatest: address copied; a balance rise after you come back locks it for 24 h. -->
+          <button class="profile-card testnet-faucet-button" type="button" data-testnet-faucet hidden>
+            <span class="testnet-faucet-icon" data-testnet-faucet-icon aria-hidden="true"></span>
+            <span class="testnet-faucet-copy">
+              <strong>Claim Testnet Kaspa</strong>
+              <small data-testnet-faucet-note>Copies your chatting address and opens the TN10 faucet: paste it, pass the check and claim the most it offers.</small>
+            </span>
+            <svg class="testnet-faucet-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+          </button>
+
+          <div class="wallet-squares">
+            <button class="profile-card wallet-square" type="button" data-open-spending-manage>
+              <span class="wallet-square-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M7 9h.01M7 12h.01M7 15h.01M10 9h7M10 12h7M10 15h7"/></svg></span>
+              <strong>Manage Addresses</strong>
+            </button>
+            <button class="profile-card wallet-square" type="button" data-open-chatting-address>
+              <span class="wallet-square-icon" aria-hidden="true"><svg class="qr-glyph" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M3 3h7.5v7.5H3zm2 2v3.5h3.5V5zM13.5 3H21v7.5h-7.5zm2 2v3.5H19V5zM3 13.5h7.5V21H3zm2 2V19h3.5v-3.5z"/><path d="M13.5 13.5h2.5V16h-2.5zM18.5 13.5H21V16h-2.5zM16 16h2.5v2.5H16zM13.5 18.5h2.5V21h-2.5zM18.5 18.5H21V21h-2.5z"/></svg></span>
+              <strong>Chatting Address</strong>
+            </button>
+          </div>
+        </div>
+
+        <div class="profile-screen" data-app-tab-screen="profile" hidden>
           <div class="profile-screen-header" hidden aria-hidden="true">
             <button class="profile-gear-button" type="button" data-open-account-view="settings" aria-label="Settings" title="Settings">
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -774,25 +849,10 @@
 
           <div class="kaposts-header profile-title-row">
             <h1 class="kaposts-title">Profile</h1>
-            <button class="kaposts-icon-button profile-share-button" type="button" data-profile-share aria-label="Share your profile" title="Share your profile">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/></svg>
-            </button>
           </div>
 
           <!-- One of your .kachat names expired and is in its grace period: renew it in time (iOS 6ac48a7). -->
           <div class="kachat-expired-banner" data-kachat-expired-banner hidden></div>
-
-          <!-- The account name right under the title, renamed in place with the pencil (iOS accountNameRow). -->
-          <div class="profile-account-row">
-            <strong class="profile-account-name" data-profile-account-name-text>Current Account</strong>
-            <input class="profile-name-input" data-profile-account-name type="text" value="Current Account" maxlength="48" autocomplete="off" aria-label="Account name" hidden />
-            <button class="profile-account-pencil" type="button" data-profile-account-edit aria-label="Rename account" title="Rename account">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"/><path class="cutout" d="M7.2 16.8l.7-2.9 5.9-5.9 2.2 2.2-5.9 5.9zM14.6 7.2l.9-.9a.9.9 0 0 1 1.3 0l.9.9a.9.9 0 0 1 0 1.3l-.9.9z"/></svg>
-            </button>
-            <button class="profile-account-done" type="button" data-profile-account-done aria-label="Done" title="Done" hidden>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"/><path class="cutout-stroke" d="M7.3 12.3l3.1 3.1 6.3-6.6"/></svg>
-            </button>
-          </div>
 
           <div class="profile-card profile-hero-card">
             <div class="profile-hero-banner" data-profile-hero-banner></div>
@@ -815,53 +875,6 @@
             </div>
           </div>
 
-          <div class="profile-qr-row">
-            <button class="profile-qr-button" type="button" data-profile-qr-trigger>
-              <span class="profile-qr-circle" aria-hidden="true"><svg class="qr-glyph" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M3 3h7.5v7.5H3zm2 2v3.5h3.5V5zM13.5 3H21v7.5h-7.5zm2 2v3.5H19V5zM3 13.5h7.5V21H3zm2 2V19h3.5v-3.5z"/><path d="M13.5 13.5h2.5V16h-2.5zM18.5 13.5H21V16h-2.5zM16 16h2.5v2.5H16zM13.5 18.5h2.5V21h-2.5zM18.5 18.5H21V21h-2.5z"/></svg></span>
-              <span>Receive Kaspa</span>
-            </button>
-            <button class="profile-qr-button" type="button" data-open-chatting-address>
-              <span class="profile-qr-circle" aria-hidden="true"><svg class="qr-glyph" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M3 3h7.5v7.5H3zm2 2v3.5h3.5V5zM13.5 3H21v7.5h-7.5zm2 2v3.5H19V5zM3 13.5h7.5V21H3zm2 2V19h3.5v-3.5z"/><path d="M13.5 13.5h2.5V16h-2.5zM18.5 13.5H21V16h-2.5zM16 16h2.5v2.5H16zM13.5 18.5h2.5V21h-2.5zM18.5 18.5H21V21h-2.5z"/></svg></span>
-              <span>Chatting Address</span>
-            </button>
-          </div>
-
-          <!-- Testnet only (iOS 182ae68, 2a81767): free TN10 coins for the chatting address from the
-               official faucet. It sits behind a Cloudflare check, so it opens in a new tab with the
-               kaspatest: address copied; a balance rise after you come back locks it for 24 h. -->
-          <button class="profile-card testnet-faucet-button" type="button" data-testnet-faucet hidden>
-            <span class="testnet-faucet-icon" data-testnet-faucet-icon aria-hidden="true"></span>
-            <span class="testnet-faucet-copy">
-              <strong>Claim Testnet Kaspa</strong>
-              <small data-testnet-faucet-note>Copies your chatting address and opens the TN10 faucet: paste it, pass the check and claim the most it offers.</small>
-            </span>
-            <svg class="testnet-faucet-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
-          </button>
-
-          <!-- Until this account's backup steps are finished, red once it holds funds; then Backup
-               Hygiene every six months (iOS d063b897 AccountBackupCard, BackupHygieneCard). -->
-          <button class="profile-card account-backup-card" type="button" data-account-backup-card hidden>
-            <span class="account-backup-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.5-3 8.2-7.5 9.5-4.5-1.3-7.5-5-7.5-9.5V6z"/><path class="account-backup-card-mark-owed" d="M12 8.5v4.2M12 15.6v.1"/><path class="account-backup-card-mark-hygiene" d="m8.6 12.2 2.4 2.4 4.4-4.6"/></svg></span>
-            <span class="account-backup-card-copy">
-              <strong data-account-backup-card-title></strong>
-              <small data-account-backup-card-note></small>
-            </span>
-            <svg class="profile-manage-addresses-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
-          </button>
-
-          <!-- One Manage Addresses card (iOS 6333dd3): every address of this account, with the
-               account total (the chatting address and every spending address, hidden ones too,
-               245a5d2). Which address a send comes from is picked on the send screen (From), so
-               Profile no longer splits Chatting from Spending or has a "primary". -->
-          <button class="profile-card profile-manage-addresses" type="button" data-open-spending-manage>
-            <span class="profile-manage-addresses-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M7 9h.01M7 12h.01M7 15h.01M10 9h7M10 12h7M10 15h7"/></svg></span>
-            <span class="profile-manage-addresses-copy">
-              <strong>Manage Addresses</strong>
-              <span class="profile-manage-addresses-total" data-manage-addresses-total><span class="sk-spinner" aria-hidden="true"></span></span>
-            </span>
-            <svg class="profile-manage-addresses-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
-          </button>
-
           <!-- Your Domains: a top-level row rather than a page inside the KNS editor - domains are
                something you own, not a setting of the profile that happens to use one (iOS
                yourDomainsSection). Shown for every account, since the list has an empty state. -->
@@ -874,25 +887,37 @@
             </span>
           </button>
 
+          <!-- The notification center, with its unread count (iOS bfe9f022 notificationsSection). -->
+          <button class="profile-card profile-recovery-row" type="button" data-open-notif-center>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a5.5 5.5 0 0 1 5.5 5.5c0 3.2.8 5 1.8 6.2.4.5.05 1.3-.6 1.3H5.3c-.65 0-1-.8-.6-1.3 1-1.2 1.8-3 1.8-6.2A5.5 5.5 0 0 1 12 4Z"/><path d="M10 19.5a2 2 0 0 0 4 0"/></svg>
+            <span>Notifications</span>
+            <span class="profile-row-trailing">
+              <span class="profile-domains-count" data-notif-count>0</span>
+              <svg viewBox="0 0 8 13" aria-hidden="true"><path d="M1.5 1.5l5 5-5 5"/></svg>
+            </span>
+          </button>
+
+          <!-- The chatting address's QR code, and only that: the balance is Wallet's (iOS bfe9f022). -->
+          <button class="profile-card profile-recovery-row" type="button" data-profile-chatting-address>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 3.5h6.5V10H3.5zM14 3.5h6.5V10H14zM3.5 14H10v6.5H3.5z"/><path d="M14 14h2.5v2.5H14zM18.5 18.5h2V20.5h-2zM14 18.5h2v2h-2zM18.5 14h2v2h-2z"/></svg>
+            <span>Chatting Address</span>
+          </button>
+
+          <button class="profile-card profile-recovery-row" type="button" data-profile-share aria-label="Share your profile">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/></svg>
+            <span>Share Profile</span>
+          </button>
+
           <button class="profile-card profile-recovery-row" type="button" data-open-account-view="settings">
             <span>Settings</span>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.369-.491l1.217.456c.355.133.75.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281Z"/><path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg>
           </button>
 
-          <button class="profile-card profile-recovery-row" type="button" data-open-help-screen>
-            <span>Help</span>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.25"/><path d="M9.7 9.4a2.4 2.4 0 0 1 4.66.8c0 1.6-2.36 2-2.36 3.3"/><circle cx="12" cy="16.8" r=".2"/></svg>
+          <!-- Red, no chevron, last (iOS bfe9f022 logOutSection). -->
+          <button class="profile-card profile-logout-row" type="button" data-shell-action="logout">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H5.75A1.75 1.75 0 0 0 4 5.75v12.5C4 19.22 4.78 20 5.75 20H10"/><path d="M14 8l4 4-4 4"/><path d="M18 12H9"/></svg>
+            <span>Log Out</span>
           </button>
-
-          <p class="profile-section-label">About</p>
-          <div class="profile-card profile-about-card">
-            <div class="profile-about-row"><strong>Created</strong><span data-profile-created>--</span></div>
-            <div class="profile-about-row"><strong>Version</strong><span data-profile-version>--</span></div>
-            <a class="profile-about-row profile-about-link" href="https://home.kachat.app" target="_blank" rel="noopener"><strong>Website</strong><span>home.kachat.app</span></a>
-            <a class="profile-about-row profile-about-link" href="mailto:kaspasilver@gmail.com"><strong>Support Email</strong><span>kaspasilver@gmail.com</span></a>
-            <button class="profile-about-row profile-about-link" type="button" data-profile-donate><strong>Donate</strong><span data-profile-donate-label>kachat.kachat</span></button>
-            <button class="profile-about-row profile-about-link" type="button" data-profile-licenses><strong>Open Source Licenses</strong><span class="profile-row-trailing"><svg viewBox="0 0 8 13" aria-hidden="true"><path d="M1.5 1.5l5 5-5 5"/></svg></span></button>
-          </div>
         </div>
       </section>
     </div>
@@ -904,7 +929,12 @@
         <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24"><path d="M12 2.4 20 5.1v6.2c0 4.6-3.2 8.4-8 10.3-4.8-1.9-8-5.7-8-10.3V5.1Z"/><rect x="9.1" y="11.3" width="5.8" height="4.7" rx="1.2"/><path d="M10.4 11.3v-1.5a1.6 1.6 0 0 1 3.2 0v1.5"/></svg><svg class="tab-glyph-filled" viewBox="0 0 24 24"><defs><mask id="kc-dock-cut-storage" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24"><rect width="24" height="24" fill="#fff"/><rect x="8.9" y="11.1" width="6.2" height="5" rx="1.1" fill="#000"/><path d="M10.2 11.1V9.7a1.8 1.8 0 0 1 3.6 0v1.4" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round"/></mask></defs><path mask="url(#kc-dock-cut-storage)" d="M12 2.2 20.2 5v6.3c0 4.8-3.3 8.7-8.2 10.6C7.1 20 3.8 16.1 3.8 11.3V5Z"/></svg></span>
         <span>Storage</span>
       </button>
-      <button class="sidebar-tab" type="button" data-app-tab="portfolio">
+      <button class="sidebar-tab" type="button" data-app-tab="wallet">
+        <!-- wallet.bifold (iOS bfe9f022 AppTab.wallet). -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24"><rect x="2.75" y="6.5" width="18.5" height="13.75" rx="3"/><path d="M5.2 6.5 14.7 3.7a1.6 1.6 0 0 1 2 1.1l.5 1.7"/><path d="M21.25 11h-4.5a2.5 2.5 0 0 0 0 5h4.5"/></svg><svg class="tab-glyph-filled" viewBox="0 0 24 24"><path d="M6.6 5.1 14.6 2.8a1.9 1.9 0 0 1 2.4 1.3l.3 1Z"/><path d="M5.5 6.3h13a3 3 0 0 1 3 3v1.5h-4.8a2.7 2.7 0 0 0 0 5.4h4.8v1.5a3 3 0 0 1-3 3h-13a3 3 0 0 1-3-3V9.3a3 3 0 0 1 3-3Z"/><path d="M21.5 12.2v2.6h-4.8a1.3 1.3 0 0 1 0-2.6Z"/></svg></span>
+        <span>Wallet</span>
+      </button>
+      <button class="sidebar-tab" type="button" data-app-tab="portfolio" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24"><path d="M21.18 15.9A10 10 0 1 1 8.1 2.82"/><path d="M22 12A10 10 0 0 0 12 2v10Z"/></svg><svg class="tab-glyph-filled" viewBox="0 0 24 24"><path d="M10.6 4.8A8.4 8.4 0 1 0 19 13.2h-8.4Z"/><path d="M12.4 3a8.4 8.4 0 0 1 8.4 8.4h-8.4Z"/></svg></span>
         <span>Portfolio</span>
       </button>
@@ -988,9 +1018,53 @@
         <h2 class="settings-nav-title" data-settings-nav-title hidden></h2>
       </header>
       <!-- Fixed, above the scroll (iOS PinnedListHeader, KaChat-iPhone d063b897); the hub's only: a pushed page has its inline title. -->
+      <button class="account-backup-banner" type="button" data-account-backup-banner hidden>
+        <svg class="account-backup-banner-shield" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l8 3.1v5.8c0 4.8-3.2 8.7-8 9.9-4.8-1.2-8-5.1-8-9.9V5.9z"/><path class="mark" d="M12 8v5M12 16.2v.1"/></svg>
+        <span class="account-backup-banner-copy">
+          <strong>Backup Your Account To Prevent Loss Of Funds</strong>
+          <small data-account-backup-banner-note></small>
+        </span>
+        <svg class="account-backup-banner-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+      </button>
       <h1 class="kaposts-title settings-large-title">Settings</h1>
       <div class="account-overlay-body">
         <section class="app-screen utility-screen settings-screen" data-screen="settings">
+          <!-- Settings > About (iOS d1844582 AccountAboutPage; bfe9f022 took Donate out and added the
+               Privacy Policy). -->
+          <section class="settings-group">
+            <p class="settings-group-label" hidden>About</p>
+            <div class="settings-list-card">
+              <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Created</strong></span><span class="settings-row-value" data-profile-created>--</span></div>
+              <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Version</strong></span><span class="settings-row-value" data-profile-version>--</span></div>
+              <a class="settings-list-row settings-link-row" href="https://home.kachat.app" target="_blank" rel="noopener"><span class="settings-row-copy"><strong>Website</strong></span><span class="settings-row-value">home.kachat.app</span></a>
+              <a class="settings-list-row settings-link-row" href="mailto:kaspasilver@gmail.com"><span class="settings-row-copy"><strong>Support Email</strong></span><span class="settings-row-value">kaspasilver@gmail.com</span></a>
+              <a class="settings-list-row settings-link-row" href="https://home.kachat.app/privacy/" target="_blank" rel="noopener"><span class="settings-row-copy"><strong>Privacy Policy</strong></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></a>
+              <button class="settings-list-row" type="button" data-profile-licenses><span class="settings-row-copy"><strong>Open Source Licenses</strong></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+            </div>
+          </section>
+
+          <!-- Settings > Account Name (iOS d1844582 AccountNamePage): your own label for this account,
+               saved when you leave the page. -->
+          <section class="settings-group">
+            <p class="settings-group-label" hidden>Account Name</p>
+            <div class="settings-list-card">
+              <div class="settings-page-form">
+                <input class="field-input" data-profile-account-name type="text" placeholder="Account name" maxlength="48" autocomplete="off" aria-label="Account name" />
+              </div>
+            </div>
+          </section>
+
+          <!-- Settings > Back Up Account (iOS d1844582 backUpAccountPage; Desktop has no NFC card). -->
+          <section class="settings-group">
+            <p class="settings-group-label" hidden>Back Up Account</p>
+            <div class="settings-list-card" data-settings-complete-backup-card hidden>
+              <button class="settings-list-row" type="button" data-settings-complete-backup><span class="settings-row-icon settings-row-icon-accent settings-row-icon-orange" aria-hidden="true"><svg viewBox="0 0 24 24"><path class="fill" d="M12 2.8l8 3.1v5.8c0 4.8-3.2 8.7-8 9.9-4.8-1.2-8-5.1-8-9.9V5.9z"/><path class="mark" d="M12 8v5M12 16.2v.1"/></svg></span><span class="settings-row-copy"><strong>Complete Your Backup</strong></span></button>
+            </div>
+            <div class="settings-list-card">
+              <button class="settings-list-row" type="button" data-settings-view-words><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="7.25" r="4.5"/><circle cx="12" cy="5.6" r="1"/><path d="M12 11.75v9l1.9-1.6-1.9-1.6 1.9-1.6-1.9-1.6"/></svg></span><span class="settings-row-copy"><strong>View 12 or 24 Words</strong></span></button>
+            </div>
+          </section>
+
           <section class="settings-group">
             <p class="settings-group-label">Customization</p>
             <div class="settings-list-card">
@@ -1120,7 +1194,6 @@
                   <p class="field-hint danger" data-endpoint-error="kasiaIndexer" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">Message indexer service for chat functionality</p>
             <p class="settings-group-label">KaPost Indexer</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
@@ -1130,7 +1203,6 @@
                   <p class="field-hint danger" data-endpoint-error="kapostIndexer" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">K social network indexer that powers KaPost feeds</p>
             <p class="settings-group-label">Public Chats Indexer</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
@@ -1140,7 +1212,6 @@
                   <p class="field-hint danger" data-endpoint-error="broadcastIndexer" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">KaChat public chat history indexer for #kaspa and #kachat-bugs</p>
             <p class="settings-group-label">Push Registration</p>
             <div class="settings-list-card">
               <div class="settings-page-form">
@@ -1150,7 +1221,6 @@
                   <p class="field-hint danger" data-endpoint-error="pushIndexer" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">Used only for push registration and updates</p>
             </div>
             <div class="connection-panel" data-connection-panel="node" hidden>
             <p class="settings-group-label">Kaspa Node</p>
@@ -1164,7 +1234,6 @@
                   <p class="field-hint accent" data-node-choice-note hidden>Connected only to this node</p>
               </div>
             </div>
-            <p class="settings-group-footer">Automatic Scan discovers and connects to the best available nodes. Choosing a specific node connects only to it, without falling back to others. Doesn't affect the indexers, domains or explorer on the other tabs. Add custom addresses to the IP Address Book below to select them here.</p>
             <!-- iOS IP Address Book: label field, address field with a + button, then the rows
                  (click copies the address, trash removes it). -->
             <p class="settings-group-label">IP Address Book</p>
@@ -1179,7 +1248,6 @@
               </div>
               <div class="saved-node-list" data-saved-nodes-list></div>
             </div>
-            <p class="settings-group-footer">Save your own node addresses here, then choose one under Kaspa Node above. KaChat in a browser over https can only use a node's wss:// address with a certificate (for example wss://node.example.com); a node's own port such as host:17110 works only on a KaChat you open over http on your own computer or network.</p>
             </div>
             <div class="connection-panel" data-connection-panel="translation" hidden>
             <p class="settings-group-label">Translation Service</p>
@@ -1191,7 +1259,6 @@
                   <p class="field-hint danger" data-endpoint-error="translationService" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">Translates KaPost posts written in another language. Runs on the KaPost indexer's box by default; point this at your own if you host one (see TRANSLATION_SERVICE.md).</p>
             </div>
             <div class="connection-panel" data-connection-panel="domains" hidden>
             <!-- .kachat first: it is what every address field resolves before anything else (iOS 6ac48a7). -->
@@ -1214,7 +1281,6 @@
                   </div>
               </div>
             </div>
-            <p class="settings-group-footer">Where .kachat names and profiles are read. Point it at your own indexer if you run one. If it can't serve names, they are read straight from the chain. Resolved first, everywhere you can type an address.</p>
             <p class="settings-group-label">Other Domains</p>
             <div class="settings-list-card">
               <!-- Shown, not editable (iOS domainsSections): .kas follows the network. -->
@@ -1224,7 +1290,6 @@
                 <div class="connection-readonly"><span>.kaspa</span><code>https://kaspaname.com/v1</code></div>
               </div>
             </div>
-            <p class="settings-group-footer">Looked up after .kachat, and listed under Other domains when a typed name also exists there.</p>
             </div>
             <div class="connection-panel" data-connection-panel="explorer" hidden>
             <p class="settings-group-label">Kaspa Explorer API</p>
@@ -1236,7 +1301,6 @@
                   <p class="field-hint danger" data-endpoint-error="kaspaApi" hidden></p>
               </div>
             </div>
-            <p class="settings-group-footer">REST API for transaction history and balance lookups</p>
             </div>
           </section>
 
@@ -1246,7 +1310,6 @@
                   <button class="settings-dropdown-row settings-select-row" type="button" data-explorer-option="kaspaStream">kaspa.stream</button>
                   <button class="settings-dropdown-row settings-select-row" type="button" data-explorer-option="kaspaOrg">explorer.kaspa.org</button>
             </div>
-            <p class="settings-group-footer">Used to build "view transaction" links throughout the app.</p>
           </section>
 
           <section class="settings-group">
@@ -1256,7 +1319,6 @@
             <div class="settings-list-card">
               <div class="settings-toggle-row"><span><strong>Push Notifications</strong></span><label class="switch-control"><input type="checkbox" data-pref-chat-notifications checked><span></span></label></div>
             </div>
-            <p class="settings-group-footer" data-push-notifications-footer>Everything you have switched on below can reach you, even when the app is closed. Turning this off silences all of it.</p>
             <!-- Closed-app notifications (Web Push, ui/web-push.js): on / needs Add to Home Screen /
                  not on this server yet. The button asks the browser (a prompt needs a tap). -->
             <p class="settings-group-footer" data-web-push-status role="status">Notifications when KaChat is closed: connecting...</p>
@@ -1284,10 +1346,7 @@
                   <div class="settings-toggle-row"><span><strong>Play sound</strong></span><label class="switch-control"><input type="checkbox" data-pref-notification-sound checked><span></span></label></div>
               </div>
             </div>
-            <p class="settings-group-footer">Used when a contact has no custom notification mode set.</p>
             <p class="settings-group-footer notif-phone-hint" data-notif-phone-hint hidden>On iPhone and iPad, notifications work once KaChat is added to your Home Screen (Share &gt; Add to Home Screen) and allowed when asked.</p>
-            <p class="settings-group-label">Per Contact</p>
-            <div class="settings-list-card"><div class="settings-list-row settings-info-row"><span class="settings-row-copy"><small>Set per-contact notification mode in each chat's info screen: Off, No Sound, or Sound.</small></span></div></div>
           </section>
 
           <section class="settings-group" data-settings-subscreen="notifications-wallet">
@@ -1297,7 +1356,6 @@
                   <div class="settings-toggle-row"><span><strong>Address Activity</strong></span><label class="switch-control"><input type="checkbox" data-pref-address-activity checked><span></span></label></div>
               </div>
             </div>
-            <p class="settings-group-footer">Notify when any of your spending or cold storage addresses receives Kaspa from an external source. Transfers between your own addresses are ignored.</p>
           </section>
 
           <section class="settings-group" data-settings-subscreen="notifications-kaposts">
@@ -1318,8 +1376,7 @@
           <section class="settings-group">
             <p class="settings-group-label">Chats</p>
             <div class="settings-list-card">
-              <!-- iOS SettingsView chatsPage: the photo-approval switch, then Quick Reactions with its six emojis trailing. -->
-              <div class="settings-toggle-row"><span><strong>Require approval for photos from new contacts</strong></span><label class="switch-control"><input type="checkbox" data-pref-photo-approval checked><span></span></label></div>
+              <!-- iOS SettingsView chatsPage: Quick Reactions with its six emojis trailing. -->
               <button class="settings-list-row" type="button" data-open-quick-reactions><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><circle class="fill" cx="12" cy="12" r="9.5"/><circle cx="9" cy="10" r="1.1" fill="var(--sheet-row, #2c2c2e)" stroke="none"/><circle cx="15" cy="10" r="1.1" fill="var(--sheet-row, #2c2c2e)" stroke="none"/><path d="M8.6 14a4 4 0 0 0 6.8 0" stroke="var(--sheet-row, #2c2c2e)"/></svg></span><span class="settings-row-copy"><strong>Quick Reactions</strong></span><span class="settings-dropdown-caption" data-quick-reactions-preview>👍❤️😂😮😢🙏</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
             </div>
           </section>
@@ -1342,14 +1399,12 @@
               </label>
               <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><small data-local-storage-used>Local storage used: Unknown</small></span></div>
             </div>
-            <p class="settings-group-footer">How long messages are kept on this device, and how much space they use. Applies before any cloud storage.</p>
             <!-- Your own data, not cache (iOS cda0d99): photos you assigned in Contacts. Kept
                  apart from Cache, whose "clear" must never delete anything you'd miss. -->
             <div class="settings-list-card">
               <div class="settings-list-row settings-info-row"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><circle cx="8.5" cy="9.9" r="2.2"/><path d="M5.1 16.4c.5-1.9 1.8-2.9 3.4-2.9s2.9 1 3.4 2.9"/><path d="M14.5 10h4M14.5 14h4"/></svg></span><span class="settings-row-copy"><strong>Contact Photos</strong></span><span class="settings-row-value" data-address-book-photos-size>…</span></div>
               <button class="settings-list-row danger-row" type="button" data-address-book-photos-remove hidden><span class="settings-row-copy"><strong>Remove Contact Photos</strong></span></button>
             </div>
-            <p class="settings-group-footer">Photos you assigned to contacts, for every wallet on this device. They're kept until you remove them, and they're included in your chat backup.</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="cache">
                 <span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4.5 6h15M9.5 6V4.2h5V6M6.5 6l.9 14.3h9.2L17.5 6"/><path d="M10 9.5v8M12 9.5v8M14 9.5v8"/></svg></span>
@@ -1357,7 +1412,11 @@
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
             </div>
-            <p class="settings-group-footer">Images and files the app can always download again. Clearing them frees space and loses nothing.</p>
+            <p class="settings-group-label">Chat History</p>
+            <div class="settings-list-card">
+              <button class="settings-list-row settings-action-row" type="button" data-shell-action="export-history"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8.5 9.5H7a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 17 9.5h-1.5"/><path d="M12 14.5V3M8.5 6.5 12 3l3.5 3.5"/></svg></span><span class="settings-row-copy"><strong>Export Chat History</strong></span></button>
+              <button class="settings-list-row settings-action-row" type="button" data-shell-action="import-history"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8.5 9.5H7a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 17 9.5h-1.5"/><path d="M12 4v10.5M8.5 11 12 14.5l3.5-3.5"/></svg></span><span class="settings-row-copy"><strong>Import Chat History</strong></span></button>
+              <input type="file" accept=".json,application/json" hidden data-chat-history-file />            </div>
             <p class="settings-group-label">Cloud Storage</p>
             <div class="settings-list-card">
               <button class="settings-list-row" type="button" data-settings-open-subscreen="nextcloud">
@@ -1366,8 +1425,6 @@
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
             </div>
-            <!-- iOS: "...Nothing is stored in iCloud." The browser has no iCloud; the rest is iOS's sentence. -->
-            <p class="settings-group-footer">Your own Nextcloud server is the only place messages sync to.</p>
           </section>
 
           <!-- Storage sub-screens. -->
@@ -1376,7 +1433,6 @@
             <div class="settings-list-card">
               <div class="settings-list-row settings-info-row cache-total-row"><strong>Total</strong><strong data-cache-total>…</strong></div>
             </div>
-            <p class="settings-group-footer">Everything here is downloaded or generated again when it is needed, so clearing it costs a little data and nothing else.</p>
             <p class="settings-group-label">What's Cached</p>
             <div class="settings-list-card" data-cache-list></div>
             <div class="settings-list-card danger-list-card">
@@ -1393,23 +1449,13 @@
           </section>
 
           <section class="settings-group">
-            <p class="settings-group-label">Chat History</p>
-            <div class="settings-list-card">
-              <button class="settings-list-row settings-action-row" type="button" data-shell-action="export-history"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8.5 9.5H7a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 17 9.5h-1.5"/><path d="M12 14.5V3M8.5 6.5 12 3l3.5 3.5"/></svg></span><span class="settings-row-copy"><strong>Export Chat History</strong></span></button>
-              <button class="settings-list-row settings-action-row" type="button" data-shell-action="import-history"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8.5 9.5H7a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 17 9.5h-1.5"/><path d="M12 4v10.5M8.5 11 12 14.5l3.5-3.5"/></svg></span><span class="settings-row-copy"><strong>Import Chat History</strong></span></button>
-              <input type="file" accept=".json,application/json" hidden data-chat-history-file />            </div>
-          </section>
-
-          <section class="settings-group">
             <p class="settings-group-label">Diagnostics</p>
             <div class="settings-list-card">
-              <!-- iOS diagnosticsPage: the explanation sits inside the row, under the button. -->
-              <button class="settings-list-row settings-action-row diagnostics-export-row" type="button" data-shell-action="diagnostics-export"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path class="fill" d="M9.2 6.6a2.8 2.4 0 0 1 5.6 0z"/><path d="M9.6 4.4 8.6 3.3M14.4 4.4l1-1.1"/><path class="fill" d="M7.3 8h9.4c.9 1.2 1.3 2.8 1.3 4.6 0 4-2.6 7.2-6 7.2s-6-3.2-6-7.2c0-1.8.4-3.4 1.3-4.6z"/><path d="M4 10.5h2.4M17.6 10.5H20M4 14.5h2.2M17.8 14.5H20M5 18.5l1.9-1.4M19 18.5l-1.9-1.4"/><path d="M12 8.5v11" stroke="var(--sheet-row, #2c2c2e)"/></svg></span><span class="settings-row-copy"><strong>Export Diagnostics Archive</strong></span><small class="diagnostics-export-note">Exports app/device info, connection settings, local message counts, and recent app logs as a zip - for troubleshooting with support. No private keys, seed phrases, or decrypted message content are included.</small></button>
+              <button class="settings-list-row settings-action-row diagnostics-export-row" type="button" data-shell-action="diagnostics-export"><span class="settings-row-icon settings-row-icon-accent" aria-hidden="true"><svg viewBox="0 0 24 24"><path class="fill" d="M9.2 6.6a2.8 2.4 0 0 1 5.6 0z"/><path d="M9.6 4.4 8.6 3.3M14.4 4.4l1-1.1"/><path class="fill" d="M7.3 8h9.4c.9 1.2 1.3 2.8 1.3 4.6 0 4-2.6 7.2-6 7.2s-6-3.2-6-7.2c0-1.8.4-3.4 1.3-4.6z"/><path d="M4 10.5h2.4M17.6 10.5H20M4 14.5h2.2M17.8 14.5H20M5 18.5l1.9-1.4M19 18.5l-1.9-1.4"/><path d="M12 8.5v11" stroke="var(--sheet-row, #2c2c2e)"/></svg></span><span class="settings-row-copy"><strong>Export Diagnostics Archive</strong></span></button>
             </div>
             <div class="settings-list-card">
               <div class="settings-toggle-row"><span><strong>Verbose API Logging</strong></span><label class="switch-control"><input type="checkbox" data-pref-verbose-api-logging><span></span></label></div>
             </div>
-            <p class="settings-group-footer">Logs every indexer request with full connection and timing detail. Leave off for normal use: failed and slow requests are always logged, and heavy logging slows the app down.</p>
           </section>
 
 
@@ -1574,6 +1620,7 @@
           <p class="settings-group-label">Actions</p>
           <div class="settings-list-card">
             <button class="settings-list-row settings-action-row" type="button" data-connection-reconnect><span class="settings-row-copy"><strong>Reconnect</strong></span></button>
+            <button class="settings-list-row" type="button" data-connection-open-settings><span class="settings-row-copy"><strong>Connection Settings</strong></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
           </div>
           <p class="settings-group-footer" data-connection-primary-footer hidden></p>
         </section>
@@ -1589,7 +1636,6 @@
             </label>
             <div class="settings-list-row settings-info-row node-choice-note-row" data-node-choice-note-row hidden><small class="field-hint accent" data-node-choice-note>Connected only to this node</small></div>
           </div>
-          <p class="settings-group-footer">Automatic Scan discovers and connects to the best available nodes. Choosing a specific node connects only to it, without falling back to others. Manage saved addresses in Settings &gt; Connection Settings &gt; IP Address Book.</p>
         </section>
       </div>
     </div>
@@ -1663,23 +1709,9 @@
            then the passphrase wizard, which commits the account. Create New Account makes one with no
            passphrase in a tap; neither shows the seed phrase (Profile's card leads to the backup steps). -->
       <div data-create-step="passphrase">
-      <div data-create-passphrase-screen="question">
-        <div class="passphrase-question">
-          <span class="passphrase-question-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.5-3 8.2-7.5 9.5-4.5-1.3-7.5-5-7.5-9.5V6L12 3Z"/><rect x="9.2" y="11" width="5.6" height="4.4" rx="1"/><path d="M10.4 11V9.8a1.6 1.6 0 0 1 3.2 0V11"/></svg></span>
-          <h3 class="passphrase-question-title">Do you want to add a passphrase to your account?</h3>
-          
-        </div>
-        <div class="modal-actions passphrase-actions">
-          <button class="primary-button full" type="button" data-create-passphrase-yes>Yes</button>
-          <button class="secondary-button full passphrase-no" type="button" data-create-passphrase-no>No</button>
-          <button class="linklike-button full" type="button" data-create-passphrase-explain>What is a passphrase?</button>
-          <button class="secondary-button full" type="button" data-create-passphrase-question-back>Back</button>
-        </div>
-      </div>
-
       <div data-create-passphrase-screen="entry" hidden>
         <h3 class="passphrase-entry-title">Choose your passphrase</h3>
-        <p class="field-hint">Write it down somewhere safe. Without it this account cannot be recovered, even with your seed phrase.</p>
+        <p class="field-hint">Write it down somewhere safe. Without it this account cannot be recovered, even with your 12 or 24 words.</p>
         <!-- iOS passphraseFields: no labels, placeholders, one eye for both fields. -->
         <span class="passphrase-field">
           <input class="field-input" type="password" data-create-passphrase placeholder="Passphrase" aria-label="Passphrase" autocomplete="off" />
@@ -1691,27 +1723,12 @@
           <p class="passphrase-preview-address" data-passphrase-preview-address>Checking...</p>
           <p class="passphrase-preview-balance-row"><span>Balance</span> <strong data-passphrase-preview-balance></strong></p>
           <p class="passphrase-preview-verdict" data-passphrase-preview-verdict hidden></p>
-          <p class="passphrase-preview-note" data-passphrase-preview-note>This is the account your seed phrase opens on its own.</p>
+          <p class="passphrase-preview-note" data-passphrase-preview-note>This is the account your 12 or 24 words open on their own.</p>
         </div>
         <p class="field-error" data-create-passphrase-error hidden></p>
         <div class="modal-actions passphrase-actions">
           <button class="primary-button full" type="button" data-create-passphrase-submit>Continue</button>
           <button class="secondary-button full" type="button" data-create-passphrase-back>Back</button>
-        </div>
-      </div>
-
-      <div data-create-passphrase-screen="explainer" hidden>
-        <h3 class="create-step-title">What is a passphrase?</h3>
-        <div class="passphrase-explainer">
-          <section><h4>The short version</h4><p>A passphrase is an extra word or sentence you add on top of your seed phrase. It is optional, and most people do not use one.</p></section>
-          <section><h4>It does not lock your account</h4><p>This is the part people get wrong. A passphrase does not put a password on your account. It opens a completely different account. Your seed phrase with no passphrase opens one account. The same seed phrase with the word &quot;apple&quot; opens another one. With &quot;banana&quot;, another one again. Every passphrase is its own separate account, with its own address and its own balance.</p></section>
-          <section><h4>Why anyone bothers</h4><p>If someone finds your written seed phrase, they get the account it opens on its own. They do not get the one behind your passphrase, because they do not know there is one, and they could not guess it anyway.</p></section>
-          <section><h4>The catch</h4><p>There is no reset and no recovery. If you forget your passphrase, the account it opened is gone for good. Your seed phrase alone will not bring it back, and nobody can help you. Treat it exactly like the seed phrase itself: written down, somewhere safe, before you rely on it.</p></section>
-          <section><h4>One more thing to know</h4><p>If you type the wrong passphrase, nothing will tell you. You will simply land in a different account, and it will look empty. That is not a bug and your money is not lost - it just means you are in the wrong account.</p></section>
-          <section><h4>So do you need one?</h4><p>If you are not sure, choose No. Your account is still protected by your seed phrase, and you can always create another account with a passphrase later.</p></section>
-        </div>
-        <div class="modal-actions passphrase-actions">
-          <button class="secondary-button full" type="button" data-create-passphrase-explain-back>Back</button>
         </div>
       </div>
       </div>
@@ -1769,8 +1786,8 @@
 
       <div data-import-step="source" hidden>
         <span class="import-source-header-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M3 9.5h18M15.5 14h2.5"/></svg></span>
-        <h3 class="passphrase-question-title import-source-title">Where is this seed phrase from?</h3>
-        <p class="field-hint">Different wallets store your Kaspa on different address paths. Pick where this seed phrase comes from so KaChat finds your funds and domains.</p>
+        <h3 class="passphrase-question-title import-source-title">Where are your 12 or 24 words from?</h3>
+        <p class="field-hint">Different wallets store your Kaspa on different address paths. Pick where these words come from so KaChat finds your funds and domains.</p>
         <div class="import-source-list" data-import-source-list></div>
         <div class="modal-actions">
           <button class="secondary-button" type="button" data-close-import-account>Cancel</button>
@@ -1791,9 +1808,9 @@
       </div>
 
       <div data-import-step="length" hidden>
-        <h3 class="create-step-title">Choose seed phrase length</h3>
-        <p class="create-step-note">How many words is the seed phrase you're importing?</p>
-        <div class="seed-length-buttons" role="radiogroup" aria-label="Seed phrase length">
+        <h3 class="create-step-title">Choose 12 or 24 words</h3>
+        <p class="create-step-note">How many words are you importing?</p>
+        <div class="seed-length-buttons" role="radiogroup" aria-label="Choose 12 or 24 words">
           <button type="button" class="seed-length-button" role="radio" aria-checked="false" data-import-word-count="12">
             <span class="seed-length-check" aria-hidden="true"></span>12 words
           </button>
@@ -1809,7 +1826,7 @@
 
       <div data-import-step="form" hidden>
         <div class="seed-entry-head">
-          <span class="field-hint">Enter your recovery phrase</span>
+          <span class="field-hint">Enter your 12 or 24 words</span>
           <button class="cold-inline-link" type="button" data-import-seed-paste>Paste</button>
           <span class="seed-entry-count" data-import-seed-count>0/24</span>
         </div>
@@ -1826,7 +1843,7 @@
       <div data-import-passphrase-screen="question">
         <div class="passphrase-question">
           <span class="passphrase-question-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.5-3 8.2-7.5 9.5-4.5-1.3-7.5-5-7.5-9.5V6L12 3Z"/><rect x="9.2" y="11" width="5.6" height="4.4" rx="1"/><path d="M10.4 11V9.8a1.6 1.6 0 0 1 3.2 0V11"/></svg></span>
-          <h3 class="passphrase-question-title">Did you create this seed with a passphrase?</h3>
+          <h3 class="passphrase-question-title">Did you create these words with a passphrase?</h3>
           <p class="passphrase-question-steer">If you are not sure, the answer is almost certainly no. A passphrase is something you would have typed in on purpose.</p>
         </div>
         <div class="modal-actions passphrase-actions">
@@ -1850,7 +1867,7 @@
           <p class="passphrase-preview-balance-row"><span>Balance</span> <strong data-passphrase-preview-balance></strong></p>
           <p class="passphrase-preview-verdict" data-passphrase-preview-verdict hidden></p>
           <div class="passphrase-found" data-passphrase-preview-found hidden></div>
-          <p class="passphrase-preview-note" data-passphrase-preview-note>This is the account your seed phrase opens on its own.</p>
+          <p class="passphrase-preview-note" data-passphrase-preview-note>This is the account your 12 or 24 words open on their own.</p>
         </div>
         <p class="field-error" data-import-passphrase-error hidden></p>
         <div class="modal-actions passphrase-actions">
@@ -1862,10 +1879,10 @@
       <div data-import-passphrase-screen="explainer" hidden>
         <h3 class="create-step-title">What is a passphrase?</h3>
         <div class="passphrase-explainer">
-          <section><h4>The short version</h4><p>A passphrase is an extra word or sentence you add on top of your seed phrase. It is optional, and most people do not use one.</p></section>
-          <section><h4>It does not lock your account</h4><p>This is the part people get wrong. A passphrase does not put a password on your account. It opens a completely different account. Your seed phrase with no passphrase opens one account. The same seed phrase with the word &quot;apple&quot; opens another one. With &quot;banana&quot;, another one again. Every passphrase is its own separate account, with its own address and its own balance.</p></section>
-          <section><h4>Why anyone bothers</h4><p>If someone finds your written seed phrase, they get the account it opens on its own. They do not get the one behind your passphrase, because they do not know there is one, and they could not guess it anyway.</p></section>
-          <section><h4>The catch</h4><p>There is no reset and no recovery. If you forget your passphrase, the account it opened is gone for good. Your seed phrase alone will not bring it back, and nobody can help you. Treat it exactly like the seed phrase itself: written down, somewhere safe, before you rely on it.</p></section>
+          <section><h4>The short version</h4><p>A passphrase is an extra word or sentence you add on top of your 12 or 24 words. It is optional, and most people do not use one.</p></section>
+          <section><h4>It does not lock your account</h4><p>This is the part people get wrong. A passphrase does not put a password on your account. It opens a completely different account. Your 12 or 24 words with no passphrase open one account. The same words with the word &quot;apple&quot; opens another one. With &quot;banana&quot;, another one again. Every passphrase is its own separate account, with its own address and its own balance.</p></section>
+          <section><h4>Why anyone bothers</h4><p>If someone finds your written 12 or 24 words, they get the account those words open on their own. They do not get the one behind your passphrase, because they do not know there is one, and they could not guess it anyway.</p></section>
+          <section><h4>The catch</h4><p>There is no reset and no recovery. If you forget your passphrase, the account it opened is gone for good. Your 12 or 24 words alone will not bring it back, and nobody can help you. Treat it exactly like the words themselves: written down, somewhere safe, before you rely on it.</p></section>
           <section><h4>One more thing to know</h4><p>If you type the wrong passphrase, nothing will tell you. You will simply land in a different account, and it will look empty. That is not a bug and your money is not lost - it just means you are in the wrong account.</p></section>
           <section><h4>So do you need one?</h4><p>If you never set one up, choose No. A passphrase is something you would have typed in on purpose, so if this is the first you are hearing of it, you do not have one.</p></section>
         </div>
@@ -1905,15 +1922,15 @@
   </div>
 
   <div class="modal-backdrop" data-recovery-modal hidden>
-    <section class="contact-modal recovery-modal recovery-hold-modal" role="dialog" aria-modal="true" aria-label="Seed phrase">
-      <h2 class="recovery-title">Seed Phrase</h2>
+    <section class="contact-modal recovery-modal recovery-hold-modal" role="dialog" aria-modal="true" aria-label="12 or 24 words">
+      <h2 class="recovery-title">12 or 24 Words</h2>
       <button class="modal-close recovery-close" type="button" data-close-recovery aria-label="Close">×</button>
-      <div class="security-warning-card"><strong>Security Warning</strong><p class="field-hint">Anyone with your seed phrase can access your account. Never share it with anyone.</p><p class="field-hint">Best practice is to write your seed phrase down to back it up, and never store it online.</p></div>
+      <div class="security-warning-card"><strong>Security Warning</strong><p class="field-hint">Anyone with your 12 or 24 words can access your account. Never share them with anyone.</p><p class="field-hint">Best practice is to write your 12 or 24 words down to back them up, and never store it online.</p></div>
       <p class="recovery-passphrase-note" data-recovery-passphrase-note hidden>This wallet also uses a passphrase. You need it together with these words to restore it.</p>
 
-      <button class="recovery-hold-target" type="button" data-reveal-recovery aria-label="Tap to reveal seed phrase">
+      <button class="recovery-hold-target" type="button" data-reveal-recovery aria-label="Tap to reveal your 12 or 24 words">
         <img class="recovery-eye-icon" src="./ui/assets/seed-eye-hidden.png" alt="" aria-hidden="true">
-        <span class="recovery-hold-label">Tap to reveal seed phrase</span>
+        <span class="recovery-hold-label">Tap to reveal your 12 or 24 words</span>
         <span class="recovery-progress-track" aria-hidden="true">
           <span class="recovery-progress-fill" data-recovery-progress></span>
         </span>
@@ -1922,7 +1939,7 @@
       <div class="recovery-phrase-box recovery-phrase-grid-box" data-recovery-phrase hidden></div>
 
       <div class="modal-actions recovery-actions">
-        <button class="secondary-button" type="button" data-copy-seed-phrase hidden>Copy Seed Phrase</button>
+        <button class="secondary-button" type="button" data-copy-seed-phrase hidden>Copy 12 or 24 Words</button>
         <button class="secondary-button" type="button" data-copy-seed-privatekey hidden>Copy Private Key Hex</button>
         <button class="primary-button" type="button" data-close-recovery>Done</button>
       </div>
@@ -2303,15 +2320,17 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
         </button>
         <span class="chatting-address-balance" data-chatting-address-balance>-- KAS</span>
-        <span class="chatting-address-header-spacer" aria-hidden="true"></span>
+        <!-- Receive Kaspa (iOS bfe9f022 WalletView): titled, with Done, and no balance. -->
+        <span class="chatting-address-balance" data-chatting-address-title hidden></span>
+        <span class="chatting-address-header-spacer" data-chatting-address-spacer aria-hidden="true"></span>
+        <button class="linklike-button chatting-address-done" type="button" data-chatting-address-done hidden>Done</button>
       </header>
-      <p class="receive-backup-reminder" data-receive-backup-reminder hidden>This account isn't backed up yet. Use the card on the Profile tab to back it up.</p>
       <div class="chatting-address-body">
         <div class="chatting-address-qr-frame">
           <canvas width="512" height="512" data-chatting-address-qr></canvas>
         </div>
         <p class="chatting-address-value" data-chatting-address-value>No wallet loaded</p>
-        <p class="chatting-address-subtitle" data-chatting-address-subtitle>This address should be for chatting and domains only. 1 Kaspa is enough for about 500 interactions in the app. Domains cost from 35 to 4,000 Kaspa, depending on the name.</p>
+        <p class="chatting-address-subtitle" data-chatting-address-subtitle>Use for chatting and acquiring .kachat domains.</p>
         <p class="qr-tap-hint">Tap anywhere to copy</p>
         <!-- Receive Kaspa while its fresh address is being decided, or when it can't be (iOS ReceiveKaspaQRView) -->
         <div class="chatting-address-status" data-chatting-address-status hidden>
@@ -2511,12 +2530,10 @@
         <button type="button" data-open-spending-visibility hidden aria-hidden="true"></button>
         <span class="chatting-address-header-spacer" aria-hidden="true"></span>
       </header>
-      <!-- Total, then the actions button directly under it (iOS accountSummary): the actions
-           are about this account, so they sit with the account rather than pinned over the list. -->
+      <!-- Total (iOS accountSummary); its actions are the floating button below (iOS d1844582). -->
       <div class="spending-total" data-spending-total-block>
         <span>Total Balance</span>
         <strong data-spending-total-balance>-- KAS</strong>
-        <button type="button" class="address-actions-pill spending-actions-pill" data-spending-actions-toggle>Address Actions</button>
       </div>
       <!-- The spending addresses' own receive switch, per wallet (iOS ba352a2); Settings > Address
            Activity stays the master. Under the total, above the chatting address (iOS order). -->
@@ -2528,6 +2545,9 @@
         <button type="button" data-spending-generate hidden></button>
         <button type="button" data-spending-scan hidden></button>
       </div>
+      <button type="button" class="spending-actions-fab" data-spending-actions-toggle aria-label="Address Actions">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h11M18 6h3M3 12h3M10 12h11M3 18h9M16 18h5"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></svg>
+      </button>
     </div>
   </div>
 
@@ -2556,11 +2576,13 @@
             <span class="hub-tile-icon spending-visibility-chain-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2.2 4 5.3v6.2c0 5 3.4 9.3 8 10.5 4.6-1.2 8-5.5 8-10.5V5.3Z"/></svg></span>
             <span class="spending-visibility-chain-name">Quantum Addresses</span>
             <span class="spending-visibility-chain-count" data-spending-vis-count="quantum"></span>
+            <span class="spending-visibility-chain-balance" data-spending-vis-balance="quantum"></span>
           </button>
           <button type="button" class="hub-tile spending-visibility-chain-tile" data-spending-vis-chain="legacy">
             <span class="hub-tile-icon spending-visibility-chain-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="7" cy="7" r="4.6"/><circle cx="17" cy="7" r="4.6"/><circle cx="7" cy="17" r="4.6"/><circle cx="17" cy="17" r="4.6"/></svg></span>
             <span class="spending-visibility-chain-name">Non-Quantum Addresses</span>
             <span class="spending-visibility-chain-count" data-spending-vis-count="legacy"></span>
+            <span class="spending-visibility-chain-balance" data-spending-vis-balance="legacy"></span>
           </button>
         </div>
         <div class="manage-address-list spending-visibility-list" data-spending-visibility-list hidden></div>
@@ -2667,7 +2689,7 @@
       </header>
       <span class="chatting-picker-header-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><circle cx="8.5" cy="10.5" r="2"/><path d="M5.5 16c.6-1.6 1.6-2.4 3-2.4s2.4.8 3 2.4M14 9.5h4M14 13h4"/></svg></span>
       <h3 class="chatting-picker-title">Choose Your Chatting Address</h3>
-      <p class="spending-manage-subtitle">If this seed already holds your identity at a different address - a domain (.kachat, .kas, .k or .kaspa) or a funded chatting balance - pick it here. Only addresses with a balance or domains are shown.</p>
+      <p class="spending-manage-subtitle">If these words already hold your identity at a different address - a domain (.kachat, .kas, .k or .kaspa) or a funded chatting balance - pick it here. Only addresses with a balance or domains are shown.</p>
       <div class="manage-address-body">
         <div class="manage-address-list chatting-picker-list" data-chatting-picker-list></div>
         <p class="field-error chatting-picker-error" data-chatting-picker-error hidden></p>
@@ -2699,7 +2721,7 @@
       <div class="modal-header">
         <div><h2>Switch Chatting Address?</h2></div>
       </div>
-      <p class="field-hint">This seed already has conversations on the current chatting address. Switching starts fresh with the new address. Your existing conversations stay with the old address and are not deleted.</p>
+      <p class="field-hint">These words already have conversations on the current chatting address. Switching starts fresh with the new address. Your existing conversations stay with the old address and are not deleted.</p>
       <div class="modal-actions">
         <button class="secondary-button" type="button" data-chatting-picker-confirm-cancel>Cancel</button>
         <button class="primary-button" type="button" data-chatting-picker-confirm-switch>Switch</button>
@@ -2838,7 +2860,7 @@
         <span class="password-field"><input class="field-input" type="password" name="password-confirm" data-password-confirm autocomplete="new-password" /><button class="password-reveal" type="button" data-password-reveal aria-label="Show password" aria-pressed="false"><svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-closed" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"/><path d="M10.6 5.6A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3.2 4.1M6.6 6.6A17 17 0 0 0 2.5 12s3.5 6.5 9.5 6.5c1.6 0 3-.4 4.3-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg></button></span>
       </label>
       <p class="field-error" data-password-error hidden></p>
-      <button class="linklike-button" type="button" data-password-forgot hidden>Forgot password? You'll need your recovery phrase.</button>
+      <button class="linklike-button" type="button" data-password-forgot hidden>Forgot password? You'll need your 12 or 24 words.</button>
       <button class="linklike-button" type="button" data-password-biometric-off hidden>Turn off biometric unlock</button>
       <div class="modal-actions">
         <button class="secondary-button" type="button" data-password-cancel>Cancel</button>
@@ -2912,6 +2934,9 @@
         <button class="chat-info-header-button accent" type="button" data-chat-info-save>Save</button>
       </header>
       <div class="account-overlay-body">
+        <!-- This person's kachat.app profile link, the same link-only share your own Profile uses
+             (iOS 95c3760). A round button at the top, not a row (iOS d1844582 shareButton). -->
+        <button class="chat-info-share-button" type="button" data-chat-info-share aria-label="Share this profile" title="Share this profile"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/></svg></button>
         <div class="profile-card chat-info-header-card">
           <!-- The contact's KNS banner, bled to the card's edges (iOS ChatInfoView's header
                section leads with it when the profile has one). -->
@@ -2956,7 +2981,7 @@
         <!-- One row per section, each opening its own sheet (iOS's infoCard list). The screen had
              grown to six stacked blocks - a QR, a domain list, two alias reveals, two pickers and
              a stats card - which is a lot of scrolling to reach any one of them. -->
-        <div class="settings-list-card chat-info-rows">
+        <div class="settings-list-card chat-info-rows" data-chat-info-rows>
           <!-- The way into the 1:1 chat when Info was opened from a group member or a room sender (iOS ChatInfoView). -->
           <button class="chat-info-row" type="button" data-chat-info-open-chat>
             <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 3z"/></svg>
@@ -2995,35 +3020,32 @@
             <span class="chat-info-row-title">Notifications</span>
             <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
           </button>
-          <button class="chat-info-row" type="button" data-chat-info-sheet="photos">
-            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.5-2h7L16 8h4v11H4z"/><circle cx="12" cy="13" r="3.3"/></svg>
-            <span class="chat-info-row-title">Photos</span>
-            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
-          </button>
-          <button class="chat-info-row" type="button" data-chat-info-sheet="calls" data-chat-info-calls-row>
-            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.4 11.4 0 0 0 .6 3.6 1 1 0 0 1-.25 1z"/></svg>
-            <span class="chat-info-row-title">Calls</span>
-            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
-          </button>
-          <button class="chat-info-row" type="button" data-chat-info-sheet="info">
-            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
-            <span class="chat-info-row-title">Info</span>
-            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
-          </button>
-          <!-- Rescan Profile and Share come last, as iOS's rescanCard / shareCard. -->
-          <!-- Rescan Profile (iOS bc95d17): the avatar, banner and bio looked up again now; they refresh
-               by themselves every 5 days, this is for someone who just changed theirs. -->
-          <button class="chat-info-row" type="button" data-chat-info-rescan aria-label="Rescan Profile">
-            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v4.5h-4.5"/></svg>
-            <span class="chat-info-row-title">Rescan Profile</span>
-            <span class="sk-spinner chat-info-rescan-spinner" data-chat-info-rescan-spinner aria-hidden="true" hidden></span>
-          </button>
-          <!-- This person's kachat.app profile link, the same link-only share your own Profile uses (iOS 95c3760). -->
-          <button class="chat-info-row" type="button" data-chat-info-share aria-label="Share this profile">
-            <svg class="chat-info-row-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/></svg>
-            <span class="chat-info-row-title">Share</span>
-            <svg class="chat-info-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
-          </button>
+        </div>
+
+        <!-- The Info section sits inline under the rows (iOS d1844582 infoSection). -->
+        <div data-chat-info-info-section>
+          <p class="profile-section-label">Info</p>
+          <div class="profile-card chat-info-stats-card">
+            <div class="profile-about-row"><strong>Added</strong><span data-chat-info-added>--</span></div>
+            <div class="profile-about-row"><strong>Last Message</strong><span data-chat-info-last-message>--</span></div>
+            <div class="profile-about-row" data-chat-info-chess-row hidden><strong>Chess Stats</strong><span data-chat-info-chess>--</span></div>
+            <div class="chat-info-stats-row">
+              <div class="chat-info-stat"><strong data-chat-info-sent>0</strong><small>Sent</small></div>
+              <div class="chat-info-stat-divider" aria-hidden="true"></div>
+              <div class="chat-info-stat"><strong data-chat-info-received>0</strong><small>Received</small></div>
+              <div class="chat-info-stat-divider" aria-hidden="true"></div>
+              <div class="chat-info-stat"><strong data-chat-info-total>0</strong><small>Total</small></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- A KaChat bot's User Info is only its name and its address (iOS d1844582): the Address
+             section inline, which takes the QR card from the Address sheet while a bot is open. -->
+        <div class="chat-info-bot-address" data-chat-info-bot-address hidden>
+          <div class="chat-info-bot-address-head">
+            <p class="profile-section-label">Address</p>
+            <a class="chat-info-sheet-link" data-chat-info-bot-explorer target="_blank" rel="noopener noreferrer">View in Explorer</a>
+          </div>
         </div>
       </div>
 
@@ -3085,43 +3107,6 @@
               </div>
             </section>
 
-            <section data-chat-info-panel="calls" hidden>
-              <div class="settings-list-card">
-                <div class="settings-toggle-row">
-                  <span><strong>Allow calls and video calls</strong></span>
-                  <label class="switch-control"><input type="checkbox" data-chat-info-calls><span></span></label>
-                </div>
-              </div>
-              <p class="chat-info-alias-footer">Off for everyone until you turn it on. While off, this contact cannot ring you or ask your Nextcloud to host a call. Calls run through Nextcloud Talk and stay inside KaChat - only one of you needs a Nextcloud.</p>
-            </section>
-
-            <section data-chat-info-panel="photos" hidden>
-              <div class="settings-list-card">
-                <div class="settings-toggle-row">
-                  <span><strong>Photos</strong></span>
-                  <select class="settings-select" data-chat-info-photos>
-                    <option value="auto" data-chat-info-photos-auto>Automatic</option>
-                    <option value="always">Always Show</option>
-                    <option value="manual">Always Hide</option>
-                  </select>
-                </div>
-              </div>
-            </section>
-
-            <section data-chat-info-panel="info" hidden>
-              <div class="profile-card chat-info-stats-card">
-                <div class="profile-about-row"><strong>Added</strong><span data-chat-info-added>--</span></div>
-                <div class="profile-about-row"><strong>Last Message</strong><span data-chat-info-last-message>--</span></div>
-                <div class="profile-about-row" data-chat-info-chess-row hidden><strong>Chess Stats</strong><span data-chat-info-chess>--</span></div>
-                <div class="chat-info-stats-row">
-                  <div class="chat-info-stat"><strong data-chat-info-sent>0</strong><small>Sent</small></div>
-                  <div class="chat-info-stat-divider" aria-hidden="true"></div>
-                  <div class="chat-info-stat"><strong data-chat-info-received>0</strong><small>Received</small></div>
-                  <div class="chat-info-stat-divider" aria-hidden="true"></div>
-                  <div class="chat-info-stat"><strong data-chat-info-total>0</strong><small>Total</small></div>
-                </div>
-              </div>
-            </section>
           </div>
         </div>
       </div>
@@ -3137,7 +3122,6 @@
         <button class="icon-button" type="button" data-close-quick-reactions aria-label="Close">✕</button>
       </header>
       <div class="quick-reactions-slots" data-quick-reactions-slots></div>
-      <p class="field-hint">Tap an emoji to replace it with a different one.</p>
       <div class="quick-reactions-actions">
         <button class="secondary-button danger-text" type="button" data-quick-reactions-reset>Reset to Default</button>
       </div>

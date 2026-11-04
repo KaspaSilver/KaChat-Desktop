@@ -53,11 +53,45 @@ export function chainLocalIndex(index) {
   return isQuantumIndex(index) ? index - QUANTUM_INDEX_BASE : index;
 }
 
-/** A spending row's name on its own chain, both chains "Address #n" (iOS e001786
- *  SpendingAddressEntry.displayTitle): quantum numbering starts at 0 again, the shield is what tells
- *  the chains apart. */
+/** The number people see for a spending address (iOS d1844582 WalletManager.addressNumber). The
+ *  Chatting Address is #0, so the legacy chain's first slot shows as #1; the quantum chain has no
+ *  chatting address and starts at #0. Display only: bounds and the hidden set use chainLocalIndex. */
+export function addressNumber(index) {
+  return isQuantumIndex(index) ? index - QUANTUM_INDEX_BASE : index + 1;
+}
+
+/** A spending row's name, both chains "Address #n" (iOS e001786 SpendingAddressEntry.displayTitle,
+ *  numbered by addressNumber since d1844582): the shield is what tells the chains apart. */
 export function spendingIndexTitle(index) {
-  return `Address #${chainLocalIndex(index)}`;
+  return `Address #${addressNumber(index)}`;
+}
+
+/** The numbers on a page of Address Visibility's chain list (iOS d1844582 pagerRange). The legacy
+ *  chain's first page also holds #0, the Chatting Address. */
+export function visibilityPagerRange(quantum, page, pageSize) {
+  const first = (quantum ? QUANTUM_INDEX_BASE : 0) + page * pageSize;
+  return {
+    lower: !quantum && page === 0 ? 0 : addressNumber(first),
+    upper: addressNumber(first + pageSize - 1),
+  };
+}
+
+/** Address Visibility's card per chain (iOS d1844582 chainCard): how many of its addresses Manage
+ *  Addresses shows, of how many, and the sompi on them. The Chatting Address is the legacy chain's
+ *  always-shown #0. Hidden addresses count in the sompi: their Kaspa is still in the account's total.
+ *  `sompiOf(index)` and `chattingSompi` are BigInt, or null while unknown; one unknown leaves that
+ *  chain's sum null rather than a number that reads short. */
+export function spendingChainSummaries(indices, hidden, sompiOf, chattingSompi) {
+  const hiddenSet = new Set(hidden);
+  const chains = { quantum: { shown: 0, total: 0, sompi: 0n }, legacy: { shown: 1, total: 1, sompi: chattingSompi } };
+  for (const index of indices) {
+    const chain = isQuantumIndex(index) ? chains.quantum : chains.legacy;
+    chain.total += 1;
+    if (!hiddenSet.has(index)) chain.shown += 1;
+    const sompi = sompiOf(index);
+    chain.sompi = chain.sompi == null || sompi == null ? null : chain.sompi + sompi;
+  }
+  return chains;
 }
 
 /** KIP-22 derivation path of quantum chain index `n`. */

@@ -57,7 +57,7 @@ export function createMessageEnvelope({ conversationId, contactId, toAddress, fr
 }
 
 
-export async function createEncryptedMessageEnvelope({ conversationId, contactId, toAddress, fromAddress = null, text, localNonce, createdAt = Date.now(), alias = "kachat", inboxTag = null }) {
+export async function createEncryptedMessageEnvelope({ conversationId, contactId, toAddress, fromAddress = null, text, localNonce, createdAt = Date.now(), alias = "kachat", inboxTag = null, senderPrivateKeyHex = null }) {
   const kasiaPayload = await buildEncryptedCommMessage({
     inboxTag,
     alias,
@@ -70,7 +70,8 @@ export async function createEncryptedMessageEnvelope({ conversationId, contactId
     localNonce,
     // A photo or voice note is sealed as the binary media frame (iOS encryptContextualMessage);
     // the envelope's text - the bubble and the stored record - stays the media-file JSON.
-    encryptMessage: encryptKasiaContextualMessage,
+    // With the sender's key the seed can read the message back (iOS bfe9f022).
+    encryptMessage: (address, clearText) => encryptKasiaContextualMessage(address, clearText, senderPrivateKeyHex),
   });
   return {
     conversationId,

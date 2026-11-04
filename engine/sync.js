@@ -441,6 +441,63 @@ export async function syncConversationFromIndexer({
 
 /** Whether `alias` can be a wire alias: what goes between `comm:` and the next `:` (Kasia's are
  *  12 hex; the plan truncates to 16, so anything longer could never match a row anyway). */
+/**
+ * Messages this wallet sent to `contact`, read back with the seed (iOS bfe9f022
+ * fetchOutgoingContextualMessages + decryptSentMessage): sender = this wallet, alias = the alias our
+ * messages to them carry. Only what the seed can open comes back: a send from before sends were
+ * recoverable was sealed with a random key that's gone, and is left out (an archive may still have it).
+ */
+export async function syncSentMessagesFromIndexer({
+  conversationId,
+  contact,
+  walletAddress,
+  alias,
+  decryptSent,
+  knownTxids = [],
+  cursor = 0,
+  indexerUrl = DEFAULT_KASIA_INDEXER_URL,
+  limit = 50,
+} = {}) {
+  if (!conversationId || !contact?.address || !walletAddress || !alias) return { messages: [], nextCursor: cursor };
+  if (typeof decryptSent !== "function") throw new Error("Kasia cipher decryptor is not available.");
+  const baseUrl = String(indexerUrl || "").replace(/\/$/, "");
+  const paged = await fetchBlockTimePages({
+    startBlockTime: rewoundCursor(Number(cursor) || 0),
+    limit: Math.max(1, Math.min(50, Number(limit) || 50)),
+    fetchPage: ({ blockTime, limit: pageSize }) => {
+      const query = new URLSearchParams({ address: walletAddress, alias: textToHex(alias), block_time: String(blockTime), limit: String(pageSize) });
+      return fetchIndexerRows(`${baseUrl}/contextual-messages/by-sender?${query.toString()}`, "Kasia indexer request");
+    },
+  });
+  const known = new Set(knownTxids);
+  const messages = [];
+  let nextCursor = Number(cursor) || 0;
+  for (const row of [...paged.rows].sort((a, b) => Number(a.block_time || 0) - Number(b.block_time || 0))) {
+    const txid = String(row.tx_id || "");
+    const blockTime = Number(row.block_time || 0);
+    if (blockTime > nextCursor) nextCursor = blockTime;
+    if (!txid || known.has(txid)) continue;
+    let clearText = "";
+    let encryptedHex = "";
+    try {
+      ({ encryptedHex } = encryptedHexFromIndexerPayload(row.message_payload));
+      clearText = await decryptSent(encryptedHex, contact.address);
+    } catch { continue; }
+    if (typeof clearText !== "string" || !clearText.length) continue;
+    known.add(txid);
+    messages.push({
+      id: `indexer-${txid}`, conversationId, contactId: contact.id, direction: "outgoing", text: clearText,
+      sender: walletAddress, receiver: contact.address,
+      status: "confirmed", txid,
+      daaScore: row.accepting_daa_score != null ? String(row.accepting_daa_score) : null,
+      confirmations: 1, network: NETWORK, encryptedHex, messageType: "comm", transport: "kasia-indexer",
+      protocol: "kasia", protocolVersion: 1, recipientAlias: alias,
+      createdAt: blockTime > 0 ? blockTime : Date.now(), updatedAt: Date.now(), acceptingBlock: row.accepting_block || null,
+    });
+  }
+  return { messages, nextCursor };
+}
+
 export function isUsableWireAlias(alias) {
   return /^[0-9A-Za-z_-]{1,16}$/.test(String(alias || ""));
 }
@@ -1315,6 +1372,12 @@ async function paymentMemoFromPayload(payloadHex, decryptMessage) {
   } catch {
     return "";
   }
+}
+
+/** The memo of a chat payment this wallet sent, read back with the seed (iOS bfe9f022
+ *  decryptSentPayment); "" when it has none or was sent before memos were recoverable. */
+export async function sentPaymentMemoFromPayload(payloadHex, recipientAddress, decryptSent) {
+  return paymentMemoFromPayload(payloadHex, (encryptedHex) => decryptSent(encryptedHex, recipientAddress));
 }
 
 /**

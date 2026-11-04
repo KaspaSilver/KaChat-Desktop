@@ -211,7 +211,7 @@ function startBackup(resolve) {
   };
   if (!seed) {
     const { body } = present("Back Up Account", null);
-    body.append(htmlBlock(`<p class="account-backup-unavailable">This account's seed phrase isn't available on this device.</p>`));
+    body.append(htmlBlock(`<p class="account-backup-unavailable">This account's 12 or 24 words aren't available on this device.</p>`));
     return;
   }
   renderBackupStep();
@@ -252,7 +252,7 @@ function backupGoBack() {
 }
 
 function renderBackupStep() {
-  const { body, foot } = present(flow.step === "explainer" ? "What is a seed phrase?" : "Back Up Account", flow.step === "why" ? null : backupGoBack);
+  const { body, foot } = present(flow.step === "explainer" ? "What are my 12 or 24 words?" : "Back Up Account", flow.step === "why" ? null : backupGoBack);
   if (flow.step !== "explainer") {
     const steps = backupStepsFor(hasPassphrase());
     const progress = document.createElement("div");
@@ -272,10 +272,10 @@ function renderBackupStep() {
 function renderWhy(body, foot) {
   body.append(htmlBlock(`
     ${headingHtml("Protect your funds")}
-    ${pointHtml(ICONS.key, "Your seed phrase is your account", "These secret words are created just for you. They are the master key to your funds.")}
+    ${pointHtml(ICONS.key, "Your 12 or 24 words are your account", "These secret words are created just for you. They are the master key to your funds.")}
     ${pointHtml(ICONS.noDevice, "Your device can't be your only copy", "If you lose, break or replace this device, these words are the only way back to your account.")}
     ${pointHtml(ICONS.noPerson, "Nobody can reset them", "There is no password reset. KaChat never sees your words, so we can't recover them for you.")}
-    <button class="linklike-button account-backup-link" type="button" data-account-backup-explain>${ICONS.question}<span>What is a seed phrase?</span></button>`));
+    <button class="linklike-button account-backup-link" type="button" data-account-backup-explain>${ICONS.question}<span>What are my 12 or 24 words?</span></button>`));
   body.querySelector("[data-account-backup-explain]").addEventListener("click", () => goTo("explainer"));
   addFootButton(foot, "Start Backup", { action: () => goTo("prepare") });
 }
@@ -284,7 +284,7 @@ function renderWhy(body, foot) {
 function renderExplainer(body) {
   body.append(htmlBlock(`
     <div class="passphrase-explainer account-backup-explainer">
-      <section><h4>The short version</h4><p>A seed phrase is a list of 12 or 24 ordinary words that works as the master key to your account. Your wallet, your chatting address and your messages all come from it.</p></section>
+      <section><h4>The short version</h4><p>Your 12 or 24 words are ordinary words that work as the master key to your account. Your wallet, your chatting address and your messages all come from them.</p></section>
       <section><h4>Anyone with it can take everything</h4><p>Anyone who has these words can take everything in your account. If you lose them and lose this device, nobody can get your account back, not even KaChat.</p></section>
       <section><h4>How to keep it safe</h4><p>Write the words on paper, in order, and keep them somewhere safe and private. Never type them into a website, send them in a chat, or keep them in a screenshot or cloud notes.</p></section>
     </div>`));
@@ -309,7 +309,7 @@ function renderPrepare(body, foot) {
     label.append(box, span);
     body.append(label);
   }
-  button = addFootButton(foot, "Show My Seed Phrase", { enabled: ready(), action: () => { flow.wordPage = 0; goTo("words"); } });
+  button = addFootButton(foot, "Show My 12 or 24 Words", { enabled: ready(), action: () => { flow.wordPage = 0; goTo("words"); } });
 }
 
 function renderWords(body, foot) {
@@ -385,7 +385,7 @@ function renderWordCheck(body, foot) {
 }
 
 function renderPassphrase(body, foot) {
-  body.append(htmlBlock(headingHtml("Write down your passphrase", "This account also needs its passphrase. Your seed phrase alone won't bring it back. Write it exactly, including capital letters and spaces.")));
+  body.append(htmlBlock(headingHtml("Write down your passphrase", "This account also needs its passphrase. Your 12 or 24 words alone won't bring it back. Write it exactly, including capital letters and spaces.")));
   const value = document.createElement("div");
   value.className = "account-backup-passphrase";
   value.textContent = flow.seed.passphrase;
@@ -422,8 +422,8 @@ function renderTips(body, foot) {
     ${pointHtml(ICONS.paper, "Keep it on paper", "Store it somewhere safe and private, away from fire and water.")}
     ${pointHtml(ICONS.noCloud, "Never keep it online", "No photos, screenshots, cloud storage, notes apps, email or chats.")}
     ${pointHtml(ICONS.hand, "Never share it", "Nobody needs your words. KaChat and real support will never ask for them. Anyone who asks is trying to take your funds.")}
-    ${hasPassphrase() ? pointHtml(ICONS.split, "Keep your passphrase apart", "Store it away from your seed phrase. You need both, and losing either one loses the account.") : ""}
-    ${pointHtml(ICONS.gear, "You can see it again", "Your seed phrase stays available in Settings > View Seed Phrase.")}`));
+    ${hasPassphrase() ? pointHtml(ICONS.split, "Keep your passphrase apart", "Store it away from your 12 or 24 words. You need both, and losing either one loses the account.") : ""}
+    ${pointHtml(ICONS.gear, "You can see it again", "Your 12 or 24 words stay available in Settings > Back Up Account.")}`));
   addFootButton(foot, "Finish Backup", {
     action: () => {
       confirmBackup();
@@ -450,7 +450,7 @@ export function openBackupHygiene() {
     flow = { resolve, address: deps.activeAddress(), seed, asked: [], answers: [], active: 0, wrong: false, passphraseAnswer: "" };
     if (!seed) {
       const { body } = present("Backup Hygiene", null);
-      body.append(htmlBlock(`<p class="account-backup-unavailable">This account's seed phrase isn't available on this device.</p>`));
+      body.append(htmlBlock(`<p class="account-backup-unavailable">This account's 12 or 24 words aren't available on this device.</p>`));
       return;
     }
     flow.asked = randomWordPositions(seed.words.length, HYGIENE_WORDS_TO_CHECK);
@@ -478,7 +478,7 @@ function renderHygieneCheck() {
   const { asked, answers } = flow;
   body.append(htmlBlock(`
     <p class="account-backup-lead">Let's ensure your account is backed up in case you lose access to your device.</p>
-    <p class="account-backup-detail">Enter these ${asked.length} words from your seed phrase. Each box shows the word's number.</p>`));
+    <p class="account-backup-detail">Enter these ${asked.length} of your 12 or 24 words. Each box shows the word's number.</p>`));
 
   const grid = document.createElement("div");
   grid.className = "seed-grid seed-entry-grid account-backup-hygiene-grid";
@@ -586,7 +586,7 @@ function renderHygienePassphrase() {
   flow.passphraseAnswer = "";
   body.append(htmlBlock(`
     <p class="account-backup-lead">Now enter your passphrase</p>
-    <p class="account-backup-detail">Your seed phrase alone won't bring this account back. Enter the passphrase from what you wrote down, exactly, including capital letters and spaces.</p>`));
+    <p class="account-backup-detail">Your 12 or 24 words alone won't bring this account back. Enter the passphrase from what you wrote down, exactly, including capital letters and spaces.</p>`));
   const error = document.createElement("p");
   error.className = "account-backup-error";
   error.textContent = "That doesn't match. Check your paper and try again.";

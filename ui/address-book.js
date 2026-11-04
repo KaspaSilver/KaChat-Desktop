@@ -48,6 +48,7 @@ const ICONS = {
   share: svg('<path d="M12 15V4"/><path d="m8 8 4-4 4 4"/><path d="M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"/>'),
   plane: svg('<path d="M21 3 3 10.5l7 2.5 2.5 7L21 3Z"/><path d="m10 13 4.5-4.5"/>'),
   bubble: svg('<path d="M4 5h16v11H8l-4 3z"/>'),
+  phone: svg('<path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.4 11.4 0 0 0 .6 3.6 1 1 0 0 1-.25 1z"/>'),
   pencil: svg('<path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/>'),
   trash: svg('<path d="M3.5 6.5h17"/><path d="M18.5 6.5V19a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2V6.5"/><path d="M8.5 6.5V4.5a1.5 1.5 0 0 1 1.5-1.5h4a1.5 1.5 0 0 1 1.5 1.5v2"/>'),
   photo: svg('<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m5 17 4.5-4.5 3.2 3.2 2.3-2.3L19 17"/>'),
@@ -199,6 +200,7 @@ function detailHtml(address) {
       <div class="ab-card">
         ${actionRow({ attr: "data-ab-send", icon: ICONS.plane, label: "Send KAS", disabled: !canSend || Boolean(otherNetwork) })}
         ${isOwnAddress(entry.address) ? "" : actionRow({ attr: "data-ab-message", icon: ICONS.bubble, label: "Message", disabled: Boolean(otherNetwork) })}
+        ${!isOwnAddress(entry.address) && deps?.canCall?.(entry.address) ? actionRow({ attr: "data-ab-call", icon: ICONS.phone, label: "Call", disabled: Boolean(otherNetwork) || Boolean(deps?.callActive?.()) }) : ""}
       </div>
       ${otherNetwork ? `<p class="ab-section-foot">${esc(otherNetwork)}</p>` : ""}
       <div class="ab-card">
@@ -274,6 +276,7 @@ async function onScreenClick(event) {
   if (target.closest("[data-ab-share]")) { shareAddress(entry.address); return; }
   if (target.closest("[data-ab-send]")) { if (deps?.canSend?.() && !otherNetworkReason(entry.address)) deps?.openSend?.(entry.address); return; }
   if (target.closest("[data-ab-message]")) { if (!otherNetworkReason(entry.address)) deps?.openChat?.(entry.address); return; }
+  if (target.closest("[data-ab-call]")) { if (!otherNetworkReason(entry.address) && !deps?.callActive?.()) deps?.startCall?.(entry.address); return; }
   if (target.closest("[data-ab-edit]")) {
     const result = await openAddressBookEditor({ address: entry.address });
     if (result === "removed") { detailAddress = null; render(); }
@@ -306,7 +309,8 @@ function attachScreen() {
 }
 
 /** deps: { escapeHtml, shortAddress, personGlyphSvg, profileAvatarHtml(address, className),
- *  ownAddress(), canSend(), openSend(address), openChat(address), copyText(text), showToast(text),
+ *  ownAddress(), canSend(), openSend(address), openChat(address), canCall(address), callActive(),
+ *  startCall(address), copyText(text), showToast(text),
  *  confirmDialog(opts), formatBytes(bytes), onChange(kind: "edit" | "photos" | "restore"),
  *  displayNameFor(address) (who an unnamed entry is), setContactName(address, name) (the chat
  *  with that address takes the entry's name; "" clears it) } */

@@ -124,8 +124,8 @@ export function nextDefaultAccountName(takenNames = [], base = "My Account") {
   return `${base} ${number}`;
 }
 
-/** Red once the account holds funds: its total, or the chatting balance alone until the total is
- *  known (iOS accountTotalSompi ?? balanceSompi ?? 0). Both in sompi, null while unknown. */
+/** Whether these amounts hold anything. Both in sompi, null while unknown. The backup banner passes
+ *  the chatting balance alone (iOS bfe9f022 AccountBackupBanner.hasFunds). */
 export function accountHasFunds(chattingSompi, spendingTotalSompi) {
   return (BigInt(chattingSompi ?? 0n) + BigInt(spendingTotalSompi ?? 0n)) > 0n;
 }

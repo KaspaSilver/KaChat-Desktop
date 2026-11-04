@@ -148,10 +148,35 @@ async function main() {
 
   // MARK: Index mapping (1,000,000 + n <-> "Address #n")
   r.check(!Q.isQuantumIndex(0) && !Q.isQuantumIndex(999_999) && Q.isQuantumIndex(1_000_000), "index: the base is the first quantum index");
-  r.eq(Q.spendingIndexTitle(3), "Address #3", "index: a legacy row reads Address #3");
+  r.eq(Q.spendingIndexTitle(3), "Address #4", "index: a legacy row reads Address #4 (the Chatting Address is #0, d1844582)");
+  r.eq(Q.spendingIndexTitle(0), "Address #1", "index: the legacy chain's first slot reads Address #1");
   r.eq(Q.spendingIndexTitle(B), "Address #0", "index: quantum base reads Address #0 (e001786)");
   r.eq(Q.spendingIndexTitle(B + 12), "Address #12", "index: quantum base+12 reads Address #12, not 1000012");
-  r.eq(Q.chainLocalIndex(B + 4), 4, "index: chain-local number for the toast");
+  r.eq(Q.chainLocalIndex(B + 4), 4, "index: chain-local number");
+  r.eq(Q.chainLocalIndex(3), 3, "index: chainLocalIndex stays raw on the legacy chain (bounds and hidden-set math)");
+  // MARK: The number people see (iOS d1844582 addressNumber), Address Visibility's pager and cards
+  r.eq(Q.addressNumber(0), 1, "number: legacy slot 0 is #1, the Chatting Address being #0");
+  r.eq(Q.addressNumber(49), 50, "number: legacy slot 49 is #50");
+  r.eq(Q.addressNumber(B), 0, "number: quantum slot 0 is #0, that chain has no chatting address");
+  r.eq(Q.addressNumber(B + 12), 12, "number: quantum base+12 is #12");
+  r.eq(JSON.stringify(Q.visibilityPagerRange(false, 0, 50)), '{"lower":0,"upper":50}', "pager: legacy page 0 is #0 - #50, with the chatting row");
+  r.eq(JSON.stringify(Q.visibilityPagerRange(false, 1, 50)), '{"lower":51,"upper":100}', "pager: legacy page 1 is #51 - #100");
+  r.eq(JSON.stringify(Q.visibilityPagerRange(true, 0, 50)), '{"lower":0,"upper":49}', "pager: quantum page 0 is #0 - #49");
+  r.eq(JSON.stringify(Q.visibilityPagerRange(true, 1, 50)), '{"lower":50,"upper":99}', "pager: quantum page 1 is #50 - #99");
+  {
+    const sompi = { 0: 5n, 1: 7n, [B]: 11n, [B + 1]: 13n };
+    const known = Q.spendingChainSummaries([0, 1, B, B + 1], [1, B + 1], (i) => sompi[i], 100n);
+    r.check(known.legacy.shown === 2 && known.legacy.total === 3, "cards: the legacy chain counts the always-shown chatting row");
+    r.check(known.quantum.shown === 1 && known.quantum.total === 2, "cards: the quantum chain has no chatting row");
+    r.check(known.legacy.sompi === 112n, "cards: the legacy balance is the chatting address plus every address, hidden too");
+    r.check(known.quantum.sompi === 24n, "cards: the quantum balance includes hidden addresses");
+    const empty = Q.spendingChainSummaries([], [], () => null, 0n);
+    r.check(empty.legacy.shown === 1 && empty.legacy.total === 1 && empty.legacy.sompi === 0n, "cards: no spending addresses, the legacy chain is still the chatting row");
+    r.check(empty.quantum.total === 0 && empty.quantum.sompi === 0n, "cards: no quantum addresses is a known 0");
+    r.check(Q.spendingChainSummaries([0], [], () => 5n, null).legacy.sompi === null, "cards: an unknown chatting balance leaves the legacy sum unknown");
+    const part = Q.spendingChainSummaries([0, B, B + 1], [], (i) => (i === B ? null : 5n), 1n);
+    r.check(part.quantum.sompi === null && part.legacy.sompi === 6n, "cards: an unknown address leaves only its own chain's sum unknown");
+  }
   // A quantum primary never widens the legacy chain; old records read as "no quantum slot yet".
   {
     const old = Q.spendingStateFromRecord({ activeIndex: 2, maxIndex: 7, hidden: [1], labels: { 1: "x" } });

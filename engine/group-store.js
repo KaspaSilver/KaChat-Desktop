@@ -35,6 +35,16 @@ export const CONTROL_PAGE_BUDGET = 40;
 // counter legitimately starts again at 0 in a new epoch (new root = new key). Bucketed by wallet
 // like the stores above; account removal must wipe it with them (handoff: ui/app.js list).
 export const GROUP_MSG_COUNTER_KEY = "kachat-group-msg-counter-v1";
+// Group invites (iOS bfe9f022, MESSAGING.md "Group invites"), per wallet. Being sent a root for a
+// group this wallet doesn't hold is only an invite until it's answered:
+// { [wallet]: [{ groupId, adminAddress, invitedAt, roots: [root payload, oldest first], rejected? }] }.
+export const GROUP_INVITES_KEY = "kachat-group-invites-v1";
+// What this wallet has answered and which of it is on chain:
+// { [wallet]: { accepted: [groupId], published: [groupId], statusOutbox: [groupId] } }.
+export const GROUP_INVITE_ANSWERS_KEY = "kachat-group-invite-answers-v1";
+// Where members stand on their invite: { [wallet]: { [groupId]: { [address]: "invited" | "joined" |
+// "declined" } } }. A member with no entry has no invite on record: groups from before invites.
+export const GROUP_MEMBER_STATUS_KEY = "kachat-group-member-status-v1";
 // Marks kept per group: older epochs are dropped. Only a stale write that rolled a record back
 // by more than this many rotations could get past it, and the merge-on-write rule below already
 // stops stale writes; this is the backstop, not the mechanism.
@@ -56,6 +66,13 @@ function loadTombstonesAll() {
 }
 function saveTombstonesAll(all) {
   try { localStorage.setItem(GROUP_TOMBSTONES_KEY, JSON.stringify(all)); } catch {}
+}
+function loadJsonMap(key) {
+  try { return JSON.parse(localStorage.getItem(key) || "{}") || {}; }
+  catch { return {}; }
+}
+function saveJsonMap(key, map) {
+  try { localStorage.setItem(key, JSON.stringify(map)); } catch {}
 }
 function loadControlCursorsAll() {
   try { return JSON.parse(localStorage.getItem(GROUP_CONTROL_CURSOR_KEY) || "{}") || {}; }
@@ -256,6 +273,8 @@ export class GroupManager {
     if (published && !bucket.published.includes(id)) bucket.published.push(id);
     all[this.walletAddress] = bucket;
     saveTombstonesAll(all);
+    // A deleted group's invite goes with it, unless it's only waiting to say you declined.
+    this._saveInvites(this._loadInvites().filter((invite) => invite.groupId !== id || invite.rejected === true));
   }
   _markTombstonePublished(groupId) {
     const id = String(groupId);
@@ -323,6 +342,227 @@ export class GroupManager {
     }
     // Budget spent mid-stream: the walk up to `cursor` was contiguous, so the next pass resumes
     // from it and loses nothing (already stored above, marked not caught up).
+  }
+
+  // --- group invites (iOS bfe9f022) ---
+  _loadInvites() {
+    const list = loadJsonMap(GROUP_INVITES_KEY)[this.walletAddress];
+    return Array.isArray(list) ? list : [];
+  }
+  _saveInvites(list) {
+    const all = loadJsonMap(GROUP_INVITES_KEY);
+    if (list.length) all[this.walletAddress] = list;
+    else delete all[this.walletAddress];
+    saveJsonMap(GROUP_INVITES_KEY, all);
+  }
+  _inviteAnswers() {
+    const held = loadJsonMap(GROUP_INVITE_ANSWERS_KEY)[this.walletAddress] || {};
+    return {
+      accepted: Array.isArray(held.accepted) ? held.accepted : [],
+      published: Array.isArray(held.published) ? held.published : [],
+      statusOutbox: Array.isArray(held.statusOutbox) ? held.statusOutbox : [],
+    };
+  }
+  _saveInviteAnswers(answers) {
+    const all = loadJsonMap(GROUP_INVITE_ANSWERS_KEY);
+    all[this.walletAddress] = answers;
+    saveJsonMap(GROUP_INVITE_ANSWERS_KEY, all);
+  }
+
+  /** Invites waiting for an answer, newest first, leaving out any group this device has since come
+   *  to hold (a Nextcloud restore brings joined groups back on its own). */
+  pendingGroupInvites() {
+    return this._loadInvites()
+      .filter((invite) => invite.rejected !== true && !this.getGroup(invite.groupId))
+      .sort((a, b) => Number(b.invitedAt || 0) - Number(a.invitedAt || 0))
+      .map((invite) => {
+        const latest = invite.roots[invite.roots.length - 1];
+        return { groupId: invite.groupId, adminAddress: invite.adminAddress, invitedAt: invite.invitedAt, name: latest.name || "Group", members: latest.members || [] };
+      });
+  }
+
+  /** A root for a group this wallet doesn't hold. Returns an "invite" event for one newly waiting. */
+  async _holdInvite(payload, senderAddress, blockTime) {
+    const me = String(this.walletAddress || "").toLowerCase();
+    const includesMe = (payload.members || []).some((address) => String(address || "").toLowerCase() === me);
+    const adminPub = String(payload.admin_signing_pub || "").toLowerCase();
+    let adminAddress = null;
+    for (const address of payload.members || []) {
+      let pub = null;
+      try { pub = await this.engine.xOnlyPubKeyForAddress(address); } catch { pub = null; }
+      if (pub && pub.toLowerCase() === adminPub) { adminAddress = address; break; }
+    }
+    adminAddress = adminAddress || senderAddress || null;
+    return this._withGroupLock(() => {
+      if (this.isGroupTombstoned(payload.group_id) || this.getGroup(payload.group_id)) return null;
+      const invites = this._loadInvites();
+      const index = invites.findIndex((invite) => invite.groupId === payload.group_id);
+      if (index >= 0) {
+        // Later roots of the same invite, from the same admin: the group's history if you join.
+        // One that leaves you out takes the invite back.
+        const invite = invites[index];
+        const latest = invite.roots[invite.roots.length - 1];
+        if (String(latest.admin_signing_pub || "").toLowerCase() !== adminPub) return null;
+        if (Number(payload.epoch) >= Number(latest.epoch) && !includesMe) {
+          invites.splice(index, 1);
+        } else {
+          invite.roots = invite.roots.filter((root) => Number(root.epoch) !== Number(payload.epoch));
+          invite.roots.push(payload);
+          invite.roots.sort((a, b) => Number(a.epoch) - Number(b.epoch));
+          invite.invitedAt = Math.max(Number(invite.invitedAt || 0), Number(blockTime) || 0);
+        }
+        this._saveInvites(invites);
+        return null;
+      }
+      // Someone you rejected stays ignored, in groups too.
+      if (!includesMe || !adminAddress || this.isInviterBlocked?.(adminAddress)) return null;
+      invites.push({ groupId: payload.group_id, adminAddress, invitedAt: Number(blockTime) || 0, roots: [payload] });
+      this._saveInvites(invites);
+      return { kind: "invite", groupId: payload.group_id, name: payload.name || "Group", adminAddress, invitedAt: Number(blockTime) || 0 };
+    });
+  }
+
+  /** Newest root first, so the older ones only fill in history and nothing reads as a membership
+   *  change. Returns the "joined" event. */
+  async _joinInvite(invite) {
+    this._saveInvites(this._loadInvites().filter((entry) => entry.groupId !== invite.groupId));
+    let joined = null;
+    for (const root of [...invite.roots].sort((a, b) => Number(b.epoch) - Number(a.epoch))) {
+      const event = await this._applyRoot(root, invite.adminAddress, invite.invitedAt);
+      if (!joined && event?.kind === "joined") joined = { ...event, inviteAt: invite.invitedAt };
+    }
+    return joined;
+  }
+
+  /** Accept: the group is joined now and its history comes in with the next sync. The answer goes
+   *  on chain, encrypted: to your own devices, and to the group as a status message. */
+  async acceptGroupInvite(groupId) {
+    const invite = this._loadInvites().find((entry) => entry.groupId === groupId);
+    if (!invite) return null;
+    const answers = this._inviteAnswers();
+    if (!answers.accepted.includes(groupId)) answers.accepted.push(groupId);
+    if (!answers.statusOutbox.includes(groupId)) answers.statusOutbox.push(groupId);
+    this._saveInviteAnswers(answers);
+    const joined = await this._joinInvite(invite);
+    Promise.resolve().then(() => this._publishGroupAnswers()).catch(() => {});
+    return joined;
+  }
+
+  /** Reject: this group is never offered again, here or after a restore (the same on-chain delete
+   *  marker a deleted group publishes), and its members see you declined. The invite's keys stay
+   *  only until that message has gone out, since they're what it's sent with. */
+  rejectGroupInvite(groupId) {
+    const invites = this._loadInvites();
+    const invite = invites.find((entry) => entry.groupId === groupId);
+    if (!invite) return;
+    invite.rejected = true;
+    this._saveInvites(invites);
+    this._recordTombstone(groupId, { published: false });
+    Promise.resolve()
+      .then(() => this._publishTombstone(groupId)).catch(() => {})
+      .then(() => this._publishGroupAnswers()).catch(() => {});
+  }
+
+  /** Sends every answer still owed. Each is a transaction, so one that can't go yet (no funds, no
+   *  connection) waits for the next sync, like a delete marker. */
+  async _publishGroupAnswers() {
+    if (this._publishingAnswers) return;
+    this._publishingAnswers = true;
+    try {
+      for (const groupId of this._inviteAnswers().accepted) {
+        if (this._inviteAnswers().published.includes(groupId)) continue;
+        try {
+          const payload = G.buildSignedInviteAcceptPayload({ groupId: G.hexToBytes(groupId), signingPub: this.selfPubHex(), privateKey: this.engine.privateKeyHex });
+          const encryptedHex = await this.engine.encryptGroupControl(this.walletAddress, JSON.stringify(payload));
+          await this.engine.sendGroupPayload(G.buildControlPayload({ recipientXOnlyPubKey: this.selfPubHex(), encryptedHex }));
+          const answers = this._inviteAnswers();
+          if (!answers.published.includes(groupId)) answers.published.push(groupId);
+          this._saveInviteAnswers(answers);
+        } catch (error) { this.engine.log?.(`Group invite answer failed: ${error?.message || error}`); }
+      }
+      for (const groupId of this._inviteAnswers().statusOutbox) {
+        try {
+          if (this.getGroup(groupId)) {
+            const { record, counter } = await this._withGroupLock(() => this._reserveCounter(groupId));
+            await this._sendMemberStatus(G.MEMBER_STATUS.JOINED, {
+              groupId, rootHex: record.groupRootEpochHex, blindingHex: record.blindingKeyHex, epoch: record.currentEpoch,
+              deviceId: G.hexToBytes(record.deviceIdHex), counter,
+            });
+          }
+          const answers = this._inviteAnswers();
+          answers.statusOutbox = answers.statusOutbox.filter((id) => id !== groupId);
+          this._saveInviteAnswers(answers);
+        } catch (error) { this.engine.log?.(`Group invite answer failed: ${error?.message || error}`); }
+      }
+      for (const invite of this._loadInvites().filter((entry) => entry.rejected === true)) {
+        try {
+          const root = invite.roots[invite.roots.length - 1];
+          await this._sendMemberStatus(G.MEMBER_STATUS.DECLINED, {
+            groupId: invite.groupId, rootHex: root.group_root_epoch, blindingHex: root.blinding_key, epoch: root.epoch,
+            deviceId: G.generateDeviceId(), counter: 1,
+          });
+          this._saveInvites(this._loadInvites().filter((entry) => entry.groupId !== invite.groupId));
+        } catch (error) { this.engine.log?.(`Group invite answer failed: ${error?.message || error}`); }
+      }
+    } finally { this._publishingAnswers = false; }
+  }
+
+  async _sendMemberStatus(status, { groupId, rootHex, blindingHex, epoch, deviceId, counter }) {
+    const payload = G.sealGroupMessage({
+      plaintext: G.encodeMemberStatus(status),
+      groupId: G.hexToBytes(groupId),
+      epoch,
+      groupRootEpoch: G.hexToBytes(rootHex),
+      blindingKey: G.hexToBytes(blindingHex),
+      senderAddress: this.walletAddress,
+      senderPrivateKey: this.engine.privateKeyHex,
+      senderXOnlyPub: this.selfPubHex(),
+      deviceId,
+      counter,
+    });
+    await this.engine.sendGroupPayload(payload);
+  }
+
+  // --- where members stand on their invite ---
+  _memberStatuses(groupId) {
+    return loadJsonMap(GROUP_MEMBER_STATUS_KEY)[this.walletAddress]?.[groupId] || {};
+  }
+  _setMemberStatus(groupId, address, status) {
+    const all = loadJsonMap(GROUP_MEMBER_STATUS_KEY);
+    const wallet = all[this.walletAddress] || {};
+    const group = wallet[groupId] || {};
+    if ((group[address] ?? null) === (status ?? null)) return false;
+    if (status) group[address] = status;
+    else delete group[address];
+    wallet[groupId] = group;
+    all[this.walletAddress] = wallet;
+    saveJsonMap(GROUP_MEMBER_STATUS_KEY, all);
+    return true;
+  }
+  /** "invited" or "declined" when there's something to say. Someone who joined is just a member. */
+  inviteStatus(groupId, address) {
+    const status = this._memberStatuses(groupId)[address];
+    return status === G.MEMBER_STATUS.JOINED ? null : status || null;
+  }
+  /** A member was just invited, by this device as the group's admin. */
+  markMemberInvited(groupId, address) {
+    this._setMemberStatus(groupId, address, G.MEMBER_STATUS.INVITED);
+  }
+
+  /** Takes members' answers out of a batch of decoded messages: they update the member list and are
+   *  never bubbles. Anything else from a member with a status on record means they're in, whether
+   *  or not their answer got here. */
+  _takeMemberStatuses(messages, events) {
+    return messages.filter((message) => {
+      const status = G.parseMemberStatus(message.plaintext);
+      if (!status) {
+        if (this._memberStatuses(message.groupId)[message.senderAddress]) this._setMemberStatus(message.groupId, message.senderAddress, G.MEMBER_STATUS.JOINED);
+        return true;
+      }
+      const changed = this._setMemberStatus(message.groupId, message.senderAddress, status);
+      events.push({ kind: "member-status", groupId: message.groupId, address: message.senderAddress, status, changed, txId: message.txId, blockTime: message.blockTime });
+      return false;
+    });
   }
 
   // Self-addressed, self-signed delete marker. Only our own key can produce one, and only our
@@ -440,6 +680,7 @@ export class GroupManager {
       updatedAt: 0,
     };
     this._put(record);
+    for (const member of roster) if (!member.isAdmin) this.markMemberInvited(record.groupId, member.address);
     // The group is already created and persisted. A failed invite broadcast (transient node
     // / balance / network) must NOT block the admin from entering the new group — surface it
     // as a soft warning and let it be retried (re-adding a member re-distributes the root).
@@ -552,6 +793,7 @@ export class GroupManager {
       return this._bumpEpoch(fresh);
     });
     if (!record) return this.getGroup(groupId);
+    this.markMemberInvited(groupId, addr);
     return this._rotateEpoch(record, "add", onProgress);
   }
   async removeMember(groupId, address) {
@@ -562,6 +804,7 @@ export class GroupManager {
       fresh.members = fresh.members.filter((m) => m.address !== addr);
       return this._bumpEpoch(fresh);
     });
+    this._setMemberStatus(groupId, addr, null);
     return this._rotateEpoch(record, "remove");
   }
   async renameGroup(groupId, name) {
@@ -739,7 +982,18 @@ export class GroupManager {
 
     // Decryption above and the root's roster lookups run outside the group lock; the state change
     // itself is one locked, synchronous read-decide-write (DSK-053).
-    if (payload.type === "gctl_root") return this._applyRoot(payload, senderAddress);
+    if (payload.type === "gctl_root") return this._applyRoot(payload, senderAddress, blockTime);
+    // You accepted this group on another device, or before restoring these words.
+    if (payload.type === "gctl_invite_accept") {
+      if (payload.signing_pub !== this.selfPubHex() || !G.verifyInviteAcceptPayload(payload)) return null;
+      const answers = this._inviteAnswers();
+      const id = String(payload.group_id);
+      if (!answers.accepted.includes(id)) answers.accepted.push(id);
+      if (!answers.published.includes(id)) answers.published.push(id);
+      this._saveInviteAnswers(answers);
+      const invite = this._loadInvites().find((entry) => entry.groupId === id);
+      return invite ? this._joinInvite(invite) : null;
+    }
     // gctl_epoch is a heads-up only; the real state change lands on the matching gctl_root.
     if (payload.type === "gctl_epoch") return { kind: "epoch-notice", groupId: payload.group_id, epoch: payload.epoch };
     if (payload.type === "gctl_photo" || payload.type === "gctl_tombstone") {
@@ -803,7 +1057,7 @@ export class GroupManager {
     return incoming.length === held.length && incoming.every((a, i) => a === held[i]);
   }
 
-  async _applyRoot(payload, senderAddress) {
+  async _applyRoot(payload, senderAddress, blockTime = 0) {
     if (!G.verifyRootPayload(payload)) return null;
     const groupId = payload.group_id;
     // A tombstoned group must never be re-added — this is what makes a delete survive a
@@ -812,6 +1066,16 @@ export class GroupManager {
     // A first look, only to skip the work for a root that changes nothing. The decision and the
     // write happen in _commitRoot on a record read AFTER the roster lookups below (DSK-053).
     const before = this.getGroup(groupId);
+    // The signature only proves the payload agrees with itself: anyone who knows a group id can
+    // sign a root naming themselves admin. A group this device holds keeps the admin it has, or a
+    // removed member could take it over with a higher epoch (iOS bfe9f022).
+    if (before?.adminSigningPub && before.adminSigningPub.toLowerCase() !== String(payload.admin_signing_pub || "").toLowerCase()) return null;
+    // Nobody joins a group by being added to it: a group this device doesn't hold waits in Message
+    // Requests. Your own (the admin's recovery copy) just comes back.
+    if (!before && String(payload.admin_signing_pub || "").toLowerCase() !== this.selfPubHex().toLowerCase()
+      && !this._inviteAnswers().accepted.includes(groupId)) {
+      return this._holdInvite(payload, senderAddress, blockTime);
+    }
     if (before && (payload.epoch < before.currentEpoch || this._isSameRoot(before, payload))) {
       const quick = await this._withGroupLock(() => this._commitRoot(payload, senderAddress, null, null));
       // The record moved between the two reads so that this root does apply after all: resolve
@@ -857,6 +1121,8 @@ export class GroupManager {
     const groupId = payload.group_id;
     if (this.isGroupTombstoned(groupId)) return null;
     const existing = this.getGroup(groupId);
+    // Read again here, after the lookups: see _applyRoot.
+    if (existing?.adminSigningPub && existing.adminSigningPub.toLowerCase() !== String(payload.admin_signing_pub || "").toLowerCase()) return null;
     // A root for an OLDER epoch is not an attack to drop on the floor - it is history this device
     // may no longer hold. Archiving it is strictly additive: currentEpoch and the current root are
     // untouched, so there is no downgrade. It is also what makes re-walking the control stream
@@ -925,6 +1191,8 @@ export class GroupManager {
       const newAddrs = new Set(roster.map((m) => m.address));
       added = roster.map((m) => m.address).filter((a) => !oldAddrs.has(a));
       removed = (existing.members || []).map((m) => m.address).filter((a) => !newAddrs.has(a));
+      for (const address of added) this._setMemberStatus(groupId, address, G.MEMBER_STATUS.INVITED);
+      for (const address of removed) this._setMemberStatus(groupId, address, null);
     }
     // Surface a rename (name changed on an already-known group) so the UI can show a system line.
     const renamedTo = (existing && existing.name !== record.name) ? record.name : null;
@@ -1031,6 +1299,8 @@ export class GroupManager {
         catch (error) { this.engine.log?.(`Group tombstone backfill failed: ${error?.message || error}`); }
       }
     }
+
+    try { await this._publishGroupAnswers(); } catch { /* retried next pass */ }
 
     // 1. Discover invites / rotations addressed to us, from the persisted cursor (DSK-041). The
     // by-sender read per known admin (iOS catchUpGroupControl) is not used here: by-recipient
@@ -1152,7 +1422,7 @@ export class GroupManager {
     // The first full read establishes "now"; the since reads take over from here.
     // A minute back: a computer clock running ahead must not skip the newest rows.
     if (fullScan && !this.sinceBlockTime) this.sinceBlockTime = Date.now() - 60_000;
-    return { controls: events, messages };
+    return { controls: events, messages: this._takeMemberStatuses(messages, events) };
   }
 }
 
@@ -1230,7 +1500,7 @@ GroupManager.prototype._forceRefreshPass = async function _forceRefreshPass(grou
     this._mutate(groupId, (fresh) => { fresh.cursors = cursors; });
   });
   rejections.epochRootsArchived = Math.max(0, archivedCount() - archivedBefore);
-  return { controls: events, messages, rejections };
+  return { controls: events, messages: this._takeMemberStatuses(messages, events), rejections };
 };
 
 export function createGroupManager(engine) {

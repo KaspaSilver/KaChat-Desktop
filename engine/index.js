@@ -6,9 +6,9 @@ import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, e
 import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain, SELF_STASH_ACCOUNT_CHANGED } from "./messages.js";
-import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncIncomingPaymentsFromRest, checkIncomingRestPayment, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
+import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncSentMessagesFromIndexer, sentPaymentMemoFromPayload, syncIncomingPaymentsFromRest, checkIncomingRestPayment, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
 import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor, buildEncryptedPaymentPayload, sealPaymentRecord } from "./kasia-protocol.js";
-import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, decryptKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
+import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, encryptKasiaContextualMessage, decryptKasiaMessage, decryptSentKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
 import { getEndpoint } from "./endpoints.js";
 import { queryGroupMessages, queryGroupMessagesSince, queryGroupControlByRecipient, queryGroupControlByRecipientPage, queryGroupControlBySender } from "./group-indexer.js";
@@ -1445,12 +1445,35 @@ export class KaspaEngine {
       ...details,
       alias: aliases.theirAlias,
       deterministicAliases: aliases,
+      senderPrivateKeyHex: this.privateKeyHex,
     });
   }
 
   async decryptKasiaMessage(encryptedHex) {
     if (!this.privateKeyHex) throw new Error("Generate or import a private key first.");
     return decryptKasiaMessage(encryptedHex, this.privateKeyHex);
+  }
+
+  /** A message or payment memo this wallet sealed to `recipientAddress`, read back with the seed. */
+  async decryptSentMessage(encryptedHex, recipientAddress) {
+    if (!this.privateKeyHex) throw new Error("Generate or import a private key first.");
+    return decryptSentKasiaMessage(encryptedHex, this.privateKeyHex, recipientAddress);
+  }
+
+  /** What this wallet sent to `contact` that the seed can read (engine/sync.js). */
+  async syncSentMessages(details = {}) {
+    this.requireWallet();
+    if (!this.isKasiaCipherLoaded()) await this.loadKasiaCipher();
+    const { theirAlias } = await this.deriveConversationAliases(details.contact?.address);
+    return syncSentMessagesFromIndexer({
+      ...details, walletAddress: this.address, alias: theirAlias,
+      decryptSent: (encryptedHex, recipientAddress) => this.decryptSentMessage(encryptedHex, recipientAddress),
+    });
+  }
+
+  /** The memo of a chat payment this wallet sent, from its transaction's payload. */
+  async sentPaymentMemo(payloadHex, recipientAddress) {
+    return sentPaymentMemoFromPayload(payloadHex, recipientAddress, (encryptedHex, address) => this.decryptSentMessage(encryptedHex, address));
   }
 
   // --- Group chat adapters (thin wiring over the wallet, cipher, and indexer;
@@ -1622,7 +1645,8 @@ export class KaspaEngine {
       receiver,
       note,
       amountSompi,
-      encryptMessage: encryptKasiaMessage,
+      // With our key, so the seed can read the memo back (iOS bfe9f022).
+      encryptMessage: (address, text) => encryptKasiaContextualMessage(address, text, this.privateKeyHex),
     });
   }
 

@@ -119,7 +119,7 @@ export const KAPOST_TERMS_SECTIONS = [
   },
   {
     title: "Your account and your funds",
-    text: "Your account is a seed phrase kept on your device. We never have it, so we can't recover a lost one or reverse a transaction. Posting pays a network fee in KAS, and you are responsible for the funds you hold and send.",
+    text: "Your account is 12 or 24 words kept on your device. We never have them, so we can't recover lost ones or reverse a transaction. Posting pays a network fee in KAS, and you are responsible for the funds you hold and send.",
   },
   {
     title: "No warranty",

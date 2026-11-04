@@ -89,7 +89,7 @@ export function importMnemonic(kaspa, phrase, passphrase = "", { passphraseForm 
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
   const cleanPhrase = String(phrase || "").trim().toLowerCase().replace(/\s+/g, " ");
-  if (!cleanPhrase) throw new Error("Enter a recovery phrase.");
+  if (!cleanPhrase) throw new Error("Enter your 12 or 24 words.");
   const pass = String(passphrase || "");
   const seed = seedFromPhrase(kaspa, cleanPhrase, pass, passphraseForm);
   const master = new kaspa.XPrv(seed);
@@ -189,7 +189,7 @@ export async function importMnemonicWithFamily(kaspa, phrase, passphrase = "", {
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
   const cleanPhrase = String(phrase || "").trim().toLowerCase().replace(/\s+/g, " ");
-  if (!cleanPhrase) throw new Error("Enter a recovery phrase.");
+  if (!cleanPhrase) throw new Error("Enter your 12 or 24 words.");
   const pass = String(passphrase || "");
   const cleanFamily = normalizeSourceFamily(family);
   const cleanIndex = Math.max(0, Math.floor(Number(index) || 0));
@@ -220,7 +220,7 @@ export async function deriveIdentityAddressRange(kaspa, phrase, passphrase = "",
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
   const cleanPhrase = String(phrase || "").trim().toLowerCase().replace(/\s+/g, " ");
-  if (!cleanPhrase) throw new Error("A recovery phrase is required to scan chatting addresses.");
+  if (!cleanPhrase) throw new Error("Your 12 or 24 words are required to scan chatting addresses.");
   const cleanFamily = normalizeSourceFamily(family);
   const first = Math.max(0, Math.floor(Number(start) || 0));
   const total = Math.max(1, Math.floor(Number(count) || 1));
@@ -272,7 +272,7 @@ export function deriveSpendingWallet(kaspa, phrase, index, passphrase = "", { pa
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
   const cleanPhrase = String(phrase || "").trim().toLowerCase().replace(/\s+/g, " ");
-  if (!cleanPhrase) throw new Error("A recovery phrase is required to derive spending addresses.");
+  if (!cleanPhrase) throw new Error("Your 12 or 24 words are required to derive spending addresses.");
   const cleanIndex = Math.max(0, Math.floor(Number(index) || 0));
   const path = spendingDerivationPath(cleanIndex);
   const seed = seedFromPhrase(kaspa, cleanPhrase, passphrase, passphraseForm);
@@ -292,7 +292,7 @@ export function deriveSpendingAddressRange(kaspa, phrase, passphrase = "", { sta
     throw new Error("This Rusty Kaspa build does not expose mnemonic wallet support.");
   }
   const cleanPhrase = String(phrase || "").trim().toLowerCase().replace(/\s+/g, " ");
-  if (!cleanPhrase) throw new Error("A recovery phrase is required to derive spending addresses.");
+  if (!cleanPhrase) throw new Error("Your 12 or 24 words are required to derive spending addresses.");
   const first = Math.max(0, Math.floor(Number(start) || 0));
   const total = Math.max(0, Math.floor(Number(count) || 0));
   const master = new kaspa.XPrv(seedFromPhrase(kaspa, cleanPhrase, passphrase, passphraseForm));

@@ -20,7 +20,7 @@ globalThis.localStorage = new MemoryStorage();
 
 const G = await import("../engine/group.js");
 const { queryGroupControlByRecipientPage } = await import("../engine/group-indexer.js");
-const { GroupManager, GROUP_CONTROL_CURSOR_KEY, CONTROL_PAGE_BUDGET, CONTROL_PAGE_LIMIT } = await import("../engine/group-store.js");
+const { GroupManager, GROUP_CONTROL_CURSOR_KEY, CONTROL_PAGE_BUDGET, CONTROL_PAGE_LIMIT, GROUP_INVITES_KEY, GROUP_INVITE_ANSWERS_KEY, GROUP_MEMBER_STATUS_KEY } = await import("../engine/group-store.js");
 
 const here = dirname(fileURLToPath(import.meta.url));
 const UTF8 = new TextEncoder();
@@ -65,8 +65,17 @@ function pushJunk(recipient, count) {
 }
 // The stub "ECIES": JSON naming its recipient, so only that wallet can open it.
 const sealFor = (address, json) => toHex(JSON.stringify({ to: address, body: json }));
-function pushInvite(recipient, { name = "Group", epoch = 0, seed = G.generateGroupSeed() } = {}) {
+// `accepted`: this walk is about the stream, so the group joins at once as an already answered one.
+function pushInvite(recipient, { name = "Group", epoch = 0, seed = G.generateGroupSeed(), accepted = true } = {}) {
   const groupId = G.deriveGroupId(seed);
+  if (accepted) {
+    const answers = JSON.parse(localStorage.getItem(GROUP_INVITE_ANSWERS_KEY) || "{}");
+    const mine = answers[recipient] || { accepted: [], published: [], statusOutbox: [] };
+    mine.accepted.push(G.bytesToHex(groupId));
+    mine.published.push(G.bytesToHex(groupId));
+    answers[recipient] = mine;
+    localStorage.setItem(GROUP_INVITE_ANSWERS_KEY, JSON.stringify(answers));
+  }
   const payload = G.buildSignedRootPayload({
     groupId, epoch,
     groupRootEpoch: G.deriveGroupRootEpoch(seed, groupId, epoch),
@@ -300,6 +309,145 @@ await test("account removal wipes the cursor key with the other per-wallet group
   const wipe = app.split("\n").find((line) => line.includes('"kachat-group-tombstones-v1"') && line.includes("for (const key of"));
   assert.ok(wipe, "the per-wallet wipe list in removeAccountScopedLocalData");
   assert.ok(wipe.includes(`"${GROUP_CONTROL_CURSOR_KEY}"`), "the control cursor key is in it");
+});
+
+// --- group invites (iOS bfe9f022, MESSAGING.md "Group invites") ---
+const INVITEE = { address: "kaspa:qzinviteeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", key: KEY(0xe1) };
+PUB.set(INVITEE.address, G.bytesToHex(G.xOnlyPublicKey(INVITEE.key)));
+const sent = [];
+const answering = (fn) => async () => {
+  engine.encryptGroupControl = async (address, json) => sealFor(address, json);
+  engine.sendGroupPayload = async (payload) => { sent.push(payload); return { txids: ["tx"] }; };
+  await fn();
+};
+
+await test("a root for a group this wallet doesn't hold waits as an invite", async () => {
+  const m = useWallet(INVITEE);
+  const invite = pushInvite(INVITEE.address, { name: "Friends", accepted: false });
+  const { controls } = await pass(m);
+  assert.deepEqual(controls.filter((e) => e.kind === "invite").map((e) => e.groupId), [invite.groupId]);
+  assert.equal(controls.filter((e) => e.kind === "joined").length, 0);
+  assert.equal(m.getGroup(invite.groupId), null, "not in the group");
+  const [held] = m.pendingGroupInvites();
+  assert.equal(held.name, "Friends");
+  assert.equal(held.adminAddress, ADMIN.address, "the admin comes from the signing key");
+  await m.syncGroups();
+  assert.equal(m.pendingGroupInvites().length, 1, "a re-walk doesn't add it twice");
+});
+
+await test("accept joins, then says so on chain: to this wallet, then to the group", answering(async () => {
+  const m = useWallet(INVITEE);
+  const groupId = m.pendingGroupInvites()[0].groupId;
+  sent.length = 0;
+  const joined = await m.acceptGroupInvite(groupId);
+  assert.equal(joined.kind, "joined");
+  assert.ok(m.getGroup(groupId), "in the group");
+  assert.equal(m.pendingGroupInvites().length, 0);
+  await new Promise((resolve) => setTimeout(resolve, 20)); // accepting sends them on its own
+  assert.equal(sent.length, 2, "a self-addressed accept and a member_status message");
+  assert.ok(sent[0].startsWith("kchat:1:gctl:"));
+  assert.ok(sent[1].startsWith("kchat:1:gcomm:"));
+  sent.length = 0;
+  await m._publishGroupAnswers();
+  assert.equal(sent.length, 0, "each answer goes once");
+}));
+
+await test("reject: never offered again, and the group hears declined with the invite's keys", answering(async () => {
+  const m = useWallet(INVITEE);
+  const invite = pushInvite(INVITEE.address, { name: "Spam", accepted: false });
+  await pass(m);
+  assert.equal(m.pendingGroupInvites().length, 1);
+  sent.length = 0;
+  m.rejectGroupInvite(invite.groupId);
+  assert.equal(m.pendingGroupInvites().length, 0);
+  assert.ok(m.isGroupTombstoned(invite.groupId));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await m._publishGroupAnswers();
+  assert.ok(sent.some((p) => p.startsWith("kchat:1:gctl:")), "the delete marker");
+  assert.ok(sent.some((p) => p.startsWith("kchat:1:gcomm:")), "the declined message");
+  assert.equal(m._loadInvites().length, 0, "its keys are gone once that's out");
+  m.resetGroupControlCursor();
+  await pass(m);
+  assert.equal(m.pendingGroupInvites().length, 0);
+}));
+
+await test("a root that leaves you out takes the invite back; one naming no one you know never shows", async () => {
+  const m = useWallet(INVITEE);
+  const seed = G.generateGroupSeed();
+  const invite = pushInvite(INVITEE.address, { name: "Later", accepted: false, seed });
+  await pass(m);
+  assert.ok(m.pendingGroupInvites().some((entry) => entry.groupId === invite.groupId));
+  const groupId = G.deriveGroupId(seed);
+  const leftOut = G.buildSignedRootPayload({
+    groupId, epoch: 1, groupRootEpoch: G.deriveGroupRootEpoch(seed, groupId, 1), blindingKey: G.deriveBlindingKey(seed, groupId),
+    adminSigningPub: PUB.get(ADMIN.address), members: [ADMIN.address], name: "Later", adminPrivateKey: ADMIN.key,
+  });
+  pushRow(INVITEE.address, `kchat:1:gctl:${sealFor(INVITEE.address, JSON.stringify(leftOut))}`);
+  await pass(m);
+  assert.ok(!m.pendingGroupInvites().some((entry) => entry.groupId === invite.groupId));
+});
+
+await test("a blocked inviter is ignored", async () => {
+  const m = useWallet(INVITEE);
+  m.isInviterBlocked = (address) => address === ADMIN.address;
+  pushInvite(INVITEE.address, { name: "Blocked", accepted: false });
+  await pass(m);
+  assert.ok(!m.pendingGroupInvites().some((entry) => entry.name === "Blocked"));
+});
+
+await test("a gctl_invite_accept joins the waiting group, from another device or a restore", async () => {
+  const m = useWallet(INVITEE);
+  const invite = pushInvite(INVITEE.address, { name: "Elsewhere", accepted: false });
+  await pass(m);
+  const accept = G.buildSignedInviteAcceptPayload({ groupId: G.hexToBytes(invite.groupId), signingPub: PUB.get(INVITEE.address), privateKey: INVITEE.key });
+  pushRow(INVITEE.address, `kchat:1:gctl:${sealFor(INVITEE.address, JSON.stringify(accept))}`);
+  const { controls } = await pass(m);
+  assert.ok(controls.some((e) => e.kind === "joined" && e.groupId === invite.groupId));
+  assert.ok(m.getGroup(invite.groupId));
+  // Someone else's signature on it does nothing.
+  const other = pushInvite(INVITEE.address, { name: "Forged", accepted: false });
+  await pass(m);
+  const forged = G.buildSignedInviteAcceptPayload({ groupId: G.hexToBytes(other.groupId), signingPub: PUB.get(ADMIN.address), privateKey: ADMIN.key });
+  pushRow(INVITEE.address, `kchat:1:gctl:${sealFor(INVITEE.address, JSON.stringify(forged))}`);
+  await pass(m);
+  assert.equal(m.getGroup(other.groupId), null);
+});
+
+await test("a group this device holds keeps its admin, whatever a higher epoch signs", async () => {
+  const m = useWallet(INVITEE);
+  const seed = G.generateGroupSeed();
+  const invite = pushInvite(INVITEE.address, { name: "Mine", seed, accepted: true });
+  await pass(m);
+  const groupId = G.deriveGroupId(seed);
+  const takeover = G.buildSignedRootPayload({
+    groupId, epoch: 9, groupRootEpoch: G.deriveGroupRootEpoch(seed, groupId, 9), blindingKey: G.deriveBlindingKey(seed, groupId),
+    adminSigningPub: PUB.get(WALLETS.C.address), members: [WALLETS.C.address, INVITEE.address], name: "Taken", adminPrivateKey: WALLETS.C.key,
+  });
+  pushRow(INVITEE.address, `kchat:1:gctl:${sealFor(INVITEE.address, JSON.stringify(takeover))}`);
+  await pass(m);
+  const held = m.getGroup(invite.groupId);
+  assert.equal(held.name, "Mine");
+  assert.equal(held.adminSigningPub, PUB.get(ADMIN.address));
+});
+
+await test("member answers update the list and never reach the thread; any other message means joined", async () => {
+  const m = useWallet(INVITEE);
+  const groupId = m.listGroups()[0].groupId;
+  m.markMemberInvited(groupId, ADMIN.address);
+  assert.equal(m.inviteStatus(groupId, ADMIN.address), "invited");
+  const events = [];
+  const declined = m._takeMemberStatuses([{ groupId, senderAddress: ADMIN.address, plaintext: G.encodeMemberStatus("declined"), txId: "t1" }], events);
+  assert.equal(declined.length, 0);
+  assert.equal(events[0].kind, "member-status");
+  assert.equal(m.inviteStatus(groupId, ADMIN.address), "declined");
+  const kept = m._takeMemberStatuses([{ groupId, senderAddress: ADMIN.address, plaintext: "hello" }], events);
+  assert.equal(kept.length, 1);
+  assert.equal(m.inviteStatus(groupId, ADMIN.address), null, "they're in");
+});
+
+await test("the invite stores are wiped with the account", async () => {
+  const appSource = readFileSync(join(here, "../ui/app.js"), "utf8");
+  for (const key of [GROUP_INVITES_KEY, GROUP_INVITE_ANSWERS_KEY, GROUP_MEMBER_STATUS_KEY]) assert.ok(appSource.includes(`"${key}"`), key);
 });
 
 console.log(`\n${ok} passed`);

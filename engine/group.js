@@ -192,6 +192,52 @@ export function verifyTombstonePayload(payload) {
   } catch { return false; }
 }
 
+// --- gctl_invite_accept: you joined this group --------------------------------
+// Self-addressed and signed, like gctl_tombstone (which is what a rejection publishes): it's how
+// your other devices and a restore of your words learn the answer (iOS bfe9f022, MESSAGING.md
+// "Group invites"). Older clients ignore it.
+export function buildInviteAcceptSigningPayload({ v = 1, groupId }) {
+  return concatBytes(new Uint8Array([v]), utf8Bytes("gctl_invite_accept"), asBytes(groupId));
+}
+
+export function buildSignedInviteAcceptPayload({ groupId, signingPub, privateKey }) {
+  const sig = signBytes(buildInviteAcceptSigningPayload({ v: 1, groupId }), privateKey);
+  return {
+    type: "gctl_invite_accept",
+    v: 1,
+    group_id: bytesToHex(asBytes(groupId)),
+    signing_pub: bytesToHex(asBytes(signingPub)),
+    sig: bytesToHex(sig),
+  };
+}
+
+export function verifyInviteAcceptPayload(payload) {
+  try {
+    const signingPayload = buildInviteAcceptSigningPayload({ v: payload.v ?? 1, groupId: payload.group_id });
+    return verifyBytes(payload.sig, signingPayload, payload.signing_pub);
+  } catch { return false; }
+}
+
+// --- member_status: the group message a member answers their invite with ------
+// Sealed and signed like any group message, so only members can read it and nobody can say it for
+// you. Never a bubble.
+export const MEMBER_STATUS = Object.freeze({ INVITED: "invited", JOINED: "joined", DECLINED: "declined" });
+
+export function encodeMemberStatus(status) {
+  return JSON.stringify({ type: "member_status", status });
+}
+
+/** Only an answer: nobody can send themselves back to "invited". */
+export function parseMemberStatus(text) {
+  const value = String(text ?? "");
+  if (value[0] !== "{") return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed?.type !== "member_status") return null;
+    return parsed.status === MEMBER_STATUS.JOINED || parsed.status === MEMBER_STATUS.DECLINED ? parsed.status : null;
+  } catch { return null; }
+}
+
 // --- gctl_photo: admin-set group photo, distributed to every member ----------
 // A separate signed control type (like gctl_tombstone) so it never touches the
 // gctl_root signature — older clients simply ignore an unknown control type.

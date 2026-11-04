@@ -12,7 +12,7 @@ import { accountGuard, accountScopedValue, accountStillSaved } from "./account-g
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
 import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
-import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHANGE_UNAVAILABLE, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, spendingIndexTitle, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, spendingChangeIndex, freshChangeRequired, quantumSpentFromHistory } from "../engine/quantum.js";
+import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHANGE_UNAVAILABLE, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, addressNumber, spendingIndexTitle, visibilityPagerRange, spendingChainSummaries, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, spendingChangeIndex, freshChangeRequired, quantumSpentFromHistory } from "../engine/quantum.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
@@ -28,6 +28,8 @@ import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBro
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount, chessTournamentsMayLeave, openChessBotChallenge } from "./chess-tournaments.js";
 import { parseBotChallengeLink, botChallengeFromLaunchSearch } from "../engine/chess-bot-links.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
+import { PHOTO_UNLOCK_DELAY_MS, photosUnlockTime, photosAreHidden } from "./photo-unlock.js";
+import { createProfileRescans } from "./profile-rescan.js";
 import { kachatHeroProfile, kachatCachedOwnedNameCount, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames, startKachatUnnamedIdentitySweep } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell, removeKachatNameReminders } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab, openKachatMarketSheet } from "./kachat-market.js";
@@ -46,9 +48,9 @@ import { openKaPostComposerWithText } from "./kaposts.js";
 import { blockKaPostAccount, closeKaPostCovers, kaPostsBlockedAddresses, kaPostsFeedToTop } from "./kaposts.js";
 import { broadcastBlockedAccountsChanged } from "./broadcasts.js";
 import { askKaPostTerms, kaPostTermsAccepted, kaPostTermsHtml } from "./kapost-moderation.js";
-import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml } from "./kachat-bots.js";
+import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml, KACHAT_BOTS } from "./kachat-bots.js";
 import {
-  configureAddressBook, addressBookName, addressBookEntry, addressBookIsEmpty, archiveAddressBook,
+  configureAddressBook, addressBookName, addressBookEntry, addressBookEntries, addressBookPhoto, addressBookIsEmpty, archiveAddressBook,
   importAddressBookArchive, mergeAddressBookArchives, removeAddressBookForWallet, saveAddressBookEntry,
 } from "./address-book-store.js";
 import {
@@ -109,6 +111,7 @@ import { KNSProfileLinkBuilder, safeExternalHref, clearAllKnsCache } from "../en
 import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import { createAccountBackupStatus, nextDefaultAccountName, accountHasFunds } from "./account-backup-status.js";
+import { walletTotalSompi, spendingTotalAfterRead, sumBalancesSompi, walletAmountText } from "./wallet-balance.js";
 import { configureAccountBackup, openAccountBackup, openBackupHygiene, closeAccountBackup } from "./account-backup.js";
 import { ownedNamesStorageKey } from "../engine/kachat-names/owned-names-cache.js";
 import { marketAddressesStorageKey } from "../engine/kachat-names/actions.js";
@@ -121,7 +124,6 @@ import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 // icon in the notification and on the KAS mark).
 import kaspaLogoUrl from "./assets/kaspa-logo.png";
 import kachatLogoUrl from "./assets/kachat-logo.png";
-import addressExplainerUrl from "./assets/address-explainer.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, PROMPT_EXTRA, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 import { attachRowSwipes, chatRowSwipeActions } from "./row-swipe.js";
@@ -282,16 +284,11 @@ function effectiveNotifyMode(address) {
 function defaultIncomingNotifyMode() {
   return (accountShellPrefs.notificationSound ?? true) === false ? "noSound" : "sound";
 }
-// "auto" (decide from the global photo-approval setting) | "always" (this contact is trusted,
-// always render) | "manual" (never auto-render). Mirrors iOS PhotoAutoDisplayMode
-// (.automatic / .alwaysShow / .alwaysHide); older installs only ever stored auto/manual.
-function getContactPhotos(address) { return contactPrefs[address]?.photos || "auto"; }
 function contactCallsEnabled(address) {
   return contactPrefs[address]?.calls === true;
 }
 function setContactCallsEnabled(address, enabled) {
   setContactPref(address, "calls", enabled ? true : undefined);
-  try { refreshChatInfoContactControls(); } catch { /* Chat Info not open */ }
 }
 function setContactPref(address, key, value) {
   if (!address) return;
@@ -325,19 +322,6 @@ function setGroupNotify(groupId, value) {
   try { scheduleWebPushSync(); } catch { /* not started yet */ }
 }
 
-// Photos revealed when a photo bubble is held back (per-contact "manual", or the global approval
-// gate for a contact you have not accepted yet). Kept across launches, by txid (iOS
-// PhotoRevealStore "kachat.revealedPhotoTxIds": txids are unique chain-wide).
-const REVEALED_PHOTOS_KEY = "kachat-revealed-photo-txids-v1";
-const revealedPhotoIds = (() => {
-  try { return new Set(JSON.parse(localStorage.getItem(REVEALED_PHOTOS_KEY) || "[]").map(String)); } catch { return new Set(); }
-})();
-function markPhotoRevealed(message) {
-  const key = String(message?.txid || message?.id || "");
-  if (!key || revealedPhotoIds.has(key)) return;
-  revealedPhotoIds.add(key);
-  try { localStorage.setItem(REVEALED_PHOTOS_KEY, JSON.stringify([...revealedPhotoIds].slice(-5000))); } catch { /* fine */ }
-}
 const BALANCE_REFRESH_MS = 15000;
 const MESSAGE_REFRESH_MS = 5000;
 // Ceiling for the sweep's failure backoff, matching iOS's foregroundSweepMaxInterval.
@@ -630,8 +614,10 @@ configureKeyVault({ canonicalize: canonicalAccountAddress, target: currentVaultT
 // Every KAS you send asks first (owner, 2026-10-23): Face ID where it is set up (the prompt's
 // "Use Face ID"), else the account's password. engine.confirmSpend calls this before any send,
 // sweep or .kachat transfer is built, so no screen can skip it; chat messages are not KAS sends.
-async function authorizeKasSpend({ to = "", amountKas = null, max = false, amountSompi = null, domain = "" } = {}) {
+// Delete Account passes through the same gate with its own wording (iOS bfe9f022).
+async function authorizeKasSpend({ to = "", amountKas = null, max = false, amountSompi = null, domain = "", confirm = null } = {}) {
   if (!hasAppPassword()) return true; // nothing to confirm with (every account sets one at creation)
+  if (confirm) return requestPassword({ mode: "verify", title: confirm.title, message: confirm.message });
   let what;
   if (domain) what = `${domain} to ${shortAddress(to)}`;
   else if (max) what = amountSompi != null ? `${trimKas8(Number(amountSompi) / 1e8)} ${KAS_UNIT} (Max) to ${shortAddress(to)}` : `your full balance to ${shortAddress(to)}`;
@@ -958,7 +944,7 @@ document.querySelector("[data-password-forgot]")?.addEventListener("click", asyn
   closePasswordModal(false);
   const confirmed = await confirmDialog({
     title: "Forgot your password?",
-    message: "This account's keys on this device are encrypted with its password, and nobody can recover it, not even KaChat. Resetting removes the password and the encrypted keys from this browser (any other saved account that still shares this password too), along with the encrypted Nextcloud app password (connect Nextcloud again afterwards). Your chats and settings stay. Afterwards, import the account again with its recovery phrase. Without the recovery phrase, an account cannot be restored.",
+    message: "This account's keys on this device are encrypted with its password, and nobody can recover it, not even KaChat. Resetting removes the password and the encrypted keys from this browser (any other saved account that still shares this password too), along with the encrypted Nextcloud app password (connect Nextcloud again afterwards). Your chats and settings stay. Afterwards, import the account again with its 12 or 24 words. Without those words, an account cannot be restored.",
     confirmLabel: "Reset Password",
     destructive: true,
   });
@@ -966,7 +952,7 @@ document.querySelector("[data-password-forgot]")?.addEventListener("click", asyn
   const removed = resetForgottenAppPassword(forgotFor);
   refreshPasswordStatus();
   renderSavedAccountsScreen();
-  showCopyToast(removed ? "Password reset. Import your account with its recovery phrase." : "Password reset.");
+  showCopyToast(removed ? "Password reset. Import your account with its 12 or 24 words." : "Password reset.");
 });
 document.querySelectorAll("[data-password-cancel]").forEach((b) => b.addEventListener("click", () => closePasswordModal(false)));
 passwordModal?.addEventListener("click", (event) => { if (event.target === passwordModal && !passwordRequired) closePasswordModal(false); });
@@ -995,7 +981,7 @@ async function requireAppPasswordIfMissing() {
         mode: "set",
         required: true,
         title: "Set a Password",
-        message: `Create a password for this account, at least ${MIN_APP_PASSWORD_LENGTH} characters. Its keys are encrypted with it, and KaChat asks for it to open this account and to show its seed phrase or private key. Other accounts keep their own passwords. If you forget it, you'll need your recovery phrase.`,
+        message: `Create a password for this account, at least ${MIN_APP_PASSWORD_LENGTH} characters. Its keys are encrypted with it, and KaChat asks for it to open this account and to show its 12 or 24 words or private key. Other accounts keep their own passwords. If you forget it, you'll need your 12 or 24 words.`,
       });
       if (ok) {
         refreshPasswordStatus();
@@ -1018,20 +1004,20 @@ function refreshPasswordStatus() {
   const saveNote = document.querySelector("[data-save-account-note]");
   if (saveNote) {
     saveNote.textContent = hasPassword
-      ? "Keys are encrypted with each account's password. If you forget one, you'll need that account's recovery phrase."
+      ? "Keys are encrypted with each account's password. If you forget one, you'll need that account's 12 or 24 words."
       : "Without a password, keys are stored unencrypted in this browser. Set a password to encrypt them.";
   }
   const keepNote = document.querySelector("[data-keep-signed-in-note]");
   if (keepNote) {
     keepNote.textContent = hasPassword
-      ? "KaChat opens straight into your account and stays signed in on this device until you log out. Signing in to another saved account, and showing a seed phrase or private key, ask for the password."
+      ? "KaChat opens straight into your account and stays signed in on this device until you log out. Signing in to another saved account, and showing 12 or 24 words or a private key, ask for the password."
       : "Restore the active account when KaChat opens.";
   }
 }
 refreshPasswordStatus();
 document.querySelector("[data-change-password]")?.addEventListener("click", async () => {
   if (!hasAppPassword()) {
-    if (await requestPassword({ mode: "set", title: "Set Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. This account's keys will be encrypted with it, and KaChat will ask for it when you open this account, including after you close the tab or refresh the page. If you forget it, you'll need your recovery phrase.` })) {
+    if (await requestPassword({ mode: "set", title: "Set Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. This account's keys will be encrypted with it, and KaChat will ask for it when you open this account, including after you close the tab or refresh the page. If you forget it, you'll need your 12 or 24 words.` })) {
       showCopyToast("Password set. Your keys are now encrypted.");
       refreshPasswordStatus();
     }
@@ -1040,7 +1026,7 @@ document.querySelector("[data-change-password]")?.addEventListener("click", asyn
   // Change only: the password can't be removed - it is what keeps the keys encrypted.
   if (!(await requestPassword({ mode: "verify", title: "Current Password", message: "Enter your current password." }))) return;
   const biometricWasOn = hasBiometricUnlock();
-  if (await requestPassword({ mode: "set", title: "New Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. Only this account's password changes; your other accounts keep theirs. If you forget it, you'll need your recovery phrase.` })) {
+  if (await requestPassword({ mode: "set", title: "New Password", message: `At least ${MIN_APP_PASSWORD_LENGTH} characters. Only this account's password changes; your other accounts keep theirs. If you forget it, you'll need your 12 or 24 words.` })) {
     // A new password means a new data key: Face ID unlock was turned off with it (key-vault.js).
     showCopyToast(biometricWasOn && !hasBiometricUnlock() ? `Password updated. Turn ${biometricDisplayName()} unlock on again below.` : "Password updated for this account");
     refreshPasswordStatus();
@@ -1460,7 +1446,7 @@ function deleteAccountWarningHtml({ notBackedUp, canBackUpHere }) {
     <span class="delete-account-warning-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4 21 19.5H3z"/><path d="M12 10v4.2"/><circle cx="12" cy="16.6" r=".3"/></svg></span>
     ${notBackedUp ? `<span class="delete-account-warning-strong">This account isn't backed up. If you delete it now, it and its funds can never be recovered.</span>` : ""}
     ${notBackedUp && !canBackUpHere ? "<span>To back it up first, sign in to it and use the card on the Profile tab.</span>" : ""}
-    <span>Make sure your seed phrase is backed up, and your passphrase too if you have one. They are the only way to recover this account and its funds.</span>
+    <span>Make sure your 12 or 24 words are backed up, and your passphrase too if you have one. They are the only way to recover this account and its funds.</span>
   </span>`;
 }
 
@@ -1573,7 +1559,7 @@ function removeAccountScopedLocalData(address) {
     const groupsAll = JSON.parse(localStorage.getItem("kachat-groups-v1") || "null") || {};
     for (const bucketKey of bucketKeys) for (const groupId of Object.keys(groupsAll?.[bucketKey] || {})) removedGroupIds.add(groupId);
   } catch { /* unreadable: no group ids to clear */ }
-  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY, GROUP_MUTED_MEMBERS_KEY, "kachat-group-tombstones-v1", "kachat-group-control-cursor-v1", "kachat-group-msg-counter-v1", SPENDING_STATE_KEY, UTXO_LABELS_KEY]) {
+  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY, GROUP_MUTED_MEMBERS_KEY, "kachat-group-tombstones-v1", "kachat-group-control-cursor-v1", "kachat-group-msg-counter-v1", "kachat-group-invites-v1", "kachat-group-invite-answers-v1", "kachat-group-member-status-v1", SPENDING_STATE_KEY, UTXO_LABELS_KEY]) {
     try {
       const all = JSON.parse(localStorage.getItem(key) || "null");
       if (!all || typeof all !== "object") continue;
@@ -2076,6 +2062,38 @@ document.addEventListener("paste", (event) => {
   event.preventDefault();
   event.stopPropagation();
 }, true);
+
+// A payment request link in the text being typed, above the field: the same details its bubble's
+// card will show, yours too (iOS bfe9f022 ComposerPaymentRequestPreview). The X takes the link out.
+function syncComposerPayPreview(host, text) {
+  if (!host) return;
+  const link = firstInternalLinkIn(text);
+  const raw = link?.kind === "pay" ? link.raw : "";
+  // Only when the request itself changes, so typing stays cheap.
+  if ((host.dataset.payLink || "") === raw) return;
+  host.dataset.payLink = raw;
+  host.hidden = !raw;
+  host.innerHTML = raw ? `
+    <span class="composer-pay-preview-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16.5v-9M8.2 11.3 12 7.5l3.8 3.8"/></svg></span>
+    <span class="composer-pay-preview-copy">
+      <small>Payment Request</small>
+      <strong>${escapeHtml(`${paymentRequestAmountText(link.request)} ${KAS_UNIT}`)}</strong>
+      ${link.request.memo ? `<span>${escapeHtml(link.request.memo)}</span>` : ""}
+    </span>
+    <button type="button" class="composer-pay-preview-remove" data-composer-pay-remove aria-label="Remove"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="m9 9 6 6M15 9l-6 6"/></svg></button>` : "";
+}
+function wireComposerPayPreview(host, input, reestimate) {
+  host?.addEventListener("click", (event) => {
+    if (!event.target.closest("[data-composer-pay-remove]") || !input) return;
+    const link = firstInternalLinkIn(input.value);
+    if (!link) return;
+    input.value = input.value.split(link.raw).join("").trim();
+    // The field's own input handlers keep its height, slots and draft.
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    reestimate();
+    input.focus();
+  });
+}
 
 // What a request asks for, above the amount on Send Kaspa (iOS PaymentRequestSummary), and who
 // made it: "Requested by" only when the signature checked out, else "Not signed" (7c71a98).
@@ -3513,14 +3531,23 @@ function handleKachatImageError(event) {
   }, () => kachatImageFailed(img));
 }
 if (kachatNamesUiEnabled()) document.addEventListener("error", handleKachatImageError, true);
+/// The photo you assigned to this address in Contacts, wherever its avatar shows (iOS bfe9f022
+/// KNSAvatarView.assignedPhoto): your own choice, so it wins over the avatar it set for itself.
+function assignedPhotoSpanHtml(address, className) {
+  const photo = address ? addressBookPhoto(address) : null;
+  return photo ? `<span class="${className}"><img src="${escapeHtml(photo)}" alt="" /></span>` : "";
+}
 function avatarHtmlFor(contact, className = "chat-avatar") {
-  // A user-assigned photo wins over the live KNS avatar, which wins over initials.
-  if (contact?.photo) return `<span class="${className}"><img src="${escapeHtml(contact.photo)}" alt="" /></span>`;
+  // Your Contacts photo, then their KNS / .kachat avatar, then the photo carried in the chat
+  // backup (contact.photo holds only that), then the glyph.
+  const assigned = assignedPhotoSpanHtml(contact?.address, className);
+  if (assigned) return assigned;
+  const backup = contact?.photo ? `<span class="${className}"><img src="${escapeHtml(contact.photo)}" alt="" /></span>` : "";
   // Testnet: the .kachat face, never the KNS one.
-  if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(contact?.address, className);
+  if (kachatNamesUiEnabled()) return kachatAvatarImgHtml(contact?.address) || !backup ? kachatAvatarSpanHtml(contact?.address, className) : backup;
   const avatarUrl = engine.peekKnsAddressProfile?.(contact.address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="${className}"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
-  return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
+  return backup || `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
 // Same idea as avatarHtmlFor, but for the active wallet's own messages —
@@ -3528,6 +3555,8 @@ function avatarHtmlFor(contact, className = "chat-avatar") {
 // initials. There's always something to show, even with no KNS profile at all.
 function selfAvatarHtml(className = "chat-avatar") {
   if (!engine.address) return `<span class="${className}">?</span>`;
+  const assigned = assignedPhotoSpanHtml(engine.address, className);
+  if (assigned) return assigned;
   // Testnet: your .kachat face (your own saved profile first), never the KNS one.
   if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(engine.address, className);
   const avatarUrl = engine.peekKnsAddressProfile?.(engine.address)?.profile?.avatarUrl;
@@ -3555,11 +3584,12 @@ function updateAvatarElement(initialsEl, imageEl, contact) {
       showImage(false);
     });
   }
-  // The contact's photo, else their .kachat face - never the KNS one (every network, iOS 7227d69).
+  // Your Contacts photo, then their avatar, then the backup photo (iOS bfe9f022).
+  const assignedPhoto = contact?.address ? addressBookPhoto(contact.address) : null;
+  // Their .kachat face - never the KNS one (every network, iOS 7227d69).
   if (kachatNamesUiEnabled()) {
-    const photo = contact?.photo || "";
-    const kachatSrc = photo ? "" : (kachatCachedAvatarUrl(contact?.address) || "");
-    const next = photo || kachatSrc;
+    const kachatSrc = assignedPhoto ? "" : (kachatCachedAvatarUrl(contact?.address) || "");
+    const next = assignedPhoto || kachatSrc || contact?.photo || "";
     if (next) {
       if (kachatSrc) { imageEl.referrerPolicy = "no-referrer"; imageEl.dataset.kachatImg = "element"; } else delete imageEl.dataset.kachatImg;
       if (imageEl.getAttribute("src") !== next) imageEl.src = next;
@@ -3571,8 +3601,7 @@ function updateAvatarElement(initialsEl, imageEl, contact) {
     }
     return;
   }
-  // User-assigned photo takes priority over the live KNS avatar.
-  const src = contact?.photo || engine.peekKnsAddressProfile?.(contact.address)?.profile?.avatarUrl;
+  const src = assignedPhoto || engine.peekKnsAddressProfile?.(contact.address)?.profile?.avatarUrl || contact?.photo;
   if (src) {
     imageEl.src = src;
     showImage(true);
@@ -3603,7 +3632,6 @@ let chatInfoRequestToken = 0;
 let chatInfoContactId = null;
 let chatInfoContactAddress = null;
 const chatInfoNotifyToggle = document.querySelector("[data-chat-info-notify]");
-const chatInfoPhotosToggle = document.querySelector("[data-chat-info-photos]");
 
 // --- Chat Info "Aliases" block: this conversation's deterministic pair aliases
 // (ECDH + HKDF, 12 hex chars, engine/kasia-cipher.js). Direction semantics are
@@ -3653,20 +3681,14 @@ chatInfoAliasSending?.addEventListener("click", async () => {
   try { await copyTextToClipboard(chatInfoAliasSending.textContent); showCopyToast("Alias copied to clipboard."); } catch {}
 });
 
-// Notifications and Photos are staged while User Info is open and land on Save, as iOS keeps
-// them in @State until saveChanges (Cancel drops them). null = nothing staged: the stored value.
+// Notifications is staged while User Info is open and lands on Save, as iOS keeps it in @State
+// until saveChanges (Cancel drops it). null = nothing staged: the stored value.
 let chatInfoStagedNotify = null;
-let chatInfoStagedPhotos = null;
 function chatInfoNotifyChoice() {
   return chatInfoStagedNotify ?? (getContactNotifyOverride(chatInfoContactAddress) || "default");
 }
-function chatInfoPhotosChoice() {
-  return chatInfoStagedPhotos ?? getContactPhotos(chatInfoContactAddress);
-}
 const CHAT_INFO_BELL_SVG = '<path d="M18 15v-4a6 6 0 1 0-12 0v4l-2 3h16zM10 21h4"/>';
 function refreshChatInfoContactControls() {
-  const callsToggle = document.querySelector("[data-chat-info-calls]");
-  if (callsToggle) callsToggle.checked = contactCallsEnabled(chatInfoContactAddress);
   // The Notifications row's bell is slashed while the (staged) choice is Off (iOS bell.slash).
   const bell = document.querySelector("[data-chat-info-bell]");
   if (bell) bell.innerHTML = CHAT_INFO_BELL_SVG + (chatInfoNotifyChoice() === "off" ? '<path d="M3 3l18 18"/>' : "");
@@ -3677,34 +3699,14 @@ function refreshChatInfoContactControls() {
     const option = chatInfoNotifyToggle.querySelector("[data-chat-info-notify-default]");
     if (option) option.textContent = `Default (${defaultIncomingNotifyMode() === "noSound" ? "No Sound" : "Sound"})`;
   }
-  // Three states, matching iOS's PhotoAutoDisplayMode: Automatic follows the global approval
-  // setting, Always Show and Always Hide are per-contact overrides. The old two-state switch
-  // could not say "follow the default" at all - flipping it on and then off again left the
-  // contact pinned to an override that no longer tracked the setting it came from.
-  if (chatInfoPhotosToggle) {
-    chatInfoPhotosToggle.value = chatInfoPhotosChoice();
-    const auto = chatInfoPhotosToggle.querySelector("[data-chat-info-photos-auto]");
-    if (auto) {
-      const contact = (state.contacts || []).find((entry) => entry.address === chatInfoContactAddress);
-      const shows = (accountShellPrefs.photoApprovalForNewContacts ?? true) === false
-        || isAcceptedContact(contact || { address: chatInfoContactAddress });
-      auto.textContent = `Automatic (${shows ? "Show" : "Hidden"})`;
-    }
-  }
 }
 chatInfoNotifyToggle?.addEventListener("change", () => {
   if (!chatInfoContactAddress) return;
   chatInfoStagedNotify = String(chatInfoNotifyToggle.value || "default");
   refreshChatInfoContactControls();
 });
-chatInfoPhotosToggle?.addEventListener("change", () => {
-  if (!chatInfoContactAddress) return;
-  chatInfoStagedPhotos = String(chatInfoPhotosToggle.value || "auto");
-  refreshChatInfoContactControls();
-});
-/** Save: the staged Notifications and Photos choices land. "default" / "auto" store nothing: an
- *  override that happens to equal today's default would silently stop following it the next
- *  time the default changes. */
+/** Save: the staged Notifications choice lands. "default" stores nothing: an override that happens
+ *  to equal today's default would silently stop following it the next time the default changes. */
 function applyChatInfoStagedPrefs() {
   const address = chatInfoContactAddress;
   if (address && chatInfoStagedNotify != null) {
@@ -3715,14 +3717,7 @@ function applyChatInfoStagedPrefs() {
     // The browser has to allow notifications at all; asked once, quietly.
     if (choice !== "off") ensureNotificationPermission().catch(() => {});
   }
-  if (address && chatInfoStagedPhotos != null) {
-    const choice = chatInfoStagedPhotos;
-    setContactPref(address, "photos", choice === "auto" ? undefined : choice);
-    const conv = state.conversations.find((entry) => entry.id === activeConversationId);
-    if (conv && contactForConversation(conv)?.address === address) renderMessages(conv);
-  }
   chatInfoStagedNotify = null;
-  chatInfoStagedPhotos = null;
 }
 // No permission request at load: Safari (and so every iPhone home-screen app) only shows the
 // prompt from a tap, and Chrome quietly blocks sites that ask on arrival. The ask waits for a
@@ -3836,6 +3831,8 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
   let body;
   if (poolEnvelope) body = "Received payment";
   else if (isPaymentBubble(message)) body = chatPaymentNotificationBody({ amountKas: message.paymentAmountKas, unit: KAS_UNIT });
+  // A payment request link is a card in the chat, never a link to read out (iOS bfe9f022).
+  else if (parsePaymentRequestLinkCached(displayTextForMessage(message))) body = "Requested for payment";
   else body = displayTextForMessage(message) || "New message";
   // One notification per chat (iOS groups a chat's banners under its thread): the tag is the
   // sender's address, the same one a closed-app push for this chat uses (public/sw-push.js), so a
@@ -4536,6 +4533,8 @@ function normalizeContact(contact) {
     // A user-assigned photo (compressed data URL) for contacts without a KNS avatar.
     // Lives on the contact, so it rides along in the desktopState backup automatically.
     photo: String(contact?.photo || ""),
+    // When photos from this person start to show (photosUnlockAtFor). Absent until known.
+    ...(Number(contact?.photosUnlockAt) > 0 ? { photosUnlockAt: Number(contact.photosUnlockAt) } : {}),
     createdAt,
     updatedAt: Number(contact?.updatedAt || createdAt),
     relationshipState: String(contact?.relationshipState || "legacy-manual"),
@@ -4845,6 +4844,8 @@ function messageRequestsSheetEl() {
     </div>`;
   el.addEventListener("click", (event) => {
     if (event.target === el || event.target.closest("[data-message-requests-done]")) { el.hidden = true; return; }
+    const inviteRow = event.target.closest("[data-group-invite-id]");
+    if (inviteRow) { openGroupInvitePreview(inviteRow.dataset.groupInviteId); return; }
     const row = event.target.closest("[data-request-conversation-id]");
     if (!row) return;
     el.hidden = true;
@@ -4862,16 +4863,95 @@ function renderMessageRequestsSheet() {
   if (!el || el.hidden) return;
   const listEl = el.querySelector("[data-message-requests-list]");
   const requests = messageRequestConversations();
-  if (!requests.length && messageRequestsChecking) {
+  const invites = pendingGroupInvites();
+  if (!requests.length && !invites.length && messageRequestsChecking) {
     listEl.innerHTML = `<div class="message-requests-checking"><span class="initial-sync-spinner" aria-hidden="true"></span><span>Checking for new requests…</span></div>`;
     return;
   }
-  if (!requests.length) {
+  if (!requests.length && !invites.length) {
     listEl.innerHTML = `<div class="message-requests-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4.5"/><path d="M4 13.5 6.2 6.3A2 2 0 0 1 8.1 5h7.8a2 2 0 0 1 1.9 1.3L20 13.5h-4.2a1 1 0 0 0-.9.6l-.6 1.3a1 1 0 0 1-.9.6h-2.8a1 1 0 0 1-.9-.6l-.6-1.3a1 1 0 0 0-.9-.6Z"/></svg><strong>No message requests</strong></div>`;
     return;
   }
-  listEl.innerHTML = `<div class="message-requests-card">${requests.map((entry) => conversationRowHtml(entry, { idAttr: "data-request-conversation-id" })).join("")}</div>
-  <p class="message-requests-footer">Open a request to read it. Accept to reply and move it to your chats; Reject deletes it and stops that address reaching you until you write to them.</p>`;
+  const invitesHtml = invites.length ? `<h3 class="message-requests-section">Group Invites</h3>
+  <div class="message-requests-card">${invites.map((invite) => `
+    <button class="chat-row group-invite-row" type="button" data-group-invite-id="${escapeHtml(invite.groupId)}">
+      <span class="chat-avatar group-row-avatar"><span class="group-avatar-fallback">${GROUP_AVATAR_SVG}</span></span>
+      <span class="chat-meta"><strong>${escapeHtml(invite.name)}</strong><span>Invited by ${escapeHtml(groupSenderLabel(invite.adminAddress))}</span></span>
+    </button>`).join("")}</div>` : "";
+  listEl.innerHTML = `${invitesHtml}${requests.length ? `<div class="message-requests-card">${requests.map((entry) => conversationRowHtml(entry, { idAttr: "data-request-conversation-id" })).join("")}</div>` : ""}`;
+}
+/** Invites waiting for an answer (iOS bfe9f022 pendingGroupInvites). */
+function pendingGroupInvites() {
+  try { return getGroupManager()?.pendingGroupInvites() || []; } catch { return []; }
+}
+/** Group Invite (iOS GroupInvitePreviewView): who invited you and who's in it, then Reject or Accept.
+ *  Neither asks again, and each answer goes out as a small transaction. */
+function openGroupInvitePreview(groupId) {
+  const invite = pendingGroupInvites().find((entry) => entry.groupId === groupId);
+  if (!invite) { renderMessageRequestsSheet(); return; }
+  document.querySelector("[data-group-invite-modal]")?.remove();
+  const el = document.createElement("div");
+  el.className = "modal-backdrop message-requests-backdrop";
+  el.dataset.groupInviteModal = "";
+  el.innerHTML = `
+    <div class="contact-modal message-requests-modal group-invite-modal" role="dialog" aria-modal="true" aria-label="Group Invite">
+      <header class="create-chat-header">
+        <button class="create-chat-nav-button" type="button" data-group-invite-back>Back</button>
+        <h2>Group Invite</h2>
+        <span></span>
+      </header>
+      <div class="message-requests-list">
+        <div class="group-invite-head">
+          <span class="group-invite-avatar"><span class="group-avatar-fallback">${GROUP_AVATAR_SVG}</span></span>
+          <strong>${escapeHtml(invite.name)}</strong>
+          <span>Invited by ${escapeHtml(groupSenderLabel(invite.adminAddress))}</span>
+          <p>You're not in this group unless you accept. Your answer goes out as a small encrypted transaction, so the group and your other devices know.</p>
+        </div>
+        <h3 class="message-requests-section">Members</h3>
+        <div class="message-requests-card">${invite.members.map((address) => `
+          <div class="group-invite-member">${memberAvatarHtml(address)}<span>${escapeHtml(groupSenderLabel(address))}</span></div>`).join("")}</div>
+      </div>
+      <footer class="group-invite-actions">
+        <button class="message-request-reject" type="button" data-group-invite-reject>Reject</button>
+        <button class="message-request-accept" type="button" data-group-invite-accept>Accept</button>
+      </footer>
+    </div>`;
+  el.addEventListener("click", async (event) => {
+    if (event.target === el || event.target.closest("[data-group-invite-back]")) { el.remove(); return; }
+    const mgr = getGroupManager();
+    if (!mgr) return;
+    if (event.target.closest("[data-group-invite-reject]")) {
+      el.remove();
+      mgr.rejectGroupInvite(groupId);
+      refreshMessageRequestsSheet();
+      return;
+    }
+    if (event.target.closest("[data-group-invite-accept]")) {
+      el.remove();
+      const joined = await mgr.acceptGroupInvite(groupId);
+      if (joined) applyGroupSyncResult({ controls: [joined], messages: [] }, { catchUp: true });
+      refreshMessageRequestsSheet();
+      syncGroupsNow().catch(() => {});
+      try { scheduleWebPushSync(); } catch { /* not started yet */ }
+    }
+  });
+  document.body.appendChild(el);
+}
+/** The requests row's count and an open sheet, after an invite comes or goes. */
+function refreshMessageRequestsSheet() {
+  renderChats();
+  renderMessageRequestsSheet();
+}
+/** Being invited (iOS NotificationService): one banner per invite, whose tap opens Message Requests. */
+function notifyGroupInvite(invite) {
+  showAppNotification({
+    title: "New message request",
+    body: `You were invited to "${invite.name}"`,
+    tag: `kachat-group-invite-${invite.groupId}`,
+    key: `group-invite-${invite.groupId}`,
+    route: { kind: "requests" },
+    onClick: () => { setActiveAppTab("chats"); openMessageRequestsSheet(); },
+  }).catch(() => { /* best-effort */ });
 }
 function openMessageRequestsSheet() {
   const el = messageRequestsSheetEl();
@@ -4925,8 +5005,6 @@ function updateMessageRequestUi(conversationEntry) {
   const isRequest = Boolean(conversationEntry) && isMessageRequest(conversationEntry);
   if (bar) {
     bar.hidden = !isRequest;
-    const text = bar.querySelector("[data-message-request-text]");
-    if (text && contact) text.textContent = `${displayNameForAddress(contact)} wants to chat. Accept to reply - nothing is sent until you write back.`;
   }
   if (shell) shell.hidden = isRequest;
   const heardFrom = (conversationEntry?.messages || []).some((m) => m?.direction === "incoming" && m?.messageType !== "handshake");
@@ -4944,12 +5022,11 @@ function updateMessageRequestUi(conversationEntry) {
   syncComposerSlots();
 }
 
-/** The accepted/established-contact predicate behind the stranger-gating features, mirroring
- *  iOS ContactsManager.isAcceptedContact: true for contacts you added yourself and for anyone
- *  you have ever sent a message to (accepting a communication request IS an outgoing message,
- *  and it also flips the relationship to "established"). The only contacts desktop ever
- *  auto-adds without your say-so are the ones an incoming handshake created, so those are the
- *  "new contacts" the photo-approval setting is about. */
+/** The accepted/established-contact predicate behind link previews, mirroring iOS
+ *  ContactsManager.isAcceptedContact: true for contacts you added yourself and for anyone you
+ *  have ever sent a message to (accepting a communication request IS an outgoing message, and it
+ *  also flips the relationship to "established"). The only contacts desktop ever auto-adds
+ *  without your say-so are the ones an incoming handshake created. */
 function isAcceptedContact(contact, conversationEntry = null) {
   if (!contact) return false;
   // Kept only because you looked at their User Info (a profile link, a group roster, a room):
@@ -4958,7 +5035,7 @@ function isAcceptedContact(contact, conversationEntry = null) {
     const entry = conversationEntry || (state.conversations || []).find((e) => e.contactId === contact.id);
     return (entry?.messages || []).some((message) => message?.direction === "outgoing" && message?.messageType !== "handshake");
   }
-  // An unaccepted Message Request is a stranger: their photos and links wait for a tap.
+  // An unaccepted Message Request is a stranger: their links wait for a tap.
   const requestEntry = conversationEntry || (state.conversations || []).find((e) => e.contactId === contact.id);
   if (requestEntry && isMessageRequest(requestEntry)) return false;
   const relationship = String(contact.relationshipState || "");
@@ -4967,17 +5044,26 @@ function isAcceptedContact(contact, conversationEntry = null) {
   return (entry?.messages || []).some((message) => message?.direction === "outgoing" && message?.messageType !== "handshake");
 }
 
-/** Whether an incoming photo from this contact renders inline or waits behind a "Tap to view
- *  photo" placeholder. Mirrors iOS ContactsManager.shouldAutoDisplayPhotos: the per-contact
- *  Chat Info override wins outright, and otherwise Settings > Chats > "Require approval for
- *  photos from new contacts" (default ON) holds back photos from contacts you have not
- *  accepted yet. A revealed one stays revealed (revealedPhotoIds, persisted by txid). */
-function shouldAutoDisplayPhotosFrom(contact, conversationEntry = null) {
-  const override = getContactPhotos(contact?.address);
-  if (override === "manual") return false;
-  if (override === "always") return true;
-  if ((accountShellPrefs.photoApprovalForNewContacts ?? true) === false) return true;
-  return isAcceptedContact(contact, conversationEntry);
+/** The one rule for photos from someone, with no setting to change it (iOS d1844582): hidden
+ *  until you have both sent a message and 10 minutes have passed. The date is kept on the contact
+ *  once known, so trimming old messages can't hide their photos again. A timer redraws the open
+ *  chat the moment it passes. Null until both of you have. */
+let photosUnlockTimer = null;
+function photosUnlockAtFor(contact, conversationEntry, messages) {
+  const unlockAt = contact?.photosUnlockAt ?? photosUnlockTime(messages);
+  if (unlockAt != null && contact && contact.photosUnlockAt == null) {
+    contact.photosUnlockAt = unlockAt;
+    schedulePersistState();
+  }
+  if (photosUnlockTimer) window.clearTimeout(photosUnlockTimer);
+  photosUnlockTimer = null;
+  if (unlockAt != null && unlockAt > Date.now() && conversationEntry?.id === activeConversationId) {
+    photosUnlockTimer = window.setTimeout(() => {
+      photosUnlockTimer = null;
+      if (conversationEntry.id === activeConversationId) renderMessages(conversationEntry);
+    }, Math.min(unlockAt - Date.now() + 50, PHOTO_UNLOCK_DELAY_MS));
+  }
+  return unlockAt;
 }
 
 function promoteRelationshipFromIncomingEvidence(contact, conversationEntry, { persist = true } = {}) {
@@ -6087,13 +6173,11 @@ function isSelfConversation(conversationEntry) {
   return Boolean(address) && Boolean(engine.address) && address === engine.address;
 }
 function sortedConversations() {
-  // Your own chat sits at the very top at all times (iOS pinningSelfChat); every other chat by its
-  // newest message. iOS has no pinned 1:1 chats, so an old `pinned` flag no longer outranks a
+  // By newest message, your own chat too (iOS d1844582). An old `pinned` flag no longer outranks a
   // newer message. Chats with no messages yet go last, newest-created first.
   return [...state.conversations]
     .filter((conversationEntry) => !conversationEntry.archived)
-    .sort((a, b) => Number(isSelfConversation(b)) - Number(isSelfConversation(a))
-      || conversationRecency(b) - conversationRecency(a)
+    .sort((a, b) => conversationRecency(b) - conversationRecency(a)
       || Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 
@@ -6482,6 +6566,8 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
   if (!account.still()) return 0;
   let added = 0;
   let liveAdded = 0;
+  let sentAdded = 0;
+  let sentCursor = Number(conversationEntry.sync?.sentCursor || 0);
   // A chat reopened after a deletion keeps what came before it deleted: its deletion instant is a
   // floor every fetched message is held to (iOS 4b00a5f, isDeletedAsOf on every insert).
   const belowDeletionFloor = (incoming) => isContactDeletedAsOf(contact.address, incoming?.txid, incoming?.blockTime || incoming?.createdAt);
@@ -6514,6 +6600,33 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
       const live = !catchUp && isLiveMessageTime(message.createdAt);
       if (live) { maybeNotifyIncoming(conversationEntry, contact, message); liveAdded += 1; }
       added += 1;
+    }
+  }
+  // What this wallet sent from another device, read back with the seed (iOS bfe9f022): never news.
+  // Not while a send of ours is on its way: it may be in this answer before it has its txid here.
+  if (indexerUrl && contact.address !== engine.address && !(conversationEntry.messages || []).some((m) => m.direction === "outgoing" && !m.txid && m.status !== MESSAGE_STATUSES.FAILED)) {
+    try {
+      const sent = await engine.syncSentMessages({
+        conversationId: conversationEntry.id, contact, indexerUrl,
+        knownTxids: (conversationEntry.messages || []).filter((message) => !isHiddenPlaceholderMessage(message)).map((message) => message.txid).filter(Boolean),
+        cursor: conversationEntry.sync?.sentCursor || 0,
+      });
+      if (!account.still()) return added;
+      for (const outgoing of sent.messages || []) {
+        if (olderThanRetention(outgoing) || belowDeletionFloor(outgoing)) continue;
+        const hiddenKeys = new Set((conversationEntry.hiddenMessageKeys || []).map(String));
+        if (hiddenKeys.has(String(outgoing.txid)) || hiddenKeys.has(String(outgoing.id))) continue;
+        const placeholder = (conversationEntry.messages || []).find((m) => m.txid === outgoing.txid && upgradesPlaceholder(m, outgoing));
+        if (placeholder) conversationEntry.messages = conversationEntry.messages.filter((m) => m !== placeholder);
+        else if ((conversationEntry.messages || []).some((m) => m.txid === outgoing.txid)) continue;
+        const message = createMessage({ ...outgoing, conversationId: conversationEntry.id, contactId: contact.id });
+        applyMessagePatch(message, outgoing);
+        if (placeholder) message.id = placeholder.id;
+        if (appendIncomingOrReactionMessage(conversationEntry, message)) sentAdded += 1;
+      }
+      sentCursor = Number(sent.nextCursor || sentCursor);
+    } catch (error) {
+      appendEngineLog(`Sent message sync failed for ${contact.name}: ${error.message}`);
     }
   }
   // The self-chat does NOT run the incoming-payment sync: payments to your own chatting address
@@ -6563,15 +6676,17 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     ...(conversationEntry.sync || {}), lastSyncAt: Date.now(), lastFound: added,
     runs: Number(conversationEntry.sync?.runs || 0) + 1,
     cursor: Number(result.nextCursor || conversationEntry.sync?.cursor || 0),
+    sentCursor,
     lastNote: result.note || "Automatic Kasia sync complete.",
     scannedCount: Number(result.scannedCount || 0), decryptFailures: Number(result.decryptFailures || 0), indexerUrl,
   };
   // Backfill (restore / first sweep) is added as read; only live messages bump unread.
   if (liveAdded && activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + liveAdded;
-  if ((added || paymentStatusChanged) && activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+  if ((added || sentAdded || paymentStatusChanged) && activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   if (!quiet && added) setStatus(`${added} new message${added === 1 ? "" : "s"}`);
-  if (added) scheduleReplyGapRefetch(conversationEntry);
-  return added;
+  if (added || sentAdded) scheduleReplyGapRefetch(conversationEntry);
+  // Returned for the caller's persist and repaint; a read-back was never "new".
+  return added + sentAdded;
 }
 
 // A reply names the txid of the message it answers. When that message is on neither the thread
@@ -7241,7 +7356,7 @@ async function restoreChatsFromPaymentHistory() {
             const row = list.find((entry) => entry.txid === txid);
             if (row) row.sompi += sompi;
             // A message-carrying transaction (a handshake) proves the chat; only a payment is a bubble.
-            else list.push({ txid, sompi, blockTime, bubble: !protocol || chatPayment });
+            else list.push({ txid, sompi, blockTime, bubble: !protocol || chatPayment, payload: chatPayment ? payload : "" });
             outgoing.set(to, list);
           }
           continue;
@@ -7288,9 +7403,12 @@ async function restoreChatsFromPaymentHistory() {
         if (!row.bubble || !(row.sompi > 0n) || isContactDeletedAsOf(address, row.txid, row.blockTime)) continue;
         if ((chat.conversationEntry.messages || []).some((m) => m.txid === row.txid)) continue;
         const amountKas = kasTextFromSompi(row.sompi);
+        // A memo sealed since sends were recoverable comes back with the seed (iOS bfe9f022).
+        const memo = row.payload ? await engine.sentPaymentMemo(row.payload, address) : "";
+        if (engine.address !== wallet) return 0;
         const message = createMessage({
           conversationId: chat.conversationEntry.id, contactId: chat.contact.id, direction: "outgoing",
-          text: `Sent ${amountKas} ${KAS_UNIT}`, sender: wallet, receiver: address,
+          text: memo ? `Sent ${amountKas} ${KAS_UNIT} — ${memo}` : `Sent ${amountKas} ${KAS_UNIT}`, sender: wallet, receiver: address,
           status: MESSAGE_STATUSES.CONFIRMED, transport: "kaspa-payment", createdAt: row.blockTime || Date.now(),
         });
         applyMessagePatch(message, { messageType: "payment", paymentAmountKas: amountKas, txid: row.txid });
@@ -7534,6 +7652,7 @@ document.querySelector("[data-settings-balance]")?.addEventListener("click", asy
 });
 
 function closeAccountOverlay() {
+  saveAccountNameOnLeaving();
   // As a tab it stays up (no Done there); Done from inside a category comes back to the top.
   if (document.body.classList.contains("settings-tab") && currentAppTab && (currentAppTab === "settings" || hubSection === "settings")) {
     try { showSettingsCategory(null); } catch { /* not built yet */ }
@@ -7628,11 +7747,9 @@ function unreadNotifCount() {
 }
 function updateNotifBadge() {
   try { refreshTabBadges(); } catch {}
-  const badge = document.querySelector("[data-notif-badge]");
-  if (!badge) return;
-  // A plain red dot, not a number — "there is something unread" is the whole signal.
-  badge.textContent = "";
-  badge.hidden = unreadNotifCount() === 0;
+  // Profile's Notifications row (iOS bfe9f022 notificationsSection): its unread count, 0 included.
+  const count = document.querySelector("[data-notif-count]");
+  if (count) count.textContent = String(unreadNotifCount());
 }
 function renderNotifCenter() {
   const list = document.querySelector("[data-notif-list]");
@@ -7686,8 +7803,8 @@ document.querySelector("[data-notif-list]")?.addEventListener("click", (event) =
     // A receipt on one of your addresses opens that address on its History tab (iOS 13046ad).
     routeToOwnAddress(notif.targetId);
   } else if (notif.targetKind === "wallet" || notif.targetKind === "address") {
-    // Received-Kaspa rows open the Portfolio tab.
-    setActiveAppTab("portfolio");
+    // A receipt recorded without its address falls back to Wallet (iOS bfe9f022).
+    setActiveAppTab("wallet");
   } else if (notif.targetKind === "kachat") {
     // .kachat news opens the name (iOS 86471dd), the way a tapped .kachat push does.
     openKachatNameFromBell(notif.targetId, { showTab: () => setActiveAppTab("kachat-names") });
@@ -8192,6 +8309,7 @@ const spendingListEl = document.querySelector("[data-spending-address-list]");
 const spendingGenerateBtn = document.querySelector("[data-spending-generate]");
 const spendingScanBtn = document.querySelector("[data-spending-scan]");
 const spendingActionsToggle = document.querySelector("[data-spending-actions-toggle]");
+const spendingActionsIcon = spendingActionsToggle?.innerHTML || "";
 const spendingActionsMenu = document.querySelector("[data-spending-actions-menu]");
 // Address Visibility screen (iOS parity: SpendingAddressVisibilityView) — compact paged
 // checklist of every address so dozens can be hidden/revealed in one sitting.
@@ -8505,7 +8623,7 @@ function captureActiveSpendingAccount() {
 /// whose state its later writes go to. Throws without a readable recovery phrase.
 function spendingSendAccount() {
   const account = captureActiveSpendingAccount();
-  if (!account) throw new Error("This account has no recovery phrase, so spending sends aren't available.");
+  if (!account) throw new Error("This account has no 12 or 24 words, so spending sends aren't available.");
   return account;
 }
 /// The engine's signing arguments for `account` (engine/index.js sendFromSpending and the rest):
@@ -8873,6 +8991,7 @@ async function runAddressActivityCheck() {
     // An open Cold Storage account reloads on any own-address balance move, self-sends included
     // (iOS ColdStorageDetailView listens to .ownAddressActivity and .ownAddressUtxoActivity).
     if (balanceMoved) { try { refreshColdStorageOnActivity(); } catch { /* not started */ } }
+    if (balanceMoved) scheduleWalletRefresh();
     if (increases.length) await attributeAndNotifyAddressActivity(increases);
   } finally {
     addressActivityRunning = false;
@@ -8996,14 +9115,14 @@ async function attributeAndNotifyAddressActivity(increases) {
 // Where a tapped address-activity notification goes (iOS 13046ad). Each one is for one address,
 // so it carries that address and opens it on its History tab.
 function addressActivityRoute(kind, address) {
-  return !address ? { kind: "tab", tab: "profile" } : { kind: "address", address };
+  return !address ? { kind: "tab", tab: "wallet" } : { kind: "address", address };
 }
 function addressActivityCenterTarget(kind, address) {
   return !address ? { targetKind: "wallet" } : { targetKind: "address", targetId: address };
 }
 function openAddressActivityTarget(kind, address) {
   try {
-    if (!address) setActiveAppTab("profile");
+    if (!address) setActiveAppTab("wallet"); // iOS bfe9f022: the addresses and balances are Wallet's
     else routeToOwnAddress(address);
   } catch { /* the focus alone is still better than nothing */ }
 }
@@ -9477,54 +9596,103 @@ function saveSpendingBalCacheEntries(updates) {
 }
 
 // --- Profile's Manage Addresses card (iOS 6333dd3) ---
-// One card for every address of this account, opening Manage Addresses, with the account total:
-// the chatting address and every spending address, hidden ones too (iOS 245a5d2), so nothing
-// disappears from the balance.
+// The Wallet tab (iOS bfe9f022 WalletView): the total, split into the chatting and spending addresses.
 // Every revealed spending address together (BigInt sompi), null until first known. A failed lookup
-// leaves the previous total in place rather than clearing it: a total a few seconds stale reads
-// better than a line that vanishes because one request timed out. It belongs to the account it
-// was read for: after an account switch it reads as unknown (the spinner) until the new account's
-// own total lands, and a read that finishes after the switch is dropped (iOS c130dc1).
+// leaves the previous total in place rather than clearing it (ui/wallet-balance.js). It belongs to
+// the account it was read for: after an account switch it reads as unknown (the dash) until the new
+// account's own total lands, and a read that finishes after the switch is dropped (iOS c130dc1).
 const profileSpendingTotal = accountScopedValue(() => engine.address, null);
+function walletAmountLabel(sompi) {
+  return walletAmountText(sompi, (known) => `${kasTextFromSompi(known)} ${KAS_UNIT}`);
+}
 function renderProfileAccountTotal() {
-  renderAccountBackupCard();
-  const el = document.querySelector("[data-manage-addresses-total]");
-  if (!el) return;
+  renderAccountBackupBanner();
+  renderBackupHygieneCard();
+  const screen = document.querySelector('[data-app-tab-screen="wallet"]');
+  if (!screen) return;
   const chatting = sompiFromUserText(String(currentBalanceKas ?? ""));
-  const needsSpending = Boolean(activeAccountMnemonic());
-  const spendingTotalSompi = profileSpendingTotal.get();
-  if (chatting == null || (needsSpending && spendingTotalSompi == null)) {
-    el.innerHTML = '<span class="sk-spinner" aria-hidden="true"></span>';
-    return;
-  }
-  // 8 decimals, as iOS's card shows it (formatKaspaExact).
-  el.textContent = `${spendingKasText(chatting + (needsSpending ? spendingTotalSompi : 0n))} ${KAS_UNIT}`;
+  const spending = profileSpendingTotal.get();
+  const total = walletTotalSompi(chatting, spending);
+  screen.querySelector("[data-wallet-total]").textContent = walletAmountLabel(total);
+  screen.querySelector("[data-wallet-chatting]").textContent = walletAmountLabel(chatting);
+  screen.querySelector("[data-wallet-spending]").textContent = walletAmountLabel(spending);
+  // What the total is worth in your currency. Testnet coins aren't worth anything. Only while the
+  // screen is up: reading the line starts a price fetch when the last one is old.
+  if (screen.hidden) return;
+  const fiat = screen.querySelector("[data-wallet-fiat]");
+  const fiatText = total == null || IS_TESTNET ? null : kasFiatTextNow(Number(total) / 1e8, renderProfileAccountTotal);
+  fiat.hidden = !fiatText;
+  fiat.textContent = fiatText ? fiatText.replace(/^≈ /, "") : "";
+}
+document.querySelector("[data-wallet-total]")?.addEventListener("click", async () => {
+  const total = walletTotalSompi(sompiFromUserText(String(currentBalanceKas ?? "")), profileSpendingTotal.get());
+  if (total == null) return;
+  try { await copyTextToClipboard(kasTextFromSompi(total)); showCopyToast("Balance copied to clipboard."); } catch (error) { appendEngineLog(error.message); }
+});
+document.querySelector("[data-wallet-send]")?.addEventListener("click", () => { if (engine.address) openSendKaspaModal(); });
+document.querySelector("[data-wallet-receive]")?.addEventListener("click", () => { openReceiveKaspaScreen(); });
+document.querySelector("[data-wallet-request]")?.addEventListener("click", () => { if (engine.address) openCreatePaymentRequest(); });
+document.querySelector("[data-wallet-refresh]")?.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.classList.add("spinning");
+  button.disabled = true;
+  try { await Promise.all([refreshBalanceOnly(), refreshSpendingSummary()]); } catch { /* each stays as it was */ }
+  button.classList.remove("spinning");
+  button.disabled = false;
+});
+// Coalesces the bursts own-address activity arrives in (iOS WalletView.scheduleRefresh).
+let walletRefreshTimer = 0;
+function scheduleWalletRefresh() {
+  window.clearTimeout(walletRefreshTimer);
+  walletRefreshTimer = window.setTimeout(() => {
+    refreshBalanceOnly();
+    refreshSpendingSummary();
+  }, 500);
 }
 
-// Profile's card above Manage Addresses (iOS d063b897 accountBackupSection): until this account's
-// backup steps are finished, red once it holds funds; after that, Backup Hygiene every six months.
-function renderAccountBackupCard() {
-  const card = document.querySelector("[data-account-backup-card]");
-  if (!card) return;
-  const address = engine.address;
-  const pending = accountBackupStatus.isPending(address);
-  const hygiene = !pending && accountBackupStatus.isHygieneDue(address);
-  card.hidden = !(pending || hygiene);
-  if (card.hidden) return;
-  const hasFunds = pending && accountHasFunds(sompiFromUserText(String(currentBalanceKas ?? "")), profileSpendingTotal.get());
-  card.dataset.tone = hygiene ? "hygiene" : (hasFunds ? "funds" : "owed");
-  card.querySelector("[data-account-backup-card-title]").textContent = hygiene ? "Backup Hygiene" : "Backup Your Account To Prevent Loss Of Funds";
-  const note = card.querySelector("[data-account-backup-card-note]");
-  note.hidden = hygiene;
-  note.textContent = hasFunds ? "You now have funds that aren't backed up." : "If you lose this device, your seed phrase is the only way back.";
+// The strip under the bar on every main screen, and above Settings' title, until this account's
+// backup steps are finished (iOS bfe9f022 AccountBackupBanner). Red once the chatting address holds
+// funds, that address only. Back Up Account's first row follows the same state.
+function renderAccountBackupBanner() {
+  const pending = accountBackupStatus.isPending(engine.address);
+  const hasFunds = pending && accountHasFunds(sompiFromUserText(String(currentBalanceKas ?? "")), null);
+  document.querySelectorAll("[data-account-backup-banner]").forEach((banner) => {
+    banner.hidden = !pending;
+    banner.dataset.tone = hasFunds ? "funds" : "owed";
+    banner.querySelector("[data-account-backup-banner-note]").textContent = hasFunds
+      ? "You now have funds that aren't backed up."
+      : "If you lose this device, your 12 or 24 words are the only way back.";
+  });
+  document.body.classList.toggle("has-backup-banner", pending);
+  publishBackupBannerHeight();
+  const completeCard = document.querySelector("[data-settings-complete-backup-card]");
+  if (completeCard) completeCard.hidden = !pending;
 }
-document.querySelector("[data-account-backup-card]")?.addEventListener("click", async () => {
-  if (accountBackupStatus.isPending(engine.address)) {
-    if (await unlockForSeedPhrase()) await openAccountBackup();
-  } else {
-    await openBackupHygiene();
-  }
-  renderAccountBackupCard();
+/// Publishes the strip's real height, so the screens below can reserve exactly that much: it wraps
+/// to more lines on a narrow window.
+function publishBackupBannerHeight() {
+  const banner = document.querySelector(".app-backup-banner");
+  const height = banner && !banner.hidden ? Math.round(banner.getBoundingClientRect().height) : 0;
+  document.documentElement.style.setProperty("--backup-banner-h", `${height}px`);
+}
+if (typeof ResizeObserver === "function") {
+  const bannerEl = document.querySelector(".app-backup-banner");
+  if (bannerEl) new ResizeObserver(publishBackupBannerHeight).observe(bannerEl);
+}
+async function openAccountBackupSteps() {
+  if (await unlockForSeedPhrase()) await openAccountBackup();
+  renderAccountBackupBanner();
+}
+document.querySelectorAll("[data-account-backup-banner]").forEach((banner) => banner.addEventListener("click", openAccountBackupSteps));
+
+// Wallet's Backup Hygiene card, every six months (iOS bfe9f022 WalletView).
+function renderBackupHygieneCard() {
+  const card = document.querySelector("[data-backup-hygiene-card]");
+  if (card) card.hidden = !accountBackupStatus.isHygieneDue(engine.address);
+}
+document.querySelector("[data-backup-hygiene-card]")?.addEventListener("click", async () => {
+  await openBackupHygiene();
+  renderBackupHygieneCard();
 });
 configureAccountBackup({
   status: accountBackupStatus,
@@ -9536,7 +9704,7 @@ configureAccountBackup({
     return words.length ? { words, passphrase: String(record.passphrase || ""), passphraseForm: passphraseFormForRecord(record) } : null;
   },
   unlockSeed: () => unlockForSeedPhrase(),
-  onStatusChanged: () => renderAccountBackupCard(),
+  onStatusChanged: () => { renderAccountBackupBanner(); renderBackupHygieneCard(); },
   setEye: (button, revealed) => setPassphraseEye(button, revealed),
 });
 
@@ -9549,27 +9717,32 @@ async function refreshSpendingTotal() {
     const addr = deriveSpendingAddressAt(i);
     if (addr) addresses.push(addr);
   }
-  if (!addresses.length) { renderProfileAccountTotal(); return; }
+  if (!addresses.length) {
+    // No list means the addresses couldn't be worked out, not that they hold nothing: a dash (iOS
+    // bfe9f022 loadSpendingTotal).
+    profileSpendingTotal.clear();
+    renderProfileAccountTotal();
+    return;
+  }
+  let read = null;
   try {
     // ONE batched UTXO call for every address - the same call the Manage Addresses list makes,
     // rather than a round trip per address.
-    const byAddress = await spendingBalancesBatchSompi(addresses);
-    if (token !== spendingTotalToken || !account.still()) return;
-    let sompi = 0n;
-    for (const value of byAddress.values()) sompi += BigInt(Math.round(Number(value) || 0));
-    profileSpendingTotal.set(sompi, account.account);
+    read = sumBalancesSompi((await spendingBalancesBatchSompi(addresses)).values());
   } catch { /* the previous total stays */ }
-  if (!account.still()) return;
-  if (token === spendingTotalToken) renderProfileAccountTotal();
+  if (token !== spendingTotalToken || !account.still()) return;
+  profileSpendingTotal.set(spendingTotalAfterRead(profileSpendingTotal.get(), read), account.account);
+  renderProfileAccountTotal();
 }
 
-// Showing Profile re-reads the total at most every 30 s for the same account: switching tabs back
-// and forth started the requests each time. Sends, arriving funds and the address screens still
-// refresh at once (iOS 9de981a). State on the function object (load-order safe).
+// Showing Wallet re-reads the balance and the total at most every 30 s for the same account: switching
+// tabs back and forth started the requests each time. Sends, arriving funds and the address screens
+// still refresh at once (iOS 9de981a, bfe9f022). State on the function object (load-order safe).
 function refreshSpendingSummaryOnShow() {
   const st = refreshSpendingSummaryOnShow;
   const key = engine.address || "";
   if (st.key === key && Date.now() - (st.at || 0) < 30_000) return;
+  refreshBalanceOnly();
   refreshSpendingSummary();
   // only a known total counts; a keychain still unlocking is asked again on the next show
   st.key = key;
@@ -9693,7 +9866,7 @@ async function renderSpendingList() {
   if (!spendingListEl) return;
   const chattingRow = engine.address ? chattingAddressRowHtml() : "";
   if (!activeAccountMnemonic()) {
-    spendingListEl.innerHTML = `${chattingRow}<p class="spending-address-empty">This account has no recovery phrase, so spending addresses aren't available.</p>`;
+    spendingListEl.innerHTML = `${chattingRow}<p class="spending-address-empty">This account has no 12 or 24 words, so spending addresses aren't available.</p>`;
     updateSpendingTotalBalance([]);
     return;
   }
@@ -9851,25 +10024,47 @@ function spendingIndexRevealed(index, state) {
   return isQuantumIndex(index) ? chainLocalIndex(index) <= state.qMaxIndex : index <= state.maxIndex;
 }
 
-/** Per chain, how many revealed addresses there are and how many of them Manage Addresses shows
- *  (iOS chainCard: entries of that chain, and those not hidden). */
-function spendingVisibilityChainCounts(state = getSpendingState()) {
-  const hiddenSet = new Set(state.hidden);
-  const counts = { quantum: { shown: 0, total: 0 }, legacy: { shown: 0, total: 0 } };
-  for (const index of spendingRevealedIndices(state)) {
-    const chain = isQuantumIndex(index) ? counts.quantum : counts.legacy;
-    chain.total += 1;
-    if (!hiddenSet.has(index)) chain.shown += 1;
-  }
-  return counts;
-}
-
+// Each chain's "n of m shown" and balance (iOS d1844582 chainCard), the balances as last known:
+// refreshSpendingVisibilityBalances brings the live ones.
 function renderSpendingVisibilityCards() {
-  const counts = spendingVisibilityChainCounts();
+  const state = getSpendingState();
+  const cache = loadSpendingBalCache();
+  const sompiOf = (index) => {
+    const kas = cache[deriveSpendingAddressAt(index)]?.kas;
+    return kas == null ? null : sompiFromUserText(String(kas));
+  };
+  const chains = spendingChainSummaries(spendingRevealedIndices(state), state.hidden, sompiOf, sompiFromUserText(String(currentBalanceKas ?? "")));
   spendingVisibilityScreen?.querySelectorAll("[data-spending-vis-count]").forEach((el) => {
-    const c = counts[el.dataset.spendingVisCount];
+    const c = chains[el.dataset.spendingVisCount];
     if (c) el.textContent = `${c.shown} of ${c.total} shown`;
   });
+  spendingVisibilityScreen?.querySelectorAll("[data-spending-vis-balance]").forEach((el) => {
+    const c = chains[el.dataset.spendingVisBalance];
+    if (!c) return;
+    el.textContent = `${c.sompi == null ? "--" : formatSompiPlain(c.sompi)} ${KAS_UNIT}`;
+    el.classList.toggle("funded", c.sompi != null && c.sompi > 0n);
+  });
+}
+
+// The live balances behind the cards: ONE batched call for every revealed address, hidden ones too,
+// the same call the Manage Addresses list makes. They land in its cache; a failed read leaves the
+// last-known numbers.
+let spendingVisibilityBalanceToken = 0;
+async function refreshSpendingVisibilityBalances() {
+  const token = ++spendingVisibilityBalanceToken;
+  const account = accountGuard(() => engine.address);
+  const addresses = spendingRevealedIndices().map((index) => deriveSpendingAddressAt(index)).filter(Boolean);
+  if (!addresses.length) return;
+  let byAddress;
+  try { byAddress = await spendingBalancesBatchSompi(addresses); } catch { return; }
+  if (token !== spendingVisibilityBalanceToken || !account.still()) return;
+  const cache = loadSpendingBalCache();
+  const updates = {};
+  for (const [address, sompi] of byAddress) {
+    updates[address] = { ...cache[address], kas: trimKas8(Number(sompi) / 1e8), ...(sompi > 0 ? { used: true } : {}) };
+  }
+  saveSpendingBalCacheEntries(updates);
+  renderSpendingVisibilityCards();
 }
 
 /** Shows the cards (`chain` null) or pushes that chain's checklist, with the header to match: the
@@ -9898,6 +10093,7 @@ function showSpendingVisibilityChain(chain) {
     ++spendingVisibilityToken; // a page still filling in its usage stops writing
     if (spendingVisibilityList) { spendingVisibilityList.innerHTML = ""; delete spendingVisibilityList.dataset.page; }
     renderSpendingVisibilityCards();
+    void refreshSpendingVisibilityBalances();
     return;
   }
   spendingVisibilityPage = 0;
@@ -9923,17 +10119,38 @@ async function spendingUsageFor(address) {
   return result;
 }
 
+const SPENDING_VIS_CHECKED_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path class="spending-vis-check" d="m7.5 12.5 3 3 6-6.5"/></svg>';
+
+// #0, at the top of the legacy chain's first page (iOS d1844582 chattingRow): always shown on Manage
+// Addresses, so it's checked and dimmed, and tapping it does nothing (no data-vis-row).
+function spendingVisibilityChattingRowHtml() {
+  const address = String(engine.address || "");
+  const kas = Number(currentBalanceKas);
+  return `
+    <div class="spending-visibility-row spending-visibility-row-fixed">
+      <span class="spending-visibility-toggle on locked" aria-hidden="true">${SPENDING_VIS_CHECKED_SVG}</span>
+      <div class="spending-visibility-info">
+        <div class="spending-visibility-head">
+          <span class="spending-address-index">#0</span>
+          <span class="spending-visibility-label">Chatting Address</span>
+          ${kas > 0 ? `<span class="spending-address-usage spending-visibility-usage spending-visibility-chatting-balance">${kas.toFixed(4)} ${KAS_UNIT}</span>` : ""}
+        </div>
+        <span class="spending-address-value">${escapeHtml(`${address.slice(0, 16)}…${address.slice(-6)}`)}</span>
+      </div>
+    </div>`;
+}
+
 // One row of Address Visibility (iOS SpendingAddressVisibilityView). Every row toggles both ways,
 // funded ones too (iOS 245a5d2): Hide All starts the list over, and nothing is lost - hidden
 // addresses still count in the totals.
 function spendingVisibilityRowHtml(index, address, state, visible) {
   const customLabel = (state.labels?.[index] ?? state.labels?.[String(index)] ?? "").toString().trim();
   const checkSvg = visible
-    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path class="spending-vis-check" d="m7.5 12.5 3 3 6-6.5"/></svg>'
+    ? SPENDING_VIS_CHECKED_SVG
     : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.2"/></svg>';
-  // The chain-local number; the outline shield marks the quantum chain's rows apart from the legacy
+  // The address's number; the outline shield marks the quantum chain's rows apart from the legacy
   // chain's same numbers (iOS AddressVisibilityChainList row).
-  const number = chainLocalIndex(index);
+  const number = addressNumber(index);
   const shield = isQuantumIndex(index)
     ? '<span class="spending-visibility-shield" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2.2 4 5.3v6.2c0 5 3.4 9.3 8 10.5 4.6-1.2 8-5.5 8-10.5V5.3Z"/></svg></span>'
     : "";
@@ -9956,11 +10173,12 @@ async function renderSpendingVisibilityPage() {
   const state = getSpendingState();
   const hiddenSet = new Set(state.hidden);
   // From the chain's own start (iOS d7e6dd1): the quantum chain at QUANTUM_INDEX_BASE, the legacy
-  // one at 0; the pager names chain-local numbers.
+  // one at 0; the pager names the numbers on the rows (iOS d1844582 pagerRange).
   const localStart = spendingVisibilityPage * SPENDING_VIS_PAGE_SIZE;
   const localEnd = localStart + SPENDING_VIS_PAGE_SIZE - 1;
   const base = spendingVisibilityChain === "quantum" ? QUANTUM_INDEX_BASE : 0;
-  if (spendingVisRangeEl) spendingVisRangeEl.textContent = `#${localStart} - #${localEnd}`;
+  const range = visibilityPagerRange(spendingVisibilityChain === "quantum", spendingVisibilityPage, SPENDING_VIS_PAGE_SIZE);
+  if (spendingVisRangeEl) spendingVisRangeEl.textContent = `#${range.lower} - #${range.upper}`;
   if (spendingVisPrevBtn) spendingVisPrevBtn.disabled = spendingVisibilityPage === 0;
   const token = ++spendingVisibilityToken;
   const rows = [];
@@ -9972,7 +10190,8 @@ async function renderSpendingVisibilityPage() {
   const scroller = spendingVisibilityList.closest(".manage-address-body");
   const pageChanged = spendingVisibilityList.dataset.page !== `${spendingVisibilityChain}:${spendingVisibilityPage}`;
   spendingVisibilityList.dataset.page = `${spendingVisibilityChain}:${spendingVisibilityPage}`;
-  spendingVisibilityList.innerHTML = rows
+  const chattingRow = spendingVisibilityChain === "legacy" && spendingVisibilityPage === 0 && engine.address ? spendingVisibilityChattingRowHtml() : "";
+  spendingVisibilityList.innerHTML = chattingRow + rows
     .map((r) => spendingVisibilityRowHtml(r.index, r.address, state, r.visible))
     .join("");
   // Every page (and every chain) starts at its top, as iOS's list does (.id(page)); a toggle keeps
@@ -10003,7 +10222,7 @@ async function renderSpendingVisibilityPage() {
 function openSpendingVisibilityScreen() {
   if (!spendingVisibilityScreen) return;
   if (!activeAccountMnemonic()) {
-    showCopyToast("This account has no recovery phrase, so spending addresses aren't available.");
+    showCopyToast("This account has no 12 or 24 words, so spending addresses aren't available.");
     return;
   }
   spendingVisibilityPage = 0;
@@ -10144,8 +10363,8 @@ spendingListEl?.addEventListener("click", async (event) => {
     ];
     // Its own label, else "Address N" (iOS addressRowActionsSheet), over the short address.
     const label = spendingCustomLabel(state, index);
-    // A quantum-safe row by its number on its own chain (e001786 numbers them from 0).
-    const choice = await chooseDialog({ title: label || `Address ${chainLocalIndex(index)}`, message: address ? spendingShortAddress(address) : "", options });
+    // By the number on its row (iOS d1844582 addressNumber).
+    const choice = await chooseDialog({ title: label || `Address ${addressNumber(index)}`, message: address ? spendingShortAddress(address) : "", options });
     if (choice) spendingListEl.querySelector(`[data-spending-action="${choice}"][data-index="${index}"]`)?.click();
     return;
   }
@@ -10732,7 +10951,7 @@ async function consolidateSpendingDetailUtxos() {
   // The account whose address this is, taken now (iOS ca09dd0, IOS-109): it signs, and the quantum
   // spent mark is its, even if another account is active once the node answers.
   const account = captureActiveSpendingAccount();
-  if (!account) { showCopyToast("This account has no recovery phrase, so consolidation isn't available."); return; }
+  if (!account) { showCopyToast("This account has no 12 or 24 words, so consolidation isn't available."); return; }
   let balance;
   try { balance = await engine.balanceForAddress(address); } catch (error) { showCopyToast(`Could not load balance: ${userFacingError(error)}`); return; }
   const entries = balance.entries || [];
@@ -10850,13 +11069,14 @@ function closeSpendingActionsMenu() {
   if (spendingActionsMenu) spendingActionsMenu.hidden = true;
   spendingActionsToggle?.setAttribute("aria-expanded", "false");
 }
-// The capsule spins and is off while Generate or Discover runs (iOS accountSummary).
+// The floating button spins and is off while Generate or Discover runs (iOS d1844582
+// addressActionsButton).
 function updateSpendingActionsPill() {
   if (!spendingActionsToggle) return;
   const busy = Boolean(spendingGenerateBusy || spendingDiscovering);
   spendingActionsToggle.disabled = busy;
   spendingActionsToggle.setAttribute("aria-busy", String(busy));
-  spendingActionsToggle.innerHTML = busy ? '<span class="sk-spinner" aria-hidden="true"></span>' : "Address Actions";
+  spendingActionsToggle.innerHTML = busy ? '<span class="sk-spinner" aria-hidden="true"></span>' : spendingActionsIcon;
 }
 
 // The Address Actions sheet (iOS addressActionsSheet). While Discover runs it shows where the scan
@@ -10942,7 +11162,7 @@ spendingGenerateBtn?.addEventListener("click", async () => {
 // Reveals the next never-used spending address and returns its index (iOS
 // WalletManager.generateNextSpendingAddress). Used by Manage Addresses' Generate.
 async function revealNextSpendingAddress({ toast = true } = {}) {
-  if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return null; }
+  if (!activeAccountMnemonic()) { showCopyToast("This account has no 12 or 24 words."); return null; }
   if (spendingGenerateBusy) return null;
   spendingGenerateBusy = true;
   updateSpendingActionsPill();
@@ -11016,8 +11236,8 @@ async function revealNextSpendingAddress({ toast = true } = {}) {
     // written to the owner either way; the screen and the toast are the account on screen's
     if (engine.address !== owner) return readyIndex;
     renderSpendingList();
-    // The chain-local number, never the raw public index 1000000+ (iOS e001786).
-    if (toast) showCopyToast(`Address #${chainLocalIndex(readyIndex)} is ready.`);
+    // The row's number, never the raw public index 1000000+ (iOS e001786, d1844582).
+    if (toast) showCopyToast(`Address #${addressNumber(readyIndex)} is ready.`);
     return readyIndex;
   } finally {
     spendingGenerateBusy = false;
@@ -11080,7 +11300,7 @@ async function discoverSpendingAddressesFor(wallet, { onProgress = null } = {}) 
 }
 spendingScanBtn?.addEventListener("click", async () => {
   closeSpendingActionsMenu();
-  if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return; }
+  if (!activeAccountMnemonic()) { showCopyToast("This account has no 12 or 24 words."); return; }
   if (spendingDiscovering) return;
   const wallet = engine.address;
   spendingDiscovering = true;
@@ -11116,7 +11336,7 @@ spendingScanBtn?.addEventListener("click", async () => {
   else { spendingActionsSheet = null; showCopyToast(summary); }
 });
 
-// Profile's Manage Addresses card (iOS 6333dd3).
+// Wallet's Manage Addresses square (iOS bfe9f022).
 document.querySelector("[data-open-spending-manage]")?.addEventListener("click", openSpendingManageScreen);
 document.querySelector("[data-close-spending-manage]")?.addEventListener("click", closeSpendingManageScreen);
 
@@ -11232,7 +11452,8 @@ function setActiveAppTab(tab) {
     if (detailEmptyState) detailEmptyState.hidden = groupOpen || Boolean(activeConversationId);
   }
   updateDetailActiveClass();
-  if (screenTab === "profile") { refreshOwnKnsProfile(); refreshSpendingSummaryOnShow(); warmReceiveAddressOnShow(); }
+  if (screenTab === "profile") refreshOwnKnsProfile();
+  try { if (screenTab === "wallet") { renderProfileAccountTotal(); refreshSpendingSummaryOnShow(); warmReceiveAddressOnShow(); } } catch { /* not started */ }
   if (screenTab === "kaposts") refreshKaPostsFeed();
   else stopKaPostsPolling();
   // The room circles sit above the Chats list, so the rooms stay live while Chats is up (and an
@@ -11744,8 +11965,8 @@ const RECEIVE_INDEX_KEY = "kachat-receive-address-index-v1";
 // Receive is for everything except chatting and domains; the chatting address caption below is the
 // other half (iOS 492aa53). Both go through kasLabel like every amount string (the word "Kaspa" is
 // never relabelled, only a bare KAS).
-const RECEIVE_SUBTITLE = kasLabel("A fresh address, never used before. Kaspa sent here lands in this account and shows in your spending total. This address should be used for everything not related to chatting or domains.");
-const CHATTING_ADDRESS_SUBTITLE = kasLabel("This address should be for chatting and domains only. 1 Kaspa is enough for about 500 interactions in the app. Domains cost from 35 to 4,000 Kaspa, depending on the name.");
+const RECEIVE_SUBTITLE = "This is a fresh address, never used before.";
+const CHATTING_ADDRESS_SUBTITLE = "Use for chatting and acquiring .kachat domains.";
 async function freshReceiveAddress({ revealing = true } = {}) {
   if (!activeAccountMnemonic()) return null;
   // The QR is for the account active now: an answer that comes back after a switch belongs to the
@@ -11868,16 +12089,14 @@ function setChattingAddressStatus(text, { spinner = false } = {}) {
   }
 }
 
-// Profile's Receive Kaspa button, and the Chats New sheet's "Receive Kaspa" row (iOS e6400d6).
-// The screen opens at once: on the warmed address when Profile already decided one, else on
+// Wallet's Receive button (iOS bfe9f022), titled "Receive Kaspa", with Done and no balance.
+// The screen opens at once: on the warmed address when Wallet already decided one, else on
 // "Preparing a fresh address" until it is decided. The live check then runs either way and swaps
-// the code only if the warmed answer went stale - a QR is scanned the instant it appears. The
-// balance shows "--" until the node answers, and stays "--" when it can't (never 0 KAS).
+// the code only if the warmed answer went stale - a QR is scanned the instant it appears.
+const RECEIVE_SCREEN_OPTIONS = { balanceText: "--", subtitle: RECEIVE_SUBTITLE, title: "Receive Kaspa", showsBalance: false };
 let receiveScreenRun = 0;
 async function openReceiveKaspaScreen() {
   if (!engine.address || !chattingAddressScreen) return;
-  // a reminder only: receiving is never blocked (iOS d063b897 ReceiveKaspaQRView)
-  { const reminder = document.querySelector("[data-receive-backup-reminder]"); if (reminder) reminder.hidden = !accountBackupStatus.isPending(engine.address); }
   const run = ++receiveScreenRun;
   const account = engine.address;
   const live = () => run === receiveScreenRun && engine.address === account && !chattingAddressScreen.hidden;
@@ -11887,8 +12106,9 @@ async function openReceiveKaspaScreen() {
   const deciding = openReceiveKaspaScreen.inflight ??= freshReceiveAddress({ revealing: true })
     .catch(() => null)
     .finally(() => { openReceiveKaspaScreen.inflight = null; });
-  if (warmed) await openChattingAddressScreen({ address: warmed, balanceText: "--", subtitle: RECEIVE_SUBTITLE });
+  if (warmed) await openChattingAddressScreen({ address: warmed, ...RECEIVE_SCREEN_OPTIONS });
   else {
+    setChattingAddressChrome(RECEIVE_SCREEN_OPTIONS);
     chattingAddressScreen.hidden = false;
     setChattingAddressStatus("Preparing a fresh address", { spinner: true });
   }
@@ -11901,15 +12121,23 @@ async function openReceiveKaspaScreen() {
   }
   if (resolved !== shown) {
     shown = resolved;
-    await openChattingAddressScreen({ address: resolved, balanceText: "--", subtitle: RECEIVE_SUBTITLE });
+    await openChattingAddressScreen({ address: resolved, ...RECEIVE_SCREEN_OPTIONS });
   }
-  let balanceText = "--";
-  try { balanceText = kasExact8Label((await engine.balanceForAddress(resolved)).totalKas); } catch { /* unknown stays "--" */ }
-  if (live() && chattingAddressScreenAddress === resolved && chattingAddressBalance) chattingAddressBalance.textContent = balanceText;
 }
-document.querySelectorAll("[data-profile-qr-trigger]").forEach((button) => {
-  button.addEventListener("click", () => { openReceiveKaspaScreen(); });
-});
+
+// The QR screen's bar: the balance and a back button, or (Profile's row, Receive) no balance, or
+// (Receive) a title and Done in place of the back button (iOS bfe9f022 showsBalance).
+function setChattingAddressChrome({ title = "", showsBalance = true } = {}) {
+  if (chattingAddressBalance) chattingAddressBalance.hidden = Boolean(title) || !showsBalance;
+  const header = chattingAddressScreen?.querySelector(".chatting-address-header");
+  if (!header) return;
+  const titleEl = header.querySelector("[data-chatting-address-title]");
+  titleEl.hidden = !title;
+  titleEl.textContent = title;
+  header.querySelector("[data-close-chatting-address]").hidden = Boolean(title);
+  header.querySelector("[data-chatting-address-spacer]").hidden = Boolean(title);
+  header.querySelector("[data-chatting-address-done]").hidden = !title;
+}
 
 async function openChattingAddressScreen(options = {}) {
   if (!chattingAddressScreen) return;
@@ -11917,6 +12145,7 @@ async function openChattingAddressScreen(options = {}) {
   if (!address) return;
   // the chatting balance with its 8 decimals, "--" while unknown (iOS ChattingAddressQRView)
   const balanceText = options.balanceText != null ? options.balanceText : kasExact8Label(currentBalanceKas);
+  setChattingAddressChrome(options);
   setChattingAddressStatus(null);
   chattingAddressScreen.hidden = false;
   // Subtitle: default chat-fee note for the chatting address; callers pass their
@@ -11947,11 +12176,13 @@ async function openChattingAddressScreen(options = {}) {
 function closeChattingAddressScreen() {
   receiveScreenRun += 1; // a Receive still deciding its address no longer paints this screen
   if (chattingAddressScreen) chattingAddressScreen.hidden = true;
-  { const reminder = document.querySelector("[data-receive-backup-reminder]"); if (reminder) reminder.hidden = true; }
 }
 
 document.querySelector("[data-open-chatting-address]")?.addEventListener("click", openChattingAddressScreen);
 document.querySelector("[data-close-chatting-address]")?.addEventListener("click", closeChattingAddressScreen);
+document.querySelector("[data-chatting-address-done]")?.addEventListener("click", closeChattingAddressScreen);
+// Profile's row: the QR code and only that; the balance is Wallet's (iOS bfe9f022).
+document.querySelector("[data-profile-chatting-address]")?.addEventListener("click", () => { openChattingAddressScreen({ showsBalance: false }); });
 
 // Tap anywhere on the chatting-address card to copy it (iOS ChattingAddressQRView, which has no
 // Copy button: "Tap anywhere to copy" is the whole affordance). The back button keeps its own
@@ -12434,11 +12665,10 @@ document.querySelector("[data-help-kns]")?.addEventListener("click", () => {
 // The Profile hero's button edits your .kachat profile (iOS 09e0403).
 document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", () => openKachatProfileEditor());
 
-// --- Profile > About: Version and Donate (iOS aboutSection). Donate opens Profile's Send screen
-// with KaChat's pinned donation address filled in (iOS e7cc0d5, 8bc86f8).
+// --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 263;
+const APP_BUILD = 264;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -12451,12 +12681,6 @@ startAppUpdateChecks({
 const profileVersionEl = document.querySelector("[data-profile-version]");
 if (profileVersionEl) profileVersionEl.textContent = APP_VERSION_LABEL;
 { const el = document.querySelector("[data-logged-out-version]"); if (el) el.textContent = `KaChat ${APP_VERSION_LABEL}`; }
-
-// Donate (iOS e7cc0d5): the Send screen, addressed to KaChat's donation address, pinned (iOS
-// 8bc86f8, IOS-067): a name is first-come, so resolving kachat.kachat would pay whoever registered
-// it. This is the address kachat.kas has always paid; on testnet the same key's kaspatest: form.
-// The row still reads kachat.kachat; Send shows the address's own .kachat name once registered.
-var DONATE_ADDRESS_MAINNET = "kaspa:qzy7da4589avjwmmnqfvkhp5p8p268gc7rvr9lg2xxpuhj75sy8kgdqmpd2fu";
 
 // The notices the libraries the desktop ships ask to travel with it (iOS f656d9d has its own list).
 const OPEN_SOURCE_LICENSE_TEXTS = {
@@ -12482,7 +12706,7 @@ const OPEN_SOURCE_NOTICES = [
   { name: "node-qrcode", license: "MIT", holder: "Copyright (c) 2012 Ryan Day" },
   { name: "Vite", license: "MIT", holder: "Copyright (c) 2019-present VoidZero Inc. and Vite contributors" },
 ];
-// Next to the Profile title (iOS 863b0e9): a kachat.app link to you. Pasted anywhere it previews
+// Profile's Share Profile row (iOS 863b0e9, bfe9f022): a kachat.app link to you. Pasted anywhere it previews
 // with your KNS name and avatar; opened with KaChat it starts a chat with you; without it, the
 // page offers the download. The browser's share sheet when there is one, else the clipboard.
 document.querySelector("[data-profile-share]")?.addEventListener("click", async () => {
@@ -12508,18 +12732,6 @@ document.querySelector("[data-profile-licenses]")?.addEventListener("click", () 
     title: "Open Source Licenses",
     html: `<p class="field-hint">KaChat is built with these open source libraries. Their authors ask that these notices travel with the app.</p>${cards}`,
   });
-});
-
-// Donate goes straight to Send with KaChat's pinned donation address filled in (iOS e7cc0d5,
-// 8bc86f8): an address, not a name anyone could register, so no Other domains; no chat opened.
-document.querySelector("[data-profile-donate]")?.addEventListener("click", async () => {
-  try {
-    await ensureRuntimes({ quiet: true });
-    if (!engine.address) throw new Error("Generate or import a wallet first.");
-    openSendKaspaModal({ prefillAddress: toActiveNetworkAddress(DONATE_ADDRESS_MAINNET) });
-  } catch (error) {
-    showCopyToast(error?.message || "Couldn't open Send.");
-  }
 });
 
 // --- Send Kaspa modal (matches iOS's WithdrawKaspaView for this pass: real
@@ -12810,7 +13022,10 @@ function makeSendController(els, { onOpen, onClose, getSelection, resolveAmountK
       const sentKas = sentSompi != null ? kasTextFromSompi(sentSompi) : amountKas;
       // The Sent sheet over the screen; its Done closes both (iOS WithdrawKaspaView).
       // The domain when one was resolved, otherwise the address itself.
-      showSendSuccess(txid, sentSompi != null ? sentSompi : kasToSompi(sentKas), resolvedDomain || destination);
+      // No txid is a deferred payment: its bubble is in the chat, but nothing has gone out to
+      // confirm, so the sheet just closes (iOS bfe9f022).
+      if (txid) showSendSuccess(txid, sentSompi != null ? sentSompi : kasToSompi(sentKas), resolvedDomain || destination);
+      else onClose?.();
       try { onSent?.({ txid, destination, amountKas: sentKas }); } catch { /* chat bookkeeping must never break the send UI */ }
       refreshBalanceOnly({ quiet: true }).catch(() => {});
     } catch (error) {
@@ -13855,7 +14070,7 @@ let sendKaspaSourceLocked = false;
 function openSendKaspaModal(options = {}) {
   const spendingIndex = Number.isInteger(options?.spendingIndex) ? options.spendingIndex : null;
   if (spendingIndex != null && !activeAccountMnemonic()) {
-    showCopyToast("This account has no recovery phrase, so spending sends aren't available.");
+    showCopyToast("This account has no 12 or 24 words, so spending sends aren't available.");
     return;
   }
   sendKaspaCompound = Boolean(options?.compound);
@@ -14784,7 +14999,7 @@ document.addEventListener("click", async (event) => {
 // Export a specific spending address's private key (derived from the account phrase at its index).
 document.querySelector("[data-spending-detail-privatekey]")?.addEventListener("click", async () => {
   const mnemonic = activeAccountMnemonic();
-  if (!mnemonic) { showCopyToast("This account has no recovery phrase, so private keys aren't available."); return; }
+  if (!mnemonic) { showCopyToast("This account has no 12 or 24 words, so private keys aren't available."); return; }
   if (accountShellPrefs.passwordForSpendingKey && hasAppPassword()) {
     const ok = await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to view this address's private key." });
     if (!ok) return;
@@ -16469,7 +16684,7 @@ function saveProfileAccountName() {
     profileAccountName.value = current?.name || "Current Account";
     return;
   }
-  if (cleanName === current?.name) return;
+  if (cleanName === (current?.name || "Current Account")) return;
 
   let metadata = {};
   try { metadata = loadAccountMetaMap(); } catch {}
@@ -16491,47 +16706,17 @@ function saveProfileAccountName() {
   renderSavedAccountsScreen();
 }
 
-// iOS accountNameRow: the name reads as plain text with a pencil beside it; the pencil swaps it
-// for a field and a checkmark, and Return, the checkmark or clicking away commits.
-function setAccountNameEditing(editing) {
-  const textEl = document.querySelector("[data-profile-account-name-text]");
-  const pencil = document.querySelector("[data-profile-account-edit]");
-  const done = document.querySelector("[data-profile-account-done]");
-  if (!profileAccountName) return;
-  profileAccountName.hidden = !editing;
-  if (textEl) textEl.hidden = editing;
-  if (pencil) pencil.hidden = editing;
-  if (done) done.hidden = !editing;
+// Settings > Account Name (iOS d1844582 AccountNamePage): saved when you leave the page, if it isn't
+// empty and has changed. Blur covers a click elsewhere on the page, which updateWalletUi would
+// otherwise repaint over; the page's way out covers a tap that doesn't take the focus (a phone).
+function saveAccountNameOnLeaving() {
+  if (profileAccountName && !profileAccountName.closest(".settings-group")?.hidden) saveProfileAccountName();
 }
-function commitAccountRename() {
-  if (!profileAccountName || profileAccountName.hidden) return;
-  const before = activeAccountMetadata()?.name || "";
-  saveProfileAccountName();
-  setAccountNameEditing(false);
-  updateWalletUi();
-  const after = activeAccountMetadata()?.name || "";
-  if (after && after !== before) showCopyToast("Account renamed.");
-}
-document.querySelector("[data-profile-account-edit]")?.addEventListener("click", () => {
-  if (!profileAccountName) return;
-  profileAccountName.value = activeAccountMetadata()?.name || "Current Account";
-  setAccountNameEditing(true);
-  profileAccountName.focus();
-  profileAccountName.select();
-});
-// mousedown, so the field's blur does not commit first and leave the click on a hidden button.
-document.querySelector("[data-profile-account-done]")?.addEventListener("mousedown", (event) => event.preventDefault());
-document.querySelector("[data-profile-account-done]")?.addEventListener("click", commitAccountRename);
-profileAccountName?.addEventListener("blur", commitAccountRename);
+profileAccountName?.addEventListener("blur", saveProfileAccountName);
 profileAccountName?.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    commitAccountRename();
-  } else if (event.key === "Escape") {
-    event.preventDefault();
-    profileAccountName.value = activeAccountMetadata()?.name || "Current Account";
-    setAccountNameEditing(false);
-  }
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  profileAccountName.blur();
 });
 
 // Zero-balance chat gate: with a confirmed 0 KAS chatting balance, composing is disabled
@@ -16597,11 +16782,24 @@ function fillFundingGateAddress(el, address) {
   el.setAttribute("aria-label", "Copy chatting address");
 }
 
+// An empty bot chat, on an account with Kaspa to send a message with (iOS d1844582 botPrompt).
+function syncBotChatPrompt() {
+  const el = document.querySelector("[data-message-empty]");
+  if (!el || el.hidden) return;
+  const conversationEntry = (state.conversations || []).find((entry) => entry.id === activeConversationId);
+  const show = Boolean(conversationEntry) && !(conversationEntry.messages || []).length
+    && isKachatBot(contactForConversation(conversationEntry)?.address) && Number(currentBalanceKas) > 0;
+  el.classList.toggle("bot-chat-prompt", show);
+  el.setAttribute("aria-hidden", show ? "false" : "true");
+  el.textContent = show ? "Say anything to the bot to get started." : "";
+}
+
 function updateChatFundingGate() {
   // Looked up per call (not a module const): this runs from setActiveConversationId too,
   // which can fire before module evaluation reaches this section.
   const fundingGateEl = document.querySelector("[data-funding-gate]");
   if (!fundingGateEl) return;
+  syncBotChatPrompt();
   const kas = Number(currentBalanceKas);
   const shouldGate = Boolean(activeConversationId) && Boolean(engine.address)
     && Number.isFinite(kas) && kas === 0;
@@ -16669,8 +16867,7 @@ function updateWalletUi() {
   const accountName = meta?.name || (address ? "Current Account" : "No Active Account");
   renderToolbarBalance();
   try { renderSettingsHeader(); } catch { /* not yet wired during early init */ }
-  // The chatting balance is part of Profile's Manage Addresses total and Manage Addresses' first
-  // row (iOS 6333dd3).
+  // The chatting balance is part of Wallet's total and Manage Addresses' first row (iOS 6333dd3).
   try { renderProfileAccountTotal(); refreshChattingRowBalance(); } catch { /* not yet wired during early init */ }
   // Payment notices kept for an empty chatting address go out once it has KAS, and the Send KAS
   // sheet's warning follows the balance (iOS 710fdc0, IOS-086).
@@ -16686,8 +16883,6 @@ function updateWalletUi() {
   if (profileAddress) profileAddress.textContent = address || "No wallet loaded";
   if (profileInitial) profileInitial.textContent = address ? accountName.trim().charAt(0).toUpperCase() || "K" : "◎";
   if (profileAccountName && document.activeElement !== profileAccountName) profileAccountName.value = accountName;
-  const profileAccountNameText = document.querySelector("[data-profile-account-name-text]");
-  if (profileAccountNameText) profileAccountNameText.textContent = accountName;
   if (profileSessionState) profileSessionState.textContent = "";
   // iOS SharedFormatting.mediumDateShortTime: medium date, short time.
   if (profileCreated) profileCreated.textContent = meta?.createdAt ? new Date(meta.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "--";
@@ -16962,6 +17157,8 @@ function addressResolutionCardHtml(address, { domain = null, onLoaded = null } =
 /// the address's .kachat avatar - the picture its profile shows, through the same cache and relay
 /// retry as everywhere else - and the old KNS picture only where .kachat isn't the identity.
 function resolutionAvatarInnerHtml(address) {
+  const assigned = addressBookPhoto(address);
+  if (assigned) return `<img src="${escapeHtml(assigned)}" alt="" />`;
   if (kachatNamesUiEnabled()) return kachatAvatarImgHtml(address) || personGlyphSvg();
   const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl || "";
   return avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="" />` : personGlyphSvg();
@@ -17372,7 +17569,7 @@ function conversationRowHtml(conversationEntry, { selecting = false, selected = 
   const silenced = getContactNotifyOverride(contact?.address) === "off";
   const unread = Number(conversationEntry.unreadCount || 0);
   return `
-        <button class="chat-row${selecting ? " selecting" : ""}${selected ? " selected" : ""}${active ? " active" : ""}" type="button" ${idAttr}="${escapeHtml(conversationEntry.id)}">
+        <button class="chat-row${selecting ? " selecting" : ""}${selected ? " selected" : ""}${active ? " active" : ""}" type="button" ${idAttr}="${escapeHtml(conversationEntry.id)}" data-swipe-id="${escapeHtml(conversationEntry.id)}">
           ${selecting ? `<span class="chat-row-select" aria-hidden="true"><span class="chat-row-checkbox${selected ? " checked" : ""}"></span></span>` : ``}
           <span class="chat-row-time"><span class="chat-row-fetch-slot" data-chat-fetch-for="${escapeHtml(conversationEntry.id)}">${chatFetchIndicatorHtml(conversationEntry.id)}</span>${escapeHtml(time)}</span>
           ${avatarHtmlFor(contact)}
@@ -17381,6 +17578,42 @@ function conversationRowHtml(conversationEntry, { selecting = false, selected = 
             ${last
               ? `<span>${chatListDeliveryGlyphHtml(last)}${escapeHtml(preview)}</span>`
               : `<span class="chat-row-none">No messages yet</span>`}
+          </span>
+          ${unread > 0 ? `<b class="unread-badge">${unread}</b>` : ``}
+        </button>
+      `;
+}
+
+/** The groups the list shows: all but those pinned up into the circles, and while searching, every
+ *  match, pinned or not (iOS d1844582). */
+function visibleChatGroups() {
+  let mgr = null;
+  try { mgr = getGroupManager(); } catch { mgr = null; }
+  if (!mgr) return [];
+  const query = String(searchInput?.value || "").trim().toLowerCase();
+  const pins = new Set(chatCirclePins());
+  return mgr.listGroups().filter((g) => (query ? groupMatchesChatSearch(g, query) : !pins.has(`g:${g.groupId}`)));
+}
+
+/** A group's row in the chat list (iOS GroupChatRow). */
+function groupRowHtml(g, { selecting = false, selected = false, active = false } = {}) {
+  const messages = groupMessages(g.groupId);
+  const last = messages[messages.length - 1];
+  const time = last ? formatChatListDate(last.createdAt) : "";
+  const unread = groupDisplayUnread(g);
+  const silenced = getGroupNotify(g.groupId) === "muted";
+  const preview = last ? groupRowPreview(last) : "";
+  const count = (g.members || []).length;
+  return `
+        <button class="chat-row group-row${selecting ? " selecting" : ""}${selected ? " selected" : ""}${active ? " active" : ""}" type="button" data-group-row="${escapeHtml(g.groupId)}" data-swipe-id="group:${escapeHtml(g.groupId)}">
+          ${selecting ? `<span class="chat-row-select" aria-hidden="true"><span class="chat-row-checkbox${selected ? " checked" : ""}"></span></span>` : ``}
+          <span class="chat-row-time">${escapeHtml(time)}</span>
+          <span class="chat-avatar group-row-avatar">${groupAvatarHtml(g.photoHex)}</span>
+          <span class="chat-meta">
+            <strong>${escapeHtml(g.name || "Group")}${silenced ? `<svg class="group-row-silenced" viewBox="0 0 24 24" role="img" aria-label="Silenced"><path d="M9.5 19a2.5 2.5 0 0 0 5 0M6 8a6 6 0 0 1 9.6-4.8M18 8c0 5 2 7 2 7H8M4 15s2-2 2-7M3 3l18 18"/></svg>` : ""}</strong>
+            ${preview
+              ? `<span>${escapeHtml(preview)}</span>`
+              : `<span class="chat-row-none">${count} member${count === 1 ? "" : "s"}</span>`}
           </span>
           ${unread > 0 ? `<b class="unread-badge">${unread}</b>` : ``}
         </button>
@@ -17396,7 +17629,7 @@ function renderChats() {
   // reaction) dropped you back to the list. Back closes a chat; one that no longer exists
   // (deleted, cleared, another account's state) closes here.
   if (activeConversationId && !state.conversations.some((entry) => entry.id === activeConversationId)) setActiveConversationId(null);
-  // One list (iOS a062577): the group chats and public rooms are the circles above the chats.
+  // The bots, public rooms and anything pinned are the circles above the list.
   renderChatCircles();
   // The app icon's badge follows the same counts (iOS ChatService.updateAppBadge).
   scheduleAppBadgeUpdate();
@@ -17405,19 +17638,20 @@ function renderChats() {
   setChatToolRowsForGroupsTab(false);
 
   const visibleConversations = visibleChatConversations();
+  const visibleGroups = visibleChatGroups();
   const searching = Boolean(searchInput.value.trim());
 
   // People who wrote first and haven't been accepted: one row, always there, right above your
   // own chat - hidden only while searching or selecting (iOS 74bd52c). It stays with no chats
   // too: the empty state sits below it (iOS emptyStateView overlay).
   const showsRequestsRow = !searching && !chatSelectionModeActive;
-  const requestCount = showsRequestsRow ? messageRequestConversations().length : 0;
+  const requestCount = showsRequestsRow ? messageRequestConversations().length + pendingGroupInvites().length : 0;
   const requestsRowHtml = showsRequestsRow ? `
         <button class="chat-row message-requests-row" type="button" data-open-message-requests>
           <span class="message-requests-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13.5V18a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4.5"/><path d="M4 13.5 6.2 6.3A2 2 0 0 1 8.1 5h7.8a2 2 0 0 1 1.9 1.3L20 13.5h-4.2a1 1 0 0 0-.9.6l-.6 1.3a1 1 0 0 1-.9.6h-2.8a1 1 0 0 1-.9-.6l-.6-1.3a1 1 0 0 0-.9-.6Z"/><path d="M12 7.5v4.5M9.8 10 12 12.2 14.2 10"/></svg></span>
           <span class="chat-meta">
             <strong>Message Requests</strong>
-            <span>${requestCount > 0 ? "People who wrote to you first" : "No new requests"}</span>
+            <span>${requestCount > 0 ? "People and groups waiting for you" : "No new requests"}</span>
           </span>
           ${requestCount > 0 ? `<b class="message-requests-count">${requestCount}</b>` : ""}
           <svg class="message-requests-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
@@ -17425,21 +17659,31 @@ function renderChats() {
 
   // No chats and no search: the empty state, under the circles and the requests row. A search
   // with no match shows nothing at all (iOS has no "no results" card).
-  emptyState.hidden = !(visibleConversations.length === 0 && !searching);
-  chatList.hidden = !requestsRowHtml && visibleConversations.length === 0;
-  if (visibleConversations.length === 0) {
+  const anyPinnedGroup = chatCirclePins().some((id) => id.startsWith("g:") && getGroupManager()?.getGroup(id.slice(2)));
+  emptyState.hidden = !(visibleConversations.length === 0 && visibleGroups.length === 0 && !anyPinnedGroup && !searching);
+  chatList.hidden = !requestsRowHtml && visibleConversations.length === 0 && visibleGroups.length === 0;
+  if (visibleConversations.length === 0 && visibleGroups.length === 0) {
     chatList.innerHTML = requestsRowHtml;
     chatRowSwipes?.refresh();
     return;
   }
 
-  chatList.innerHTML = requestsRowHtml + visibleConversations
-    .map((conversationEntry) => conversationRowHtml(conversationEntry, {
+  // Chats and groups share the one list, by latest activity (iOS d1844582).
+  const rows = [
+    ...visibleConversations.map((conversationEntry, order) => ({ at: conversationRecency(conversationEntry), order, html: () => conversationRowHtml(conversationEntry, {
       selecting: chatSelectionModeActive,
       selected: selectedChatConversationIds.has(conversationEntry.id),
       active: conversationEntry.id === activeConversationId,
-    }))
-    .join("");
+    }) })),
+    ...visibleGroups.map((g, order) => ({ at: groupLastActivityAt(g), order, html: () => groupRowHtml(g, {
+      selecting: chatSelectionModeActive,
+      selected: selectedGroupIds.has(g.groupId),
+      active: g.groupId === activeGroupId,
+    }) })),
+  ].sort((a, b) => b.at - a.at || a.order - b.order);
+  // iOS: "{n} chat(s)" under the list.
+  const countLineHtml = `<p class="chat-list-count">${rows.length} chat${rows.length === 1 ? "" : "s"}</p>`;
+  chatList.innerHTML = requestsRowHtml + rows.map((row) => row.html()).join("") + countLineHtml;
   chatRowSwipes?.refresh();
 
   refreshVisibleKnsNames(visibleConversations);
@@ -17490,19 +17734,19 @@ async function refreshVisibleKnsNames(visibleConversations) {
 // reader could not tell apart. With `onRetry`, the failed state is the retry button.
 // An incoming payment whose notice the chain did not back shows "Needs attention" (iOS
 // DeliveryStatusLabel .warning, 927322b).
-/** iOS MessageTimeLine + the lines under it: the time (with the delivery status after it), a
+/** iOS MessageTimeLine + the lines under it: the delivery status, then the time (iOS d1844582), a
  *  plain "edited", and a failed reaction's red "Retry". */
 function buildMessageTimeLines({ createdAt, statusEl = null, edited = false, failedReaction = null } = {}) {
   const lines = [];
   const timeLine = document.createElement("div");
   timeLine.className = "message-time-line";
+  if (statusEl) timeLine.append(statusEl);
   if (createdAt) {
     const time = document.createElement("span");
     time.className = "message-time-line-time";
     time.textContent = formatTime(createdAt);
     timeLine.append(time);
   }
-  if (statusEl) timeLine.append(statusEl);
   if (timeLine.childNodes.length) lines.push(timeLine);
   if (edited) {
     const mark = document.createElement("span");
@@ -17708,10 +17952,12 @@ function extendMessageWindow(area, key, rerender) {
 }
 
 function renderMessages(conversationEntry) {
-  // The call button is for someone else: the self-chat has nobody to ring.
+  // The call button is for someone else: the self-chat has nobody to ring, nor a bot's chat, nor a
+  // Message Request until it's accepted (iOS d1844582).
   const callButton = document.querySelector("[data-open-call]");
+  const callAddress = contactForConversation(conversationEntry)?.address;
   // Not while selecting messages, where the bar is Cancel and the trash (iOS).
-  if (callButton) callButton.hidden = !conversationEntry || messageSelectionMode || contactForConversation(conversationEntry)?.address === engine.address;
+  if (callButton) callButton.hidden = !conversationEntry || messageSelectionMode || callAddress === engine.address || isKachatBot(callAddress) || isMessageRequest(conversationEntry);
   // The header's name and bio were written just before this; re-measure so the thread's top inset
   // matches whatever height they came out at.
   syncChatHeaderInsets();
@@ -17750,10 +17996,13 @@ function renderMessages(conversationEntry) {
   if (messages.length === 0) {
     messageArea.appendChild(messageEmpty);
     messageEmpty.hidden = false;
+    syncBotChatPrompt();
     return;
   }
 
   messageEmpty.hidden = true;
+
+  const photosUnlockAt = photosUnlockAtFor(requestContact, conversationEntry, messages);
 
   // Latest chess timestamp per game, computed ONCE per render — the per-message version
   // re-scanned and re-parsed the whole conversation for every chess bubble (O(n²)).
@@ -17942,17 +18191,14 @@ function renderMessages(conversationEntry) {
     }
 
     if (imageEnvelope) {
-      const heldBackPhoto = message.direction === "incoming"
-        && !shouldAutoDisplayPhotosFrom(requestContact, conversationEntry)
-        && !revealedPhotoIds.has(String(message.txid || message.id));
+      const heldBackPhoto = message.direction === "incoming" && photosAreHidden(photosUnlockAt);
       if (heldBackPhoto) {
-        // iOS LazyImageBubble hiddenBubble: eye.slash, "<name> sent a photo", Show Photo.
-        const reveal = document.createElement("div");
-        reveal.className = "message-photo-hidden";
-        reveal.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7c2 0 3.7.7 5.1 1.6M22 12s-3.6 7-10 7c-2 0-3.7-.7-5.1-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3 3 18 18"/></svg><span></span><button type="button" class="message-photo-show">Show Photo</button>';
-        reveal.querySelector("span").textContent = `${peerName} sent a photo`;
-        reveal.querySelector("button").addEventListener("click", (event) => { event.stopPropagation(); markPhotoRevealed(message); renderMessages(conversationEntry); });
-        bubble.append(reveal);
+        // iOS LazyImageBubble hiddenBubble: eye.slash, "<name> sent a photo", and when it shows.
+        const hidden = document.createElement("div");
+        hidden.className = "message-photo-hidden";
+        hidden.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7c2 0 3.7.7 5.1 1.6M22 12s-3.6 7-10 7c-2 0-3.7-.7-5.1-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3 3 18 18"/></svg><span></span><small>It shows 10 minutes after you have both sent a message.</small>';
+        hidden.querySelector("span").textContent = `${peerName} sent a photo`;
+        bubble.append(hidden);
       } else {
         // Photo-only bubble: no chat-bubble background, just the image (timestamp overlays it).
         bubble.classList.add("photo-bubble");
@@ -18286,12 +18532,14 @@ function openChatInfoFor(contact, conversationEntry) {
   chatInfoContactId = contact.id;
   chatInfoContactAddress = contact.address;
   chatInfoStagedNotify = null;
-  chatInfoStagedPhotos = null;
   resetChatInfoAliases();
   refreshChatInfoContactControls();
   if (chatInfoAvatarInitials) chatInfoAvatarInitials.innerHTML = personGlyphSvg();
-  if (contact.photo) {
-    if (chatInfoAvatarImage) { chatInfoAvatarImage.src = contact.photo; chatInfoAvatarImage.hidden = false; }
+  // Your Contacts photo first (iOS bfe9f022), which full screen opens too; the profile's avatar
+  // replaces the backup photo once the lookup lands.
+  const openingPhoto = addressBookPhoto(contact.address) || contact.photo;
+  if (openingPhoto) {
+    if (chatInfoAvatarImage) { chatInfoAvatarImage.src = openingPhoto; chatInfoAvatarImage.hidden = false; }
     if (chatInfoAvatarInitials) chatInfoAvatarInitials.hidden = true;
   } else {
     if (chatInfoAvatarInitials) chatInfoAvatarInitials.hidden = false;
@@ -18305,9 +18553,26 @@ function openChatInfoFor(contact, conversationEntry) {
   // act on when the person is you; the header offers Done instead of Cancel/Save.
   const isSelf = Boolean(engine.address) && contact.address === engine.address;
   chatInfoOverlay.classList.toggle("self", isSelf);
-  for (const sheet of ["aliases", "notifications", "photos", "calls", "info"]) {
+  for (const sheet of ["aliases", "notifications"]) {
     const row = document.querySelector(`[data-chat-info-sheet="${sheet}"]`);
     if (row) row.hidden = isSelf;
+  }
+  const isBot = isKachatBot(contact.address);
+  const infoSection = document.querySelector("[data-chat-info-info-section]");
+  if (infoSection) infoSection.hidden = isSelf || isBot;
+  // A KaChat bot's User Info is only its name and its address: nobody to share, call or manage
+  // (iOS d1844582 isBot). The Address sheet's QR card moves inline while one is open.
+  const rowsCard = document.querySelector("[data-chat-info-rows]");
+  if (rowsCard) rowsCard.hidden = isBot;
+  const shareButton = document.querySelector("[data-chat-info-share]");
+  if (shareButton) shareButton.hidden = isBot;
+  const botAddress = document.querySelector("[data-chat-info-bot-address]");
+  const qrCard = document.querySelector("[data-chat-info-copy-address]");
+  if (botAddress && qrCard) {
+    botAddress.hidden = !isBot;
+    (isBot ? botAddress : document.querySelector('[data-chat-info-panel="address"]'))?.append(qrCard);
+    const botExplorer = botAddress.querySelector("[data-chat-info-bot-explorer]");
+    if (botExplorer && isBot) botExplorer.href = explorerAddressUrl(contact.address);
   }
   const openChatRow = document.querySelector("[data-chat-info-open-chat]");
   if (openChatRow) openChatRow.hidden = isSelf;
@@ -18417,10 +18682,12 @@ async function refreshChatInfoKnsSections(contact) {
   }
 
   const profile = profileInfo?.profile;
-  // A user-assigned photo overrides KNS, so never let a late KNS fetch replace it.
-  if (chatInfoAvatarImage && chatInfoAvatarInitials && !contact.photo) {
-    if (profile?.avatarUrl) {
-      chatInfoAvatarImage.src = profile.avatarUrl;
+  // A photo you assigned in Contacts overrides KNS, so never let a late KNS fetch replace it. The
+  // backup photo comes after the profile's avatar.
+  if (chatInfoAvatarImage && chatInfoAvatarInitials && !addressBookPhoto(contact.address)) {
+    const avatarSrc = profile?.avatarUrl || contact.photo;
+    if (avatarSrc) {
+      chatInfoAvatarImage.src = avatarSrc;
       chatInfoAvatarImage.hidden = false;
       chatInfoAvatarInitials.hidden = true;
     } else {
@@ -18441,7 +18708,8 @@ async function refreshChatInfoKnsSections(contact) {
 /// right-click to copy) and Linktree link, your .kachat name as your own card's title, and a
 /// ".kachat Names" card listing the address's held names (active or in grace) with its primary marked - all read from
 /// the cached identity (kachat-names-live.js) and repainted as answers land (onKachatIdentityChange).
-/// A photo you gave them still wins over the .kachat avatar. Someone else's profile needs the names
+/// A photo you assigned in Contacts still wins over the .kachat avatar, and the backup photo comes
+/// after it (iOS bfe9f022). Someone else's profile needs the names
 /// indexer; without one only their label (and names) show.
 function paintChatInfoKachat(contact) {
   if (!kachatNamesUiEnabled() || !contact || chatInfoContactAddress !== contact.address) return;
@@ -18459,11 +18727,16 @@ function paintChatInfoKachat(contact) {
   }
 
   if (chatInfoAvatarImage && chatInfoAvatarInitials) {
-    if (contact.photo) delete chatInfoAvatarImage.dataset.kachatImg;
+    if (addressBookPhoto(address)) delete chatInfoAvatarImage.dataset.kachatImg;
     else if (pieces.avatarUrl) {
       chatInfoAvatarImage.referrerPolicy = "no-referrer";
       chatInfoAvatarImage.dataset.kachatImg = "element";
       if (chatInfoAvatarImage.getAttribute("src") !== pieces.avatarUrl) chatInfoAvatarImage.src = pieces.avatarUrl;
+      chatInfoAvatarImage.hidden = false;
+      chatInfoAvatarInitials.hidden = true;
+    } else if (contact.photo) {
+      delete chatInfoAvatarImage.dataset.kachatImg;
+      if (chatInfoAvatarImage.getAttribute("src") !== contact.photo) chatInfoAvatarImage.src = contact.photo;
       chatInfoAvatarImage.hidden = false;
       chatInfoAvatarInitials.hidden = true;
     } else {
@@ -18618,7 +18891,6 @@ function closeChatInfo() {
   chatInfoContactId = null;
   // Cancel (or Done) drops whatever was staged.
   chatInfoStagedNotify = null;
-  chatInfoStagedPhotos = null;
 }
 
 function saveChatInfo() {
@@ -18666,13 +18938,10 @@ const chatInfoSheetTitle = document.querySelector("[data-chat-info-sheet-title]"
 const chatInfoExplorerLink = document.querySelector("[data-chat-info-explorer-link]");
 const CHAT_INFO_SHEET_TITLES = {
   address: "Address",
-  calls: "Calls",
   domains: "KNS Domains",
   "kachat-names": ".kachat Names",
   aliases: "Aliases",
   notifications: "Notifications",
-  photos: "Photos",
-  info: "Info",
 };
 
 function openChatInfoSheet(name) {
@@ -18717,30 +18986,30 @@ document.querySelector("[data-chat-info-share]")?.addEventListener("click", asyn
   try { await navigator.clipboard.writeText(url); showCopyToast("Profile link copied"); }
   catch { showCopyToast(url); }
 });
-// Rescan Profile (iOS bc95d17): everything this person's profile shows, looked up again now.
-document.querySelector("[data-chat-info-rescan]")?.addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  const address = chatInfoContactAddress;
-  if (!address || button.disabled) return;
-  const spinner = button.querySelector("[data-chat-info-rescan-spinner]");
-  button.disabled = true;
-  if (spinner) spinner.hidden = false;
-  try {
-    await kachatRescanProfile(address);
-    // Where .kas profiles are shown (KNS as identity), theirs is fetched again too.
-    if (!kachatNamesUiEnabled() && engine.fetchKnsAddressProfile) {
-      try { await engine.fetchKnsAddressProfile(address, { force: true }); } catch { /* the old one stays */ }
-    }
-    if (chatInfoContactAddress === address) {
-      const contact = state.contacts.find((entry) => entry.address === address) || { address };
-      try { paintChatInfoKachat(contact); } catch { /* the panel closed */ }
-    }
-    showCopyToast("Profile rescanned.");
-  } finally {
-    button.disabled = false;
-    if (spinner) spinner.hidden = true;
+// Everything a person's profile shows, looked up again (iOS bc95d17 / d1844582 rescanProfile).
+async function rescanProfileOf(address) {
+  await kachatRescanProfile(address);
+  // Where .kas profiles are shown (KNS as identity), theirs is fetched again too.
+  if (!kachatNamesUiEnabled() && engine.fetchKnsAddressProfile) {
+    try { await engine.fetchKnsAddressProfile(address, { force: true }); } catch { /* the old one stays */ }
   }
+}
+// While the app is open and visible, everyone's profile is looked up again once an hour, so a new
+// name, avatar, banner or bio shows without anyone asking for it (iOS d1844582
+// ContactsManager.startProfileRescans). Contacts and saved addresses, stamped per wallet.
+const PROFILE_RESCAN_STAMP_KEY = "kachat-contact-profile-rescan-v1";
+const profileRescans = createProfileRescans({
+  stampKey: () => (engine.address ? accountScopedKey(PROFILE_RESCAN_STAMP_KEY) : ""),
+  readStamp: (key) => { try { return Number(localStorage.getItem(key)) || 0; } catch { return 0; } },
+  writeStamp: (key, at) => { try { localStorage.setItem(key, String(at)); } catch { /* it just runs again */ } },
+  addresses: () => [...(state.contacts || []).map((contact) => contact.address), ...addressBookEntries().map((entry) => entry.address)],
+  rescan: rescanProfileOf,
 });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") profileRescans.stop();
+  else profileRescans.start();
+});
+if (document.visibilityState !== "hidden") profileRescans.start();
 document.querySelector("[data-chat-info-open-chat]")?.addEventListener("click", () => {
   const address = chatInfoContactAddress;
   if (!address || address === engine.address) return;
@@ -18949,6 +19218,20 @@ function addContact({ name, address, relationshipState = "legacy-manual" }) {
 // wallet screen. No-op with a toast if the address is missing/invalid or is your own.
 async function openChatWithAddressForKaspa({ address, name } = {}) {
   return openChatWithAddress({ address, name, paymentMode: true });
+}
+
+// The chat contact a call needs, created only once Call goes on from Contacts (iOS d1844582
+// getOrCreateContact). A regular contact of yours, its name left to the Address Book's.
+function ensureCallContact(address) {
+  if ((state.contacts || []).some((entry) => entry.address === address)) return;
+  const createdAt = Date.now();
+  clearDeletedContactAddress(address);
+  state.contacts.push({
+    id: nowId(), name: shortAddress(address), nameIsCustom: false, address,
+    avatar: initialsFor(address), createdAt, updatedAt: createdAt,
+    relationshipState: "legacy-manual", handshakeTxid: "",
+  });
+  persistState();
 }
 
 // Open (creating if needed) the 1:1 conversation with `address`, the way iOS's KaPosts
@@ -19942,7 +20225,7 @@ async function sendTipNow(tipSompi) {
   // From a spending address: the account the tip starts on (iOS ca09dd0, IOS-109) signs, takes the
   // change on its fresh slot and gets that slot on its list, even after a switch.
   const tipAccount = tip.fundingAddress ? captureActiveSpendingAccount() : null;
-  if (tip.fundingAddress && !tipAccount) { tipSetError("This account has no recovery phrase, so spending sends aren't available."); return; }
+  if (tip.fundingAddress && !tipAccount) { tipSetError("This account has no 12 or 24 words, so spending sends aren't available."); return; }
   const amountKas = kasTextFromSompi(tipSompi);
   // Max (DSK-042 / DSK-043): exactly the amount shown, from exactly the coins it was computed from.
   const max = activeTipMax();
@@ -20529,6 +20812,12 @@ const settingsDiagnosticsDetailsEl = settingsScreenEl?.querySelector(":scope > .
 // iOS SettingsView category icons (SF-symbol equivalents as inline SVGs), keyed by
 // the .settings-group-label text.
 const SETTINGS_HUB_ICONS = {
+  // info.circle
+  "About": '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><path d="M12 7.6h.01"/></svg>',
+  // pencil
+  "Account Name": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3.5a2.5 2.5 0 0 1 3.5 3.5L7.5 20 3 21l1-4.5Z"/></svg>',
+  // key
+  "Back Up Account": '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7.25" r="4.5"/><circle cx="12" cy="5.6" r="1"/><path d="M12 11.75v9l1.9-1.6-1.9-1.6 1.9-1.6-1.9-1.6"/></svg>',
   // paintbrush
   "Customization": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 3.5 11.4 12.6"/><path d="M11.6 12.4c1.5 1.5 1.4 3.6-.2 5.2-1.7 1.7-4.8 2.4-7.7 2.2.6-1.3.8-2.6.9-3.9.1-2.2 3.4-6 7-3.5Z"/></svg>',
   // lock.shield
@@ -20542,12 +20831,13 @@ const SETTINGS_HUB_ICONS = {
   "Contacts": '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3"/><path d="M3.5 19c.9-3 2.9-4.5 5.5-4.5s4.6 1.5 5.5 4.5"/><path d="M15.2 5.9a2.9 2.9 0 1 1 1.3 5.5M17.3 14.7c1.7.7 2.8 2 3.2 4.3"/></svg>',
   // externaldrive
   "Storage": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13.5 6 6.5h12l3 7"/><rect x="3" y="13.5" width="18" height="5.5" rx="1.6"/><path d="M7.5 16.3h.01M10 16.3h.01M12.5 16.3h.01M15 16.3h.01"/></svg>',
-  // clock.arrow.circlepath
-  "Chat History": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.8V9h4.2"/><path d="M12 8v4.3l2.8 1.7"/></svg>',
   // stethoscope
   "Diagnostics": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5H5.5a1 1 0 0 0-1 1V9a4.25 4.25 0 0 0 8.5 0V4.5a1 1 0 0 0-1-1h-1"/><path d="M8.75 13.25v1.95a4.6 4.6 0 0 0 9.2 0v-2"/><circle cx="17.95" cy="10.9" r="2.2"/></svg>',
   // exclamationmark.triangle
 };
+// iOS SettingsView (d1844582): alphabetical, down to Terms of Use and the wipe row. The sections sit
+// in any order in index.html; this is the order the hub lists them in.
+const SETTINGS_HUB_ORDER = ["About", "Account Name", "Back Up Account", "Chats", "Connection", "Customization", "Diagnostics", "Notifications", "Security", "Storage"];
 
 
 const settingsHubEl = (() => {
@@ -20556,43 +20846,37 @@ const settingsHubEl = (() => {
   hub.className = "settings-group settings-hub";
   const chevron = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8.25 4.5 7.5 7.5-7.5 7.5"/></svg>`;
   const rows = [];
+  const categories = [];
   settingsGroupsEls.forEach((group, index) => {
     if (group.dataset.settingsSubscreen) return; // sub-screens open from their parent page, not the hub
     const label = group.querySelector(".settings-group-label")?.textContent?.trim() || `Section ${index + 1}`;
-    rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-settings-hub-row="${index}">
+    categories.push({ label, html: `<button class="settings-list-row settings-hub-row" type="button" data-settings-hub-row="${index}">
       <span class="settings-hub-icon" aria-hidden="true">${SETTINGS_HUB_ICONS[label] || ""}</span>
       <span class="settings-hub-label">${label}</span>
       ${chevron}
-    </button>`);
+    </button>` });
   });
-  // Terms of Use (KaPosts-iPhone 9e22075): to read again, after Diagnostics as on iOS.
+  const hubRank = ({ label }) => { const at = SETTINGS_HUB_ORDER.indexOf(label); return at < 0 ? SETTINGS_HUB_ORDER.length : at; };
+  rows.push(...categories.sort((a, b) => hubRank(a) - hubRank(b)).map((category) => category.html));
+  // Terms of Use (KaPosts-iPhone 9e22075): to read again. Desktop keeps it, above the wipe.
   rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-settings-hub-terms>
     <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3.5h7.5L19 8v12.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5Z"/><path d="M9 11.5h6.5M9 14.5h6.5M9 17.5h4"/></svg></span>
     <span class="settings-hub-label">Terms of Use</span>
     ${chevron}
   </button>`);
-  // View Seed Phrase and the wipe: direct actions, not sub-pages, in plain text with green icons
-  // now there's no Danger Zone (iOS 76aec44f). The wipe's half sheet asks first.
-  rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-settings-hub-seed>
-    <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="7.25" r="4.5"/><circle cx="12" cy="5.6" r="1"/><path d="M12 11.75v9l1.9-1.6-1.9-1.6 1.9-1.6-1.9-1.6"/></svg></span>
-    <span class="settings-hub-label">View Seed Phrase</span>
-  </button>`);
+  // The wipe: a direct action, not a sub-page, in plain text with a green icon now there's no Danger
+  // Zone (iOS 76aec44f). Its half sheet asks first.
   rows.push(`<button class="settings-list-row settings-hub-row" type="button" data-shell-action="resync">
     <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5.2 10a7 7 0 0 1 12.6-2.6"/><path class="fill" d="m19.6 5.2-.2 4.6-4.3-1.6z"/><path d="M18.8 14a7 7 0 0 1-12.6 2.6"/><path class="fill" d="m4.4 18.8.2-4.6 4.3 1.6z"/></svg></span>
     <span class="settings-hub-label">Wipe and re-sync incoming messages</span>
   </button>`);
-  // Log Out (iOS 84f9bb02): back in Settings from Profile, its own card at the very bottom, apart
-  // from the category rows, so it is easy to find and hard to hit by accident.
-  // Delete Account above it (iOS d063b897).
+  // Delete Account (iOS d063b897): its own card at the very bottom, apart from the category rows, so
+  // it is easy to find and hard to hit by accident. Log Out is on Profile (iOS d1844582).
   hub.innerHTML = `<div class="settings-list-card">${rows.join("")}</div>
     <div class="settings-list-card danger-list-card settings-logout-card">
       <button class="settings-list-row settings-hub-row danger settings-delete-account-row" type="button" data-shell-action="delete-account">
         <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg></span>
         <span class="settings-hub-label">Delete Account</span>
-      </button>
-      <button class="settings-list-row settings-hub-row danger settings-logout-row" type="button" data-shell-action="logout">
-        <span class="settings-hub-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M10 4H5.75A1.75 1.75 0 0 0 4 5.75v12.5C4 19.22 4.78 20 5.75 20H10"/><path d="M14 8l4 4-4 4"/><path d="M18 12H9"/></svg></span>
-        <span class="settings-hub-label">Log Out</span>
       </button>
     </div>`;
   settingsScreenEl.prepend(hub);
@@ -20653,6 +20937,7 @@ function refreshSettingsCaptions() {
 }
 
 function showSettingsCategory(index) {
+  saveAccountNameOnLeaving();
   customizeDockFromHub = false; // any walk through Settings is Settings' own again
   if (!settingsScreenEl || !settingsHubEl) return;
   refreshSettingsCaptions();
@@ -20785,14 +21070,26 @@ settingsScreenEl?.addEventListener("click", (event) => {
     showSettingsCategory(settingsSubscreenParentIndex != null ? settingsSubscreenParentIndex : null);
     return;
   }
-  if (event.target.closest("[data-settings-hub-seed]")) {
+  if (event.target.closest("[data-settings-view-words]")) {
     openRecoveryModal();
+  }
+  if (event.target.closest("[data-settings-complete-backup]")) {
+    openAccountBackupSteps();
   }
   if (event.target.closest("[data-settings-hub-terms]")) {
     infoSheet({ title: "Terms of Use", html: kaPostTermsHtml() });
   }
 });
 showSettingsCategory(null);
+
+// Connection Status > Connection Settings (iOS bfe9f022 actionsSection). Back goes to Settings'
+// Connection page, its parent there.
+document.querySelector("[data-connection-open-settings]")?.addEventListener("click", () => {
+  closeConnectionOverlay();
+  openAccountOverlay();
+  const parent = settingsGroupsEls.findIndex((group) => !group.dataset.settingsSubscreen && group.querySelector(".settings-group-label")?.textContent?.trim() === "Connection");
+  showSettingsSubscreen("connection-settings", parent);
+});
 
 // ---------------------------------------------------------------------------
 // Cache (iOS CacheSettingsPage): what the app holds that it could fetch again, by category,
@@ -20901,14 +21198,12 @@ function setSettingsAppOnlyMode(appOnly) {
     const label = row.querySelector(".settings-hub-label")?.textContent?.trim();
     row.hidden = appOnly && !SETTINGS_APP_ONLY_CATEGORIES.has(label);
   });
-  const seedRow = settingsHubEl?.querySelector("[data-settings-hub-seed]");
-  if (seedRow) seedRow.hidden = appOnly;
   const termsRow = settingsHubEl?.querySelector("[data-settings-hub-terms]");
   if (termsRow) termsRow.hidden = appOnly;
   const resyncRow = settingsHubEl?.querySelector("[data-shell-action=\"resync\"]");
   if (resyncRow) resyncRow.hidden = appOnly;
   const deleteRow = settingsHubEl?.querySelector("[data-shell-action=\"delete-account\"]");
-  if (deleteRow) deleteRow.hidden = appOnly;
+  if (deleteRow) deleteRow.closest(".settings-list-card").hidden = appOnly;
   // iOS AppSettingsView: titled "App Settings" (no connection dot or balance), and its
   // Customization page has only Appearance, Language and Currency.
   const title = document.querySelector("[data-settings-overlay-title]");
@@ -21081,6 +21376,19 @@ contactForm.addEventListener("submit", async (event) => {
 
 chatList.addEventListener("click", (event) => {
   if (event.target.closest("[data-open-message-requests]")) { openMessageRequestsSheet(); return; }
+  const groupRow = event.target.closest("[data-group-row]");
+  if (groupRow) {
+    const groupId = groupRow.dataset.groupRow;
+    if (chatSelectionModeActive) {
+      if (selectedGroupIds.has(groupId)) selectedGroupIds.delete(groupId);
+      else selectedGroupIds.add(groupId);
+      renderChats();
+      updateChatSelectionBar();
+      return;
+    }
+    if (groupId !== activeGroupId) openGroupChat(groupId);
+    return;
+  }
   const row = event.target.closest("[data-conversation-id]");
   if (!row) return;
   const conversationId = row.dataset.conversationId;
@@ -21102,9 +21410,11 @@ function activeSelectionCount() {
 }
 function isEverythingSelected() {
   const chats = visibleChatConversations();
+  const groups = visibleChatGroups();
   const circles = visibleChatCircles();
-  if (!chats.length && !circles.length) return false;
+  if (!chats.length && !groups.length && !circles.length) return false;
   return chats.every((entry) => selectedChatConversationIds.has(entry.id))
+    && groups.every((g) => selectedGroupIds.has(g.groupId))
     && circles.every((item) => (item.kind === "group" ? selectedGroupIds.has(item.key) : item.kind === "bot" || selectedRoomNames.has(item.key)));
 }
 
@@ -21134,7 +21444,7 @@ function updateChatSelectionBar() {
   }
   if (chatSelectAll) {
     chatSelectAll.textContent = isEverythingSelected() ? "Deselect All" : "Select All";
-    chatSelectAll.disabled = visibleChatConversations().length === 0 && visibleChatCircles().length === 0;
+    chatSelectAll.disabled = visibleChatConversations().length === 0 && visibleChatGroups().length === 0 && visibleChatCircles().length === 0;
   }
 }
 
@@ -21184,6 +21494,7 @@ chatSelectAll?.addEventListener("click", () => {
     selectedRoomNames.clear();
   } else {
     for (const entry of visibleChatConversations()) selectedChatConversationIds.add(entry.id);
+    for (const g of visibleChatGroups()) selectedGroupIds.add(g.groupId);
     for (const item of visibleChatCircles()) {
       if (item.kind === "group") selectedGroupIds.add(item.key);
       else if (item.kind === "room") selectedRoomNames.add(item.key);
@@ -21277,11 +21588,10 @@ function toggleChatCirclePin(id) {
   const pins = chatCirclePins();
   const index = pins.indexOf(id);
   if (index >= 0) { pins.splice(index, 1); showCopyToast("Unpinned"); }
-  else { pins.unshift(id); showCopyToast(id.startsWith("c:") ? "Pinned to the top row" : "Pinned to the front"); }
+  else { pins.unshift(id); showCopyToast(id.startsWith("c:") || id.startsWith("g:") ? "Pinned to the top row" : "Pinned to the front"); }
   saveChatCirclePins(pins);
-  // A chat moves between the list and the row.
-  if (id.startsWith("c:")) renderChats();
-  else renderChatCircles();
+  // A chat or group moves between the list and the row.
+  renderChats();
 }
 /** A 1:1 chat's id in the row's pins (iOS chatPinId). */
 function chatCirclePinId(address) { return `c:${String(address || "").toLowerCase()}`; }
@@ -21309,8 +21619,10 @@ function visibleChatCircles() {
   try { mgr = getGroupManager(); } catch { mgr = null; }
   if (mgr) {
     const opened = openedGroupIds();
+    const pins = new Set(chatCirclePins());
     for (const g of mgr.listGroups()) {
-      if (query && !groupMatchesChatSearch(g, query)) continue;
+      // Pinned groups only, and not while searching: the results list them (iOS d1844582).
+      if (query || !pins.has(`g:${g.groupId}`)) continue;
       items.push({ id: `g:${g.groupId}`, kind: "group", key: g.groupId, title: g.name || "Group", unread: groupDisplayUnread(g, opened), at: groupLastActivityAt(g), group: g });
     }
   }
@@ -21324,12 +21636,15 @@ function visibleChatCircles() {
       items.push({ id: `r:${room.name}`, kind: "room", key: room.name, title, unread: room.unread, at: room.lastAt, room });
     }
   }
-  for (const entry of botCircleConversations()) {
-    const contact = contactForConversation(entry);
-    const title = kachatBotFor(contact.address)?.name || displayNameForAddress(contact);
+  // Every bot always has its circle, with or without a chat; tapping one starts it (iOS d1844582).
+  for (const bot of KACHAT_BOTS) {
+    if (!isOnActiveNetwork(bot.address)) continue;
+    const entry = kachatBotConversation(bot.address);
+    const contact = (entry && contactForConversation(entry)) || { address: bot.address };
+    const title = bot.name || displayNameForAddress(contact);
     if (query && !title.toLowerCase().includes(query)) continue;
-    const at = Number(lastMessageFor(entry)?.createdAt || 0);
-    items.push({ id: `b:${contact.address.toLowerCase()}`, kind: "bot", key: entry.id, title, unread: Number(entry.unreadCount || 0), at, conversation: entry, contact });
+    const at = Number((entry && lastMessageFor(entry)?.createdAt) || 0);
+    items.push({ id: `b:${bot.address.toLowerCase()}`, kind: "bot", key: entry?.id || "", title, unread: Number(entry?.unreadCount || 0), at, conversation: entry || null, contact });
   }
   // The chats pinned up into the row (iOS 7abc06e8). Not while searching: the results list them. A
   // deleted chat's pin finds nothing and shows nothing.
@@ -21348,7 +21663,8 @@ function visibleChatCircles() {
     }
   }
   const byId = new Map(items.map((item) => [item.id, item]));
-  const pinned = pinIds.map((id) => byId.get(id)).filter(Boolean);
+  // Pinned groups lead the row, then the other pins in their order (iOS d1844582).
+  const pinned = pinIds.map((id) => byId.get(id)).filter(Boolean).sort((a, b) => Number(b.kind === "group") - Number(a.kind === "group"));
   const pinnedIds = new Set(pinned.map((item) => item.id));
   const rest = items.filter((item) => !pinnedIds.has(item.id)).sort((a, b) => b.at - a.at);
   return [...pinned, ...rest];
@@ -21517,6 +21833,30 @@ function syncChatCirclesForSimpleMode() {
 // (confirmed). Room: Mark as Read / Unread, Pin to Front / Unpin, notifications on/off, Copy Room
 // Link, Delete (a custom room after a confirmation; a default room is switched off, as in Public
 // Chats settings).
+/** What a group row's swipe or a group's half sheet chose. */
+async function runGroupRowChoice(groupId, choice) {
+  const g = getGroupManager()?.getGroup(groupId);
+  if (!g) return;
+  const pinId = `g:${groupId}`;
+  if (choice === "read") { markGroupOpened(groupId); setGroupUnread(groupId, 0); renderChats(); return; }
+  if (choice === "unread") { setGroupUnread(groupId, Math.max(1, groupUnreadFor(groupId))); renderChats(); return; }
+  if (choice === "pin") { toggleChatCirclePin(pinId); return; }
+  if (choice === "silence") { setGroupNotify(groupId, getGroupNotify(groupId) === "muted" ? "all" : "muted"); renderChats(); return; }
+  if (choice === "delete") {
+    const ok = await confirmDialog({
+      title: "Delete Group?",
+      message: "This removes this group and its messages from this device. This cannot be undone, and other members keep their copies.",
+      confirmLabel: "Delete", destructive: true,
+    });
+    if (!ok) return;
+    const done = await deleteGroupsWithOwnerNotice([groupId]);
+    if (!done.length) return;
+    dropChatCirclePins([pinId]);
+    renderChats();
+    showCopyToast("Group deleted.");
+  }
+}
+
 async function openChatCircleSheet(id) {
   const pinOption = chatCirclePins().includes(id)
     ? { id: "pin", title: "Unpin", subtitle: "Goes back to its place by latest activity.", icon: ACTION_TILE_ICONS.unpin }
@@ -21526,6 +21866,7 @@ async function openChatCircleSheet(id) {
     const g = mgr?.getGroup(id.slice(2));
     if (!g) return;
     const silenced = getGroupNotify(g.groupId) === "muted";
+    const pinned = chatCirclePins().includes(id);
     const choice = await chooseDialog({
       title: g.name || "Group",
       layout: "tiles",
@@ -21533,7 +21874,9 @@ async function openChatCircleSheet(id) {
         groupDisplayUnread(g) > 0
           ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this group.", icon: ACTION_TILE_ICONS.envelopeOpen }
           : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again.", icon: ACTION_TILE_ICONS.envelopeBadge },
-        pinOption,
+        pinned
+          ? { id: "pin", title: "Unpin", subtitle: "Moves it back into your chats.", icon: ACTION_TILE_ICONS.unpin }
+          : { id: "pin", title: "Pin to Top Row", subtitle: "Moves it into the row above your chats.", icon: ACTION_TILE_ICONS.pin },
         {
           id: "silence",
           title: silenced ? "Unsilence" : "Silence",
@@ -21543,24 +21886,7 @@ async function openChatCircleSheet(id) {
         { id: "delete", title: "Delete", subtitle: "Removes this group and its messages from this device.", destructive: true, icon: ACTION_TILE_ICONS.trash },
       ],
     });
-    if (!choice) return;
-    if (choice === "read") { markGroupOpened(g.groupId); setGroupUnread(g.groupId, 0); renderChatCircles(); return; }
-    if (choice === "unread") { setGroupUnread(g.groupId, Math.max(1, groupUnreadFor(g.groupId))); renderChatCircles(); return; }
-    if (choice === "pin") { toggleChatCirclePin(id); return; }
-    if (choice === "silence") { setGroupNotify(g.groupId, silenced ? "all" : "muted"); renderChatCircles(); return; }
-    if (choice === "delete") {
-      const ok = await confirmDialog({
-        title: "Delete Group?",
-        message: `This removes this group and its messages from this device. This cannot be undone. ${groupDeleteMembersLine([g.groupId])}`,
-        confirmLabel: "Delete", destructive: true,
-      });
-      if (!ok) return;
-      const done = await deleteGroupsWithOwnerNotice([g.groupId]);
-      if (!done.length) return;
-      dropChatCirclePins([id]);
-      renderChatCircles();
-      showCopyToast("Group deleted.");
-    }
+    if (choice) await runGroupRowChoice(g.groupId, choice);
     return;
   }
   if (id.startsWith("b:")) { await openBotCircleSheet(id, pinOption); return; }
@@ -21677,6 +22003,7 @@ async function openBotCircleSheet(id, pinOption) {
       const conversationId = circle.dataset.conversationId || "";
       if (conversationId && conversationId === activeConversationId) { setActiveConversationId(null); renderChats(); return; }
       if (conversationId) openConversation(conversationId);
+      else if (id.startsWith("b:")) openKachatBotChat(kachatBotFor(key));
     }
   });
   onContextGesture(circlesEl, (event) => {
@@ -21808,18 +22135,29 @@ function deleteConversationsByIds(ids, { quiet = false } = {}) {
 // Nothing while Select mode is active - the bulk bar owns actions. On touch the rows swipe instead
 // of hold (KaChat-iPhone d063b897), so a hold no longer opens this; a mouse has no swipe and keeps it.
 chatList.addEventListener("contextmenu", (event) => {
+  const groupRow = event.target.closest("[data-group-row]");
   const row = event.target.closest("[data-conversation-id]");
-  if (!row || chatSelectionModeActive) return;
+  if ((!row && !groupRow) || chatSelectionModeActive) return;
   event.preventDefault();
   // Android raises contextmenu for a hold.
   if (event.pointerType === "touch" || event.pointerType === "pen" || chatRowSwipes?.fingerIsDown()) return;
+  if (groupRow) { openChatCircleSheet(`g:${groupRow.dataset.groupRow}`); return; }
   const conversationEntry = state.conversations.find((entry) => entry.id === row.dataset.conversationId);
   if (conversationEntry) openChatRowSheet(conversationEntry);
 });
 
 chatRowSwipes = attachRowSwipes(chatList, {
-  rowAttr: "data-conversation-id",
+  rowAttr: "data-swipe-id",
   actionsFor(id) {
+    if (id.startsWith("group:")) {
+      const g = getGroupManager()?.getGroup(id.slice(6));
+      if (!g) return null;
+      return chatRowSwipeActions({
+        unread: groupDisplayUnread(g),
+        isSilent: getGroupNotify(g.groupId) === "muted",
+        isPinned: chatCirclePins().includes(`g:${g.groupId}`),
+      });
+    }
     const conversationEntry = state.conversations.find((entry) => entry.id === id);
     const contact = contactForConversation(conversationEntry);
     if (!conversationEntry || !contact) return null;
@@ -21832,6 +22170,7 @@ chatRowSwipes = attachRowSwipes(chatList, {
   },
   iconFor: (key) => ACTION_TILE_ICONS[key] || "",
   onAction(id, actionId) {
+    if (id.startsWith("group:")) { runGroupRowChoice(id.slice(6), actionId); return; }
     const conversationEntry = state.conversations.find((entry) => entry.id === id);
     if (conversationEntry) runChatRowChoice(conversationEntry, actionId);
   },
@@ -23677,10 +24016,13 @@ if (composerPlusButton && composerPlusMenu) {
     // In your own chat there is no one to shake hands with. The handshake row is only
     // there where first contact still needs one (iOS: canSendRequestToCommunicate && !inboxSupported).
     const selfChat = isSelfConversation(conversationEntry);
+    // A bot only takes text and Kaspa (iOS d1844582), so its sheet offers just the payment.
+    const botChat = isKachatBot(contactForConversation(conversationEntry)?.address);
+    composerPlusMenu.querySelectorAll("button").forEach((row) => { if (!row.hasAttribute("data-composer-pay")) row.hidden = botChat; });
     // Play Chess is always offered (iOS composerPlusOptions has no condition on it).
-    composerPlusMenu.querySelectorAll("[data-composer-handshake]").forEach((row) => { row.hidden = selfChat || inboxSupportKnown() === true; });
+    composerPlusMenu.querySelectorAll("[data-composer-handshake]").forEach((row) => { row.hidden = botChat || selfChat || inboxSupportKnown() === true; });
     // File appears with a connected Nextcloud (nextcloud.js keeps it in step too).
-    composerPlusMenu.querySelectorAll("[data-nextcloud-pick]").forEach((row) => { row.hidden = !isNextcloudConnected(); });
+    composerPlusMenu.querySelectorAll("[data-nextcloud-pick]").forEach((row) => { row.hidden = botChat || !isNextcloudConnected(); });
     composerPlusMenu.hidden = !composerPlusMenu.hidden;
   });
 }
@@ -24686,10 +25028,9 @@ function syncComposerSlots() {
     composer.classList.toggle("composer-field-replaced", declined || hasPhoto || audio);
     const hasText = /\S/.test(String(input?.value || ""));
     composer.classList.toggle("composer-has-content", !declined && (audio || hasPhoto || hasText));
+    syncComposerPayPreview(document.querySelector("[data-composer-pay-preview]"), declined || audio ? "" : input?.value);
     const emoji = composer.querySelector("[data-composer-emoji]");
     if (emoji) emoji.hidden = declined || audio || hasPhoto;
-    const audioSwitch = composer.querySelector("[data-composer-audio-switch]");
-    if (audioSwitch) audioSwitch.hidden = !(audio && voiceState === "idle");
     const send = composer.querySelector(".composer-send");
     if (send) {
       const icon = audio ? (voiceState === "recording" ? "stop" : voiceState === "idle" ? "mic" : "send") : "send";
@@ -24940,8 +25281,9 @@ const chatVoiceRecorder = createVoiceRecorder({
 
 // iOS 1:1 audio mode (InputMode.audio): "Voice Message" puts the composer in it and starts
 // recording. The field reads "Recording... Ns", then "Encoding…", then "Audio ready • 00:05"
-// with play; the trash discards and stays in audio mode ("Tap send to record"); the send button
-// stops, sends, or records again. A sent voice message goes back to the text composer.
+// with play; "Tap send to record" before one starts. Every trash goes back to the text composer,
+// throwing any recording away (iOS d1844582 switchMode(.message)); the send button stops, sends,
+// or records. A sent voice message goes back to the text composer too.
 let chatAudioMode = false;
 let chatVoiceEncoding = false;
 const VOICE_TRASH_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>';
@@ -24983,7 +25325,7 @@ function renderChatVoiceField() {
         : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-2 5.8 6 4.2-6 4.2z"/></svg>'}</button>
       <span class="voice-field-label">Audio ready • ${formatAudioDuration(entry?.seconds)}</span>${trash}`;
   } else {
-    panel.innerHTML = `<span class="voice-field-hint">Tap send to record</span>`;
+    panel.innerHTML = `<span class="voice-field-hint">Tap send to record</span>${trash}`;
   }
   syncComposerSlots();
   // The fee pill follows the recorder's state, not every playback tick.
@@ -25096,22 +25438,12 @@ async function sendChatVoicePreview() {
 
 voiceRecordingPanel?.addEventListener("click", (event) => {
   if (event.target.closest("[data-voice-recording-play]")) { toggleVoicePreviewPlayback(voiceRecordingPanel); return; }
-  // The trash (iOS cancelRecording): the recording goes, audio mode stays.
+  // The trash (iOS d1844582): back to texting, which throws the recording away.
   if (event.target.closest("[data-voice-recording-cancel]")) {
     if (chatVoiceEncoding) chatVoiceDiscardNext = true;
-    chatVoiceEncoding = false;
-    if (chatVoiceRecorder.isRecording()) chatVoiceRecorder.stop(true);
-    clearVoicePreview(voiceRecordingPanel);
-    renderChatVoiceField();
+    exitChatAudioMode();
+    composer?.elements?.message?.focus();
   }
-});
-document.querySelector("[data-composer-audio-text]")?.addEventListener("click", () => {
-  exitChatAudioMode();
-  composer?.elements?.message?.focus();
-});
-document.querySelector("[data-composer-audio-pay]")?.addEventListener("click", () => {
-  exitChatAudioMode();
-  openPaymentSheet();
 });
 
 // Envelope parses are memoized by content string: the thread re-renders constantly (sync
@@ -26767,6 +27099,8 @@ function composerFeeEstimateIsCurrent(length, lastLength, lastFeeKas) {
 
 // What the fee pill is for (iOS shouldShowFeeBubble): a pending photo, a recording, or the typed
 // text. Via Nextcloud the chain only carries the share link (iOS nextcloudLinkPayloadSize, 96).
+// Show Fee Estimate covers text; a photo or voice message on chain costs enough more that its fee
+// always shows (iOS d1844582).
 const NEXTCLOUD_LINK_PAYLOAD_BYTES = 96;
 function composerFeeSubject() {
   // A declined chat has no composer, so no fee pill either (iOS: !isDeclined).
@@ -26775,7 +27109,7 @@ function composerFeeSubject() {
     if (chatAudioMode) {
       const voiceState = chatVoiceState();
       if (voiceState === "idle") return null;
-      if (voiceViaNextcloud && isNextcloudConnected()) return { payloadBytes: NEXTCLOUD_LINK_PAYLOAD_BYTES, length: -1 };
+      if (voiceViaNextcloud && isNextcloudConnected()) return feeEstimateEnabled() ? { payloadBytes: NEXTCLOUD_LINK_PAYLOAD_BYTES, length: -1 } : null;
       const entry = voicePreviews.get(voiceRecordingPanel);
       const audioBytes = entry?.blob?.size ?? Math.ceil(voiceElapsedSeconds * VOICE_AUDIO_BITS_PER_SECOND / 8);
       // The binary media frame: the raw audio plus a small header (iOS f5f6a11).
@@ -26783,7 +27117,7 @@ function composerFeeSubject() {
       return { payloadBytes: estimateCommPayloadBytesForPlaintext(frameBytes), length: frameBytes };
     }
     if (pendingPhotoAttachment) {
-      if (photoViaNextcloud && isNextcloudConnected()) return { payloadBytes: NEXTCLOUD_LINK_PAYLOAD_BYTES, length: -1 };
+      if (photoViaNextcloud && isNextcloudConnected()) return feeEstimateEnabled() ? { payloadBytes: NEXTCLOUD_LINK_PAYLOAD_BYTES, length: -1 } : null;
       const envelope = buildImageEnvelopeJson(pendingPhotoAttachment);
       // What actually goes out: the binary media frame, or the JSON text if it cannot be framed.
       const frameBytes = mediaFrameForEnvelope(envelope)?.length;
@@ -26792,12 +27126,12 @@ function composerFeeSubject() {
     }
   } catch { /* voice / photo sections not evaluated yet */ }
   const text = String(composer?.elements?.message?.value || "").trim();
-  if (!text) return null;
+  if (!text || !feeEstimateEnabled()) return null;
   return { payloadBytes: estimateCommPayloadBytes(text), length: utf8ByteLength(text) };
 }
 
 function scheduleFeeEstimate({ typing = false } = {}) {
-  if (!feeEstimateBanner || !feeEstimateEnabled() || composerMode !== "message") {
+  if (!feeEstimateBanner || composerMode !== "message") {
     hideFeeEstimateBanner();
     return;
   }
@@ -26965,6 +27299,7 @@ function autoGrowComposer() {
   composerInputField.style.height = `${Math.min(composerInputField.scrollHeight, 132)}px`;
 }
 composerInputField?.addEventListener("input", autoGrowComposer);
+wireComposerPayPreview(document.querySelector("[data-composer-pay-preview]"), composerInputField, () => scheduleFeeEstimate());
 composerInputField?.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || event.isComposing) return;
   // On a phone keyboard Return is a newline and Send is the button, as in the iOS app.
@@ -27051,6 +27386,7 @@ document.querySelector("[data-confirm-onchain-send]")?.addEventListener("click",
   const draft = pendingOnchainDraft;
   if (!draft) return closeOnchainConfirm();
   if (composer?.elements?.message) composer.elements.message.value = "";
+  syncComposerSlots();
   closeOnchainConfirm();
   queueConversationMessage(draft.conversationId, draft.text);
 });
@@ -27094,14 +27430,15 @@ const createPassphraseError = document.querySelector("[data-create-passphrase-er
 const passphraseToggleBtn = document.querySelector("[data-create-passphrase-toggle]");
 createPassphraseInput?.addEventListener("input", () => schedulePassphrasePreview("create"));
 const continueWithPassphraseBtn = document.querySelector("[data-create-passphrase-submit]");
-const skipPassphraseBtn = document.querySelector("[data-create-passphrase-no]");
 
 // --- The passphrase wizard: question, then entry, then explainer (iOS PassphraseOptionView) ---
 //
 // It used to be one page with the fields already on it and two buttons at the bottom, which asks
 // someone to decide before it has told them what they are deciding - and most people meeting this
 // screen have never heard of a passphrase. So it opens with the question on its own, with a way to
-// go and read about it first. Same three screens, same copy, as iOS.
+// go and read about it first. Same three screens, same copy, as iOS. Only import has all three:
+// creating opens on the entry screen, since "Advanced: Create with a Passphrase" has already
+// answered the question (iOS d1844582).
 function showPassphraseScreen(flow, screen) {
   document.querySelectorAll(`[data-${flow}-passphrase-screen]`).forEach((el) => {
     el.hidden = el.dataset[`${flow}PassphraseScreen`] !== screen;
@@ -27205,7 +27542,7 @@ function schedulePassphrasePreview(flow) {
   const passphrase = input?.value || "";
   nodes.note.textContent = passphrase
     ? "A different passphrase gives a different address, and a different account."
-    : "This is the account your seed phrase opens on its own.";
+    : "This is the account your 12 or 24 words open on their own.";
 
   if (passphrasePreviewTimers[flow]) clearTimeout(passphrasePreviewTimers[flow]);
   const token = ++passphrasePreviewTokens[flow];
@@ -27226,7 +27563,7 @@ function schedulePassphrasePreview(flow) {
         nodes.address.textContent = address;
         delete nodes.address.dataset.pending;
       } else {
-        nodes.address.textContent = "Could not derive an address from this phrase.";
+        nodes.address.textContent = "Could not derive an address from these words.";
         renderPassphrasePreviewBalance(nodes, flow, { failed: true });
         return;
       }
@@ -27250,7 +27587,7 @@ function schedulePassphrasePreview(flow) {
       renderPassphrasePreviewBalance(nodes, flow, { sompi: BigInt(Math.round(Number(byAddress.get(address)) || 0)) });
     } catch (error) {
       if (token !== passphrasePreviewTokens[flow]) return;
-      if (nodes.address.dataset.pending) nodes.address.textContent = "Could not derive an address from this phrase.";
+      if (nodes.address.dataset.pending) nodes.address.textContent = "Could not derive an address from these words.";
       renderPassphrasePreviewBalance(nodes, flow, { failed: true });
       appendEngineLog(`Passphrase preview failed: ${error.message}`);
     }
@@ -27293,7 +27630,7 @@ function setPassphraseEye(button, revealed) {
   button.setAttribute("aria-label", revealed ? "Hide passphrase" : "Show passphrase");
 }
 /** A new seed phrase of 24 words (iOS d063b897: the only length Create New Account makes; Import
- *  still takes 12 or 24). Nothing shows it: Profile's card leads to the backup steps. */
+ *  still takes 12 or 24). Nothing shows it: the banner leads to the backup steps. */
 async function generateNewAccountPhrase() {
   if (!engine.kaspa) await ensureRuntimes();
   // If the WASM genuinely failed to load, show the real reason (e.g. a fetch/HTTP error behind a
@@ -27351,8 +27688,10 @@ async function openCreateAccountModal() {
     alertDialog({ title: "Couldn't Create Account", message: userFacingError(error) });
     return;
   }
-  showPassphraseScreen("create", "question");
+  showPassphraseScreen("create", "entry");
   if (createAccountModal) createAccountModal.hidden = false;
+  schedulePassphrasePreview("create");
+  createPassphraseInput?.focus();
 }
 function closeCreateAccountModal() {
   if (createAccountModal?.dataset.busy === "1") return;
@@ -27392,7 +27731,7 @@ async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   state = { contacts: [], conversations: [] };
   persistState();
   resetHandshakeSyncStateFor(wallet.address); // a new wallet starts from scratch on both networks (IOS-004)
-  // nobody has seen these words yet: Profile's card stays until they're backed up (iOS d063b897).
+  // nobody has seen these words yet: the banner stays until they're backed up (iOS d063b897).
   // Before the keys are saved, so no saved account was ever created without owing one.
   accountBackupStatus.markPending(wallet.address);
   persistTestingWallet({ mnemonic: wallet.mnemonic, passphrase, passphraseForm: "nfkd", derivationPath: wallet.derivationPath, wordCount });
@@ -27432,10 +27771,6 @@ async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   return wallet;
 }
 
-// Back on the passphrase question: out of Create Account, as iOS's navigation back leads to the
-// sign-in screen.
-document.querySelector("[data-create-passphrase-question-back]")?.addEventListener("click", closeCreateAccountModal);
-
 setPassphraseEye(passphraseToggleBtn, false);
 passphraseToggleBtn?.addEventListener("click", () => {
   if (!createPassphraseInput) return;
@@ -27463,12 +27798,12 @@ async function enterNewAccount(account) {
   openSetupGuide({ onboardingRun: true });
 }
 
-// Enter the app with the chosen passphrase ("" when skipped).
+// Enter the app with the chosen passphrase.
 async function commitPendingAccount(passphrase) {
   if (!pendingNewAccount) return;
   const account = { ...pendingNewAccount, name: nextNewAccountName(), passphrase };
-  // iOS: Yes, No and "What is a passphrase?" (and Back) are all off while it commits.
-  const buttons = [continueWithPassphraseBtn, skipPassphraseBtn, ...document.querySelectorAll("[data-create-passphrase-yes], [data-create-passphrase-explain], [data-create-passphrase-question-back], [data-create-passphrase-back]")];
+  // iOS: Continue and Back are off while it commits.
+  const buttons = [continueWithPassphraseBtn, document.querySelector("[data-create-passphrase-back]")];
   buttons.forEach((b) => { if (b) b.disabled = true; });
   if (createAccountModal) createAccountModal.dataset.busy = "1";
   if (createPassphraseError) createPassphraseError.hidden = true;
@@ -27489,27 +27824,9 @@ async function commitPendingAccount(passphrase) {
   }
 }
 
-document.querySelector("[data-create-passphrase-yes]")?.addEventListener("click", () => {
-  showPassphraseScreen("create", "entry");
-  resetPassphrasePreview("create");
-  schedulePassphrasePreview("create");
-  createPassphraseInput?.focus();
-});
-document.querySelector("[data-create-passphrase-explain]")?.addEventListener("click", () => {
-  showPassphraseScreen("create", "explainer");
-});
-document.querySelector("[data-create-passphrase-explain-back]")?.addEventListener("click", () => {
-  showPassphraseScreen("create", "question");
-});
-// Back clears what was typed: returning to the question and answering No must not commit a
-// passphrase the user has already walked away from.
-document.querySelector("[data-create-passphrase-back]")?.addEventListener("click", () => {
-  if (createPassphraseInput) createPassphraseInput.value = "";
-  if (createPassphraseConfirm) createPassphraseConfirm.value = "";
-  if (createPassphraseError) createPassphraseError.hidden = true;
-  updateCreatePassphraseSubmitEnabled();
-  showPassphraseScreen("create", "question");
-});
+// Back: out of Create Account, to the sign-in screen (iOS d1844582 dismiss). What was typed goes
+// with it.
+document.querySelector("[data-create-passphrase-back]")?.addEventListener("click", closeCreateAccountModal);
 
 // iOS PassphraseOptionView.submitFromEntry: the problems come up as an "Error" alert.
 continueWithPassphraseBtn?.addEventListener("click", () => {
@@ -27524,7 +27841,6 @@ continueWithPassphraseBtn?.addEventListener("click", () => {
   }
   void commitPendingAccount(pass);
 });
-skipPassphraseBtn?.addEventListener("click", () => void commitPendingAccount(""));
 
 // --- Setup Guide wizard (iOS WelcomeGuideView). Pops up after creating a new
 // account; also reopenable from Profile. 8 forward steps + Skip. ---
@@ -27554,6 +27870,8 @@ const SETUP_ICONS = {
   server: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>',
   chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 6.5A2.5 2.5 0 0 1 5 4h8.5A2.5 2.5 0 0 1 16 6.5v3A2.5 2.5 0 0 1 13.5 12H7.5L4 15v-3.2A2.5 2.5 0 0 1 2.5 9.5Z"/><path fill="var(--accent, #70c7ba)" stroke="none" d="M10.5 11.5A2.5 2.5 0 0 1 13 9h6.5A2.5 2.5 0 0 1 22 11.5v3A2.5 2.5 0 0 1 19.5 17h-3L13 20v-3h0a2.5 2.5 0 0 1-2.5-2.5Z"/></svg>',
   shield: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.4 20 5.1v6.2c0 4.6-3.2 8.4-8 10.3-4.8-1.9-8-5.7-8-10.3V5.1Z"/><rect x="9.1" y="11.3" width="5.8" height="4.7" rx="1.2"/><path d="M10.4 11.3v-1.5a1.6 1.6 0 0 1 3.2 0v1.5"/></svg>',
+  paperplane: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 3 10.5l6.8 2.7L12.5 20Z"/><path d="M21 3 9.8 13.2"/></svg>',
+  eye: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>',
 };
 
 const SETUP_STEPS = [
@@ -27568,11 +27886,8 @@ const SETUP_STEPS = [
   // The qrcode glyph, as iOS fundingStep's scaffold icon; the code itself is behind Show QR Code.
   { icon: SETUP_ICONS.qrcode, title: "Fund Your Chatting Address", body: "50 Kaspa is recommended to get started - enough to claim a .kachat name and chat for a while. 5 Kaspa is enough for about 2500 messages.", extra: "funding" },
   { icon: SETUP_ICONS.server, title: "Connect to a Node", body: "KaChat needs to connect to a node. How would you like to connect?", extra: "node" },
-  // Your Chatting Address, with the Profile screenshot (iOS 8852cdb).
-  { icon: null, title: "Your Chatting Address", body: "", extra: "addresses" },
-  // The guide's final step: the Chat Payment Privacy step after it is gone with the feature (iOS
-  // 6333dd3).
-  { icon: SETUP_ICONS.chat, title: "Starting a Conversation", body: "To chat with someone, press Create Chat and enter their Kaspa address or .kachat name. Your first message reaches them as a Message Request they can accept. For the most privacy, turn on Private Chat: nothing links you on chain, and they see your messages once they start a private chat with you too." },
+  // The guide's final step (iOS d1844582): Starting a Conversation after it is gone.
+  { icon: null, title: "Your Chatting Address", body: "Think of it like your phone number on KaChat.", extra: "addresses" },
 ];
 let setupStepIndex = 0;
 const SETUP_USER_TYPE_STEP = SETUP_STEPS.findIndex((step) => step.extra === "usertype");
@@ -27713,15 +28028,11 @@ function renderSetupExtra(kind) {
     nodeError.hidden = true;
     setupExtraEl.appendChild(nodeError);
   } else if (kind === "addresses") {
-    // Profile: Receive Kaspa, the Chatting Address QR and Manage Addresses (iOS 8852cdb).
-    const picture = document.createElement("img");
-    picture.className = "setup-address-explainer";
-    picture.src = addressExplainerUrl;
-    picture.alt = "";
-    setupExtraEl.appendChild(picture);
+    // iOS d1844582 addressExplainerStep: no picture, three rows.
     const rows = [
-      { icon: SETUP_ICONS.chat, title: "Chatting Address", value: engine.address || "--", caption: "Your identity on KaChat, and yours alone. People message it, your .kachat name and profile live on it, and every message you send is paid from it. Everything it does is public on the Kaspa network and tied to you." },
-      { icon: SETUP_ICONS.shield, title: "Everything Else", value: "", caption: "To protect your privacy, use your other addresses for all other activity on the Kaspa network. Receive Kaspa gives you a fresh one, and Manage Addresses lists them all." },
+      { icon: SETUP_ICONS.chat, title: "How People Reach You", value: engine.address || "--", caption: "Share this address and people can message you. Only you can read what they send." },
+      { icon: SETUP_ICONS.paperplane, title: "Paying for Messages", value: "", caption: "Each message you send takes a tiny amount of Kaspa from this address. 1 Kaspa covers about 500 messages." },
+      { icon: SETUP_ICONS.eye, title: "What Others Can See", value: "", caption: "Anyone can see this address and its balance on the Kaspa network, but they can't read your messages. Use it only for chatting and .kachat domains." },
     ];
     for (const r of rows) {
       const box = document.createElement("div");
@@ -28010,7 +28321,7 @@ function renderChattingPickerList() {
   if (!rows.length) {
     chattingPickerListEl.innerHTML = chattingPickerScanning
       ? ""
-      : '<div class="manage-address-empty">No addresses with a balance or domains on this seed yet.</div>';
+      : '<div class="manage-address-empty">No addresses with a balance or domains on these words yet.</div>';
     renderChattingPickerFooter();
     return;
   }
@@ -28037,7 +28348,7 @@ async function scanChattingAddressBatch() {
   if (chattingPickerScanning) return;
   const mnemonic = activeAccountMnemonic();
   if (!mnemonic) {
-    setChattingPickerError("This account has no recovery phrase, so its chatting address can't be changed.");
+    setChattingPickerError("This account has no 12 or 24 words, so its chatting address can't be changed.");
     return;
   }
   const token = chattingPickerToken;
@@ -28056,7 +28367,7 @@ async function scanChattingAddressBatch() {
     }
     if (token !== chattingPickerToken) return;
     if (!derived.length) {
-      setChattingPickerError("Could not derive addresses from this seed. Please try again.");
+      setChattingPickerError("Could not derive addresses from these words. Please try again.");
       return;
     }
     const addresses = derived.map((entry) => entry.address);
@@ -28113,7 +28424,7 @@ async function scanChattingAddressBatch() {
 function openChattingAddressPicker() {
   if (!chattingPickerScreen) return;
   if (!activeAccountMnemonic()) {
-    showCopyToast("This account has no recovery phrase, so its chatting address can't be changed.");
+    showCopyToast("This account has no 12 or 24 words, so its chatting address can't be changed.");
     return;
   }
   chattingPickerToken += 1;
@@ -28206,7 +28517,7 @@ async function performChattingAddressSwitch() {
   if (candidate.index === activeChattingIndex()) return;
   const record = activeSavedAccountRecord();
   const mnemonic = String(record?.mnemonic || "");
-  if (!mnemonic) { showCopyToast("This account has no recovery phrase."); return; }
+  if (!mnemonic) { showCopyToast("This account has no 12 or 24 words."); return; }
   // Captured BEFORE the import moves engine.address: the index moves WITHIN
   // the account's existing family, and the name/passphrase belong to the seed.
   const family = activeAccountSourceFamily();
@@ -28357,8 +28668,8 @@ let seedClipboardTimer = 0;
 document.querySelector("[data-copy-seed-phrase]")?.addEventListener("click", async () => {
   const phrase = revealedMnemonic;
   if (!phrase) return;
-  try { await navigator.clipboard.writeText(phrase); } catch { showCopyToast("Could not copy the seed phrase."); return; }
-  showCopyToast("Seed phrase copied. Clipboard will clear in 30s.");
+  try { await navigator.clipboard.writeText(phrase); } catch { showCopyToast("Could not copy the words."); return; }
+  showCopyToast("Words copied. Clipboard will clear in 30s.");
   window.clearTimeout(seedClipboardTimer);
   seedClipboardTimer = window.setTimeout(async () => {
     let current = null;
@@ -28375,9 +28686,9 @@ document.querySelector("[data-import-seed-paste]")?.addEventListener("click", as
   try { text = await navigator.clipboard.readText(); } catch { pasteError("Nothing to paste."); return; }
   const pasted = String(text || "").toLowerCase().split(/[^a-z]+/).filter(Boolean);
   if (!pasted.length) { pasteError("Nothing to paste."); return; }
-  if (pasted.length !== 12 && pasted.length !== 24) { pasteError(`A recovery phrase is 12 or 24 words - the clipboard holds ${pasted.length}.`); return; }
+  if (pasted.length !== 12 && pasted.length !== 24) { pasteError(`You need 12 or 24 words - the clipboard holds ${pasted.length}.`); return; }
   const unknown = pasted.filter((w) => !isBip39Word(w));
-  if (unknown.length) { pasteError(`Not a recovery phrase word: ${unknown.slice(0, 3).join(", ")}.`); return; }
+  if (unknown.length) { pasteError(`Not a valid word: ${unknown.slice(0, 3).join(", ")}.`); return; }
   importWordCount = pasted.length;
   importWords = Array(24).fill("");
   pasted.forEach((w, i) => { importWords[i] = w; });
@@ -28685,18 +28996,18 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", pa
   const cleanPhrase = String(recoveryPhrase || "").trim().toLowerCase().replace(/\s+/g, " ");
   if (!cleanName) throw new Error("Enter an account name.");
   const words = cleanPhrase.split(" ").filter(Boolean);
-  if (![12, 24].includes(words.length)) throw new Error("Recovery phrase must contain exactly 12 or 24 words.");
+  if (![12, 24].includes(words.length)) throw new Error("Invalid words. Please enter 12 or 24 words.");
 
   let wallet;
   try {
     wallet = await engine.importMnemonicWithFamily(cleanPhrase, passphrase, { family, index: chattingIndex, passphraseForm: cleanPassphraseForm });
   } catch (error) {
     engine.clearSession();
-    throw new Error(`Invalid recovery phrase: ${error?.message || "word list or checksum validation failed."}`);
+    throw new Error(`Invalid words: ${error?.message || "word list or checksum validation failed."}`);
   }
   if (!wallet?.privateKeyHex || !wallet?.address?.startsWith(ADDRESS_PREFIX) || !wallet?.mnemonic) {
     engine.clearSession();
-    throw new Error("Recovery phrase did not produce a valid Kaspa mainnet account.");
+    throw new Error("These words did not produce a valid Kaspa mainnet account.");
   }
 
   const createdAt = new Date().toISOString();
@@ -28789,7 +29100,7 @@ importContinueBtn?.addEventListener("click", async () => {
     importSeedGrid?.querySelectorAll("[data-import-slot]").forEach((input) => input.classList.toggle("invalid", bad.includes(Number(input.dataset.importSlot))));
     const missing = bad.filter((i) => !String(importWords[i] || "").trim()).length;
     showImportError(missing === bad.length
-      ? `Enter all ${importWordCount} recovery words - ${bad.length === 1 ? `word ${bad[0] + 1} is` : `${bad.length} words are`} still empty.`
+      ? `Enter all ${importWordCount} words - ${bad.length === 1 ? `word ${bad[0] + 1} is` : `${bad.length} words are`} still empty.`
       : `Word ${bad.map((i) => i + 1).join(", ")} ${bad.length === 1 ? "isn't a" : "aren't"} recovery word${bad.length === 1 ? "" : "s"}. Check the highlighted box${bad.length === 1 ? "" : "es"}.`);
     return;
   }
@@ -28799,7 +29110,7 @@ importContinueBtn?.addEventListener("click", async () => {
     // The checksum is checked here (iOS advanceToPassphrase) so a mistake surfaces before the
     // passphrase step rather than after it.
     try { new engine.kaspa.Mnemonic(phrase); }
-    catch { showImportError("This recovery phrase is invalid. Double-check the words - the last word encodes a checksum, so one wrong word fails validation."); return; }
+    catch { showImportError("These words are invalid. Double-check the words - the last word encodes a checksum, so one wrong word fails validation."); return; }
     pendingImport = { name, recoveryPhrase: phrase, family: selectedImportSourceFamily() };
     if (importPassphraseInput) { importPassphraseInput.value = ""; importPassphraseInput.type = "password"; }
     if (importPassphraseError) importPassphraseError.hidden = true;
@@ -29044,7 +29355,7 @@ function waitForRecoveryModalToClose() {
 }
 function openRecoveryModal() {
   const account = activeSavedAccountRecord();
-  if (!account?.mnemonic) { showCopyToast("No recovery phrase stored for this account"); return; }
+  if (!account?.mnemonic) { showCopyToast("No 12 or 24 words stored for this account"); return; }
   // Says up front that the words alone are not the whole backup (IOS-017).
   { const note = document.querySelector("[data-recovery-passphrase-note]"); if (note) note.hidden = !account.passphrase; }
   resetRecoveryHold();
@@ -29067,7 +29378,7 @@ revealRecoveryButton?.addEventListener("click", async () => {
 /** The seed phrase's gate (iOS AccountBackupView.unlock): the password, when it protects the seed. */
 async function unlockForSeedPhrase() {
   if (!(accountShellPrefs.passwordForSeed && hasAppPassword())) return true;
-  return Boolean(await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to view the seed phrase." }));
+  return Boolean(await requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to view your 12 or 24 words." }));
 }
 
 // Profile's Log Out asks in the same chooser as every other confirm (iOS ProfileView logOutSection
@@ -29121,8 +29432,8 @@ async function openDeleteAccountSheet() {
       title: "Delete Account",
       messageHtml: deleteAccountWarningHtml({ notBackedUp, canBackUpHere: true }),
       options: [
-        notBackedUp && record?.mnemonic ? { id: "backup", title: "Back Up Account", subtitle: "Write down your seed phrase before you delete." } : null,
-        !notBackedUp && record?.mnemonic ? { id: "seed", title: "View Seed Phrase and Passphrase", subtitle: "The passphrase shows too, if this account has one." } : null,
+        notBackedUp && record?.mnemonic ? { id: "backup", title: "Back Up Account", subtitle: "Write down your 12 or 24 words before you delete." } : null,
+        !notBackedUp && record?.mnemonic ? { id: "seed", title: "View 12 or 24 Words and Passphrase", subtitle: "The passphrase shows too, if this account has one." } : null,
         { id: "delete", title: "Delete Account", subtitle: "Removes this account and its data from this device.", destructive: true },
         { id: "cancel", title: "Cancel", subtitle: "Leave everything as it is." },
       ],
@@ -29136,7 +29447,7 @@ async function openDeleteAccountSheet() {
       await waitForRecoveryModalToClose();
       continue;
     }
-    if (choice === "delete") await deleteCurrentAccount();
+    if (choice === "delete" && await authorizeKasSpend({ confirm: { title: "Delete Account", message: "Confirm deleting this account" } })) await deleteCurrentAccount();
     return;
   }
 }
@@ -29499,15 +29810,7 @@ document.querySelectorAll('[data-shell-action="view-recovery"]').forEach((button
 function pushNotificationsEnabled() {
   return (accountShellPrefs.chatNotifications ?? true) !== false;
 }
-function renderPushNotificationsFooter() {
-  const footer = document.querySelector("[data-push-notifications-footer]");
-  if (!footer) return;
-  footer.textContent = pushNotificationsEnabled()
-    ? "Everything you have switched on below can reach you, even when the app is closed. Turning this off silences all of it."
-    : "Turn this on to receive anything you have switched on below, even when the app is closed.";
-  renderWebPushStatus();
-}
-/// The line under it: whether notifications reach you with KaChat closed (ui/web-push.js), and an
+/// The line under the switch: whether notifications reach you with KaChat closed (ui/web-push.js), and an
 /// Allow button while the browser has not been asked - asking needs a tap (Safari shows no prompt
 /// otherwise), and with the switch on by default there is no switch to flip.
 function renderWebPushStatus() {
@@ -29533,9 +29836,6 @@ const prefBindings = [
   ["[data-pref-estimate-fees]", "estimateFees", true],
   ["[data-pref-hide-payment-chats]", "hidePaymentChats", false],
   ["[data-pref-show-contact-balance]", "showContactBalance", true],
-  // Settings > Chats: hold back inline photos from contacts you haven't accepted yet
-  // (iOS AppSettings.requirePhotoApprovalForNewContacts, default ON).
-  ["[data-pref-photo-approval]", "photoApprovalForNewContacts", true],
   // Settings > Notifications (iOS NotificationsHubPage port): Chats / Wallet /
   // KaPosts pages, all default ON.
   ["[data-pref-chat-notifications]", "chatNotifications", true],
@@ -29558,19 +29858,13 @@ prefBindings.forEach(([selector, key, fallback]) => {
     accountShellPrefs[key] = input.checked;
     persistAccountShellPreferences();
     if (key === "estimateFees") scheduleFeeEstimate();
-    if (key === "chatNotifications") renderPushNotificationsFooter();
+    if (key === "chatNotifications") renderWebPushStatus();
     // What the push service sends this browser follows these (registration lists, KaPosts kinds,
     // Address Activity, the sound the worker plays).
     if (key === "chatNotifications" || key === "notificationSound" || key === "addressActivityNotifications" || key.startsWith("kaPostsNotify")) {
       scheduleWebPushSync({ force: key === "chatNotifications" });
     }
     if (key === "verboseApiLogging") setVerboseApiLogging(input.checked, appendEngineLog);
-    if (key === "photoApprovalForNewContacts") {
-      // Apply to the open thread immediately, and re-sync the Chat Info toggle that mirrors it.
-      const conv = (state.conversations || []).find((entry) => entry.id === activeConversationId);
-      if (conv) renderMessages(conv);
-      try { refreshChatInfoContactControls(); } catch { /* Chat Info not open */ }
-    }
     if ((key === "chatNotifications" || key === "addressActivityNotifications") && input.checked) {
       ensureNotificationPermission().then((granted) => {
         if (!granted) showCopyToast(notificationsUnavailableMessage());
@@ -29578,7 +29872,7 @@ prefBindings.forEach(([selector, key, fallback]) => {
     }
   });
 });
-renderPushNotificationsFooter();
+renderWebPushStatus();
 // The Notifications page tells a phone reader what it takes (a Safari tab cannot notify at all).
 {
   // Only where it applies: an iPhone/iPad browser tab. The home-screen app already has what it takes.
@@ -30361,7 +30655,7 @@ queueMicrotask(async () => {
       nextFreshSpendingIndex: () => (activeAccountMnemonic() ? getSpendingState().maxIndex + 1 : null),
       spendingAddressAt: (index) => deriveSpendingAddressAt(index),
       revealNextSwapAddress: async () => {
-        if (!activeAccountMnemonic()) { showCopyToast("This account has no recovery phrase."); return null; }
+        if (!activeAccountMnemonic()) { showCopyToast("This account has no 12 or 24 words."); return null; }
         const owner = engine.address;
         const next = getSpendingState(owner).maxIndex + 1;
         saveSpendingState({ maxIndex: next }, owner);
@@ -30590,6 +30884,11 @@ queueMicrotask(async () => {
       canSend: () => Boolean(engine.address),
       openSend: (address) => openSendKaspaModal({ prefillAddress: address }),
       openChat: (address) => openChatWithAddress({ address }),
+      // Call on a Contacts entry (iOS d1844582): the same sheets as a chat's call button. Nobody's
+      // chat contact until you go on past the Talk notice, so viewing an entry never adds one.
+      canCall: (address) => !isKachatBot(address),
+      callActive: () => Calls.hasActiveCall(),
+      startCall: (address) => Calls.requestCallFromHeader(address, { prepare: ensureCallContact }).catch((error) => showCopyToast(error?.message || "Could not start the call.")),
       copyText: (text) => copyTextToClipboard(text),
       showToast: showCopyToast,
       confirmDialog,
@@ -30624,6 +30923,9 @@ queueMicrotask(async () => {
           const open = activeConversationId ? state.conversations.find((entry) => entry.id === activeConversationId) : null;
           const openContact = open ? contactForConversation(open) : null;
           if (openContact && conversationName) conversationName.textContent = displayNameForAddress(openContact);
+          // A Contacts photo shows wherever that address's avatar does (iOS bfe9f022).
+          if (openContact) { updateAvatarElement(conversationAvatarInitials, conversationAvatarImage, openContact); renderMessages(open); }
+          if (activeGroupId) renderGroupMessages();
         } catch { /* not ready */ }
         try { refreshChatInfoAddressBookRow(); } catch { /* not ready */ }
         // A user edit owes the backup an upload; a restore came FROM the backup (iOS didChange).
@@ -30672,6 +30974,7 @@ queueMicrotask(async () => {
       chooseDialog,
       confirmDialog,
       nextcloudAccount,
+      isNextcloudConnected,
       talkCallsAvailable: () => nextcloudTalkCallsAvailable(),
       contactByAddress: (address) => (state.contacts || []).find((entry) => entry.address === address) || null,
       displayNameFor: (address) => {
@@ -30684,6 +30987,7 @@ queueMicrotask(async () => {
         || String(activeAccountMetadata()?.name || "KaChat").trim() || "KaChat",
       avatarHtmlFor: (address) => {
         const contact = (state.contacts || []).find((entry) => entry.address === address);
+        if (!contact && addressBookPhoto(address)) return assignedPhotoSpanHtml(address, "message-avatar");
         if (kachatNamesUiEnabled() && !contact) return kachatAvatarImgHtml(address) ? kachatAvatarSpanHtml(address, "message-avatar") : "";
         return contact ? avatarHtmlFor(contact, "message-avatar") : "";
       },
@@ -30692,7 +30996,15 @@ queueMicrotask(async () => {
       // Call envelopes are ordinary encrypted 1:1 messages in the contact's chat.
       sendEnvelope: async (address, json) => {
         const contact = (state.contacts || []).find((entry) => entry.address === address);
-        const conversationEntry = contact ? (state.conversations || []).find((entry) => entry.contactId === contact.id) : null;
+        let conversationEntry = contact ? (state.conversations || []).find((entry) => entry.contactId === contact.id) : null;
+        if (!conversationEntry && contact) {
+          // A call from Contacts to someone never messaged.
+          conversationEntry = createConversation({ contactId: contact.id, createdAt: Date.now() });
+          state.conversations.push(conversationEntry);
+          refreshSubscriptionAddresses({ restart: true });
+          persistState();
+          renderChats();
+        }
         if (!conversationEntry) throw new Error("No chat with this contact.");
         queueConversationMessage(conversationEntry.id, json);
       },
@@ -30718,12 +31030,6 @@ queueMicrotask(async () => {
     const contact = contactForConversation(conversationEntry);
     if (!contact?.address || contact.address === engine.address) return;
     Calls.requestCallFromHeader(contact.address).catch((error) => showCopyToast(error?.message || "Could not start the call."));
-  });
-  document.querySelector("[data-chat-info-calls]")?.addEventListener("change", (event) => {
-    if (!chatInfoContactAddress) return;
-    setContactCallsEnabled(chatInfoContactAddress, event.target.checked);
-    if (event.target.checked) Calls.primeCallPermissions().catch(() => {});
-    showCopyToast(event.target.checked ? "Calls and video calls enabled for this contact." : "Calls off for this contact.");
   });
 
   try {
@@ -30849,6 +31155,7 @@ function getGroupManager() {
   if (!engine.address || !engine.privateKeyHex) return null;
   if (!groupManager || groupManagerForAddress !== engine.address) {
     groupManager = createGroupManager(engine);
+    groupManager.isInviterBlocked = (address) => isChatBlocked(address);
     groupManagerForAddress = engine.address;
   }
   return groupManager;
@@ -31009,7 +31316,7 @@ function maybeNotifyGroupIncoming(groupId, senderAddress, text, id, createdAt) {
   const group = getGroupManager()?.getGroup(groupId);
   postDesktopNotification({
     title: group?.name || "Group",
-    body: `${groupNotificationSenderName(senderAddress)}: ${groupPreviewText(text) || "New message"}`,
+    body: `${groupNotificationSenderName(senderAddress)}: ${parsePaymentRequestLinkCached(displayTextForMessage({ text })) ? "Requested for payment" : (groupPreviewText(text) || "New message")}`,
     // One per group (the tag a closed-app push for this group uses too); one per message across tabs.
     tag: `kachat-group-${groupId}`,
     key: String(id || createdAt || ""),
@@ -31581,24 +31888,33 @@ function memberAvatarHtml(address, className = "chat-avatar") {
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return avatarHtmlFor(contact, className);
   if (address === engine.address) return selfAvatarHtml(className);
+  const assigned = assignedPhotoSpanHtml(address, className);
+  if (assigned) return assigned;
   if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(address, className);
   return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
-// Most-recent activity for a group: its newest message time, falling back to the group
-// record's own timestamps so a brand-new (message-less) group still sorts sensibly.
+// Most-recent activity for a group: its newest message time, falling back to when this device
+// learned of it so a brand-new (message-less) group still sorts sensibly. Not its record's
+// updatedAt: any write to the record would move it up the list.
 function groupLastActivityAt(g) {
   const msgs = groupMessages(g.groupId);
   const last = msgs[msgs.length - 1];
-  return Number(last?.createdAt || g.updatedAt || g.createdAt || 0);
+  return Number(last?.createdAt || g.createdAt || g.learnedAtMs || 0);
 }
 
-// --- the group circles ---
-// The Group Chats list is gone (iOS a062577): every group is a circle above the chats, with its
-// sheet on right-click (openChatCircleSheet). Kept under this name for its many callers, which
+/** A group row's preview (iOS GroupChatRow): the last message with its mentions decoded. iOS leads
+ *  with a reaction newer than that; Desktop's group reactions carry no time to compare. */
+function groupRowPreview(last) {
+  return decodeGroupMentions(String(webLinkPreviewLabel(last.text) || displayTextForMessage({ text: last.text }) || "")).replace(/\s+/g, " ").trim();
+}
+
+// --- the group rows and circles ---
+// A group is a row in the chat list by latest activity, or a circle once pinned (iOS d1844582), with
+// its sheet on right-click (openChatCircleSheet). Kept under this name for its many callers, which
 // call it whenever a group's messages, unread count, name or photo change.
 function renderGroupList() {
-  renderChatCircles();
+  renderChats();
 }
 
 // --- group thread (shares the right-side detail pane with the 1:1 conversation view) ---
@@ -31656,24 +31972,24 @@ function hideGroupFeePill() {
 // Typing waits for a 0.6 s pause and skips the estimate while within 24 bytes of the estimated
 // length; other callers force it (see scheduleFeeEstimate, iOS 0977a5b).
 // What the group fee pill is for (iOS shouldShowFeeBubble): a pending photo, a recording, or the
-// typed text.
+// typed text. Show Fee Estimate covers text and Nextcloud links; on chain media always shows.
 function groupFeeSubjectText() {
   try {
     if (groupVoiceRecorder || groupVoiceEncoding) {
-      if (groupVoiceViaNextcloud && isNextcloudConnected()) return "x".repeat(NEXTCLOUD_LINK_PAYLOAD_BYTES);
+      if (groupVoiceViaNextcloud && isNextcloudConnected()) return feeEstimateEnabled() ? "x".repeat(NEXTCLOUD_LINK_PAYLOAD_BYTES) : "";
       const audioBytes = Math.ceil(((Date.now() - groupVoiceStartMs) / 1000) * VOICE_AUDIO_BITS_PER_SECOND / 8);
       return "x".repeat(Math.ceil(audioBytes / 3) * 4 + 120);
     }
     if (groupPendingPhoto) {
-      if (groupPhotoViaNextcloud && isNextcloudConnected()) return "x".repeat(NEXTCLOUD_LINK_PAYLOAD_BYTES);
+      if (groupPhotoViaNextcloud && isNextcloudConnected()) return feeEstimateEnabled() ? "x".repeat(NEXTCLOUD_LINK_PAYLOAD_BYTES) : "";
       return buildImageEnvelopeJson(groupPendingPhoto.attachment, groupPendingPhoto.fileName);
     }
   } catch { /* voice / photo sections not evaluated yet */ }
-  return String(groupComposerInput?.value || "").trim();
+  return feeEstimateEnabled() ? String(groupComposerInput?.value || "").trim() : "";
 }
 function scheduleGroupFeeEstimate({ typing = false } = {}) {
   const text = groupFeeSubjectText();
-  if (!activeGroupId || !text || !feeEstimateEnabled()) { hideGroupFeePill(); return; }
+  if (!activeGroupId || !text) { hideGroupFeePill(); return; }
   if (groupFeeOverrideKas != null) { renderGroupFeePill(groupFeeOverrideKas); return; }
   const length = utf8ByteLength(text);
   if (typing && !groupFeeTimer && !document.querySelector("[data-group-fee]")?.hidden
@@ -32101,6 +32417,8 @@ function avatarHtmlForAnyAddress(address, className = "message-avatar") {
   if (address === engine.address) return selfAvatarHtml(className);
   const contact = (state.contacts || []).find((c) => c.address === address);
   if (contact) return avatarHtmlFor(contact, className);
+  const assigned = assignedPhotoSpanHtml(address, className);
+  if (assigned) return assigned;
   // Testnet: their .kachat face, never the KNS one.
   if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(address, className);
   const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
@@ -32717,6 +33035,8 @@ function renderGroupMemberPicker(excludeAddresses = []) {
 
 /// Avatar for someone with no contact record - straight off their KNS profile, initials otherwise.
 function groupPickerAvatarHtml(address, name) {
+  const assigned = assignedPhotoSpanHtml(address, "chat-avatar");
+  if (assigned) return assigned;
   if (kachatNamesUiEnabled()) return kachatAvatarSpanHtml(address, "chat-avatar");
   const avatarUrl = engine.peekKnsAddressProfile?.(address)?.profile?.avatarUrl;
   if (avatarUrl) return `<span class="chat-avatar"><img src="${escapeHtml(avatarUrl)}" alt="" /></span>`;
@@ -33047,7 +33367,7 @@ async function addSelectedGroupMembers() {
       await mgr.addMember(groupId, address, {});
       // iMessage-style membership line for the admin (other members get theirs on the rotation).
       const epAdd = mgr.getGroup(groupId)?.currentEpoch;
-      appendGroupSystemMessage(groupId, `${groupSenderLabel(address)} was added to the group chat`, Date.now(), `sys:${groupId}:${epAdd}:add:${address}`);
+      appendGroupSystemMessage(groupId, `${groupSenderLabel(address)} was invited to the group chat`, Date.now(), `sys:${groupId}:${epAdd}:add:${address}`);
       addMembersSheet.selected.delete(address);
     } catch (error) {
       appendEngineLog(`Add member failed for ${address}: ${error.message}`);
@@ -33313,6 +33633,7 @@ function openGroupManage(groupId) {
           <strong>${escapeHtml(groupInfoMemberName(m.address))}</strong>
         </span>
         ${m.isAdmin ? `<span class="group-member-admin-badge">Admin</span>` : ``}
+        ${inviteStatusBadgeHtml(mgr, groupId, m.address)}
         ${canManageMember ? `<button type="button" class="group-member-resend-btn" data-group-resend-member="${escapeHtml(m.address)}" title="Resend invite to this member" aria-label="Resend invite"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/></svg></button>` : ``}
         ${canManageMember ? `<button type="button" class="group-member-remove-btn" data-group-remove-member="${escapeHtml(m.address)}" title="Remove from group" aria-label="Remove from group"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>` : ``}
       </div>`;
@@ -33377,6 +33698,13 @@ function openGroupManage(groupId) {
       <button type="button" class="group-manage-danger" data-group-delete>Delete Group</button>
     </div>`;
   if (groupManageScreen) groupManageScreen.hidden = false;
+}
+/** "Invited" or "Declined" on a member's row (iOS bfe9f022); someone who joined is just a member. */
+function inviteStatusBadgeHtml(mgr, groupId, address) {
+  const status = mgr?.inviteStatus(groupId, address);
+  if (status === "invited") return `<span class="group-member-invite-status">Invited</span>`;
+  if (status === "declined") return `<span class="group-member-invite-status declined">Declined</span>`;
+  return "";
 }
 function closeGroupManage() { if (groupManageScreen) groupManageScreen.hidden = true; }
 
@@ -33460,9 +33788,25 @@ function applyGroupSyncResult(result, { catchUp = false } = {}) {
     const evMs = evRaw > 1e12 ? evRaw : evRaw > 0 ? evRaw * 1000 : 0;
     // A group an import or restore found again isn't new (iOS 7916f5cd): it never shows as unread
     // while the catch-up runs, or when a later catch-up finds it. An invite mined since is news.
-    if (ev.kind === "joined" && rediscoveredGroupIsRead({ inviteAtMs: evMs, importedAtMs: accountImportedAtMs() })) markGroupOpened(ev.groupId);
+    if (ev.kind === "joined" && rediscoveredGroupIsRead({ inviteAtMs: ev.inviteAt ?? evMs, importedAtMs: accountImportedAtMs() })) markGroupOpened(ev.groupId);
     const isNews = !catchUp && (!evMs || Date.now() - evMs <= GROUP_SYSTEM_MESSAGE_LIFETIME_MS);
     const lineAt = evMs || Date.now();
+    // Being added to a group is a request: it waits in Message Requests (iOS bfe9f022).
+    if (ev.kind === "invite") {
+      if (isNews) notifyGroupInvite(ev);
+      refreshMessageRequestsSheet();
+      continue;
+    }
+    // Someone answering their invite updates the member list; news while it's recent, and never
+    // about you.
+    if (ev.kind === "member-status") {
+      if (ev.changed && isNews && ev.address !== engine.address) {
+        const who = groupSenderLabel(ev.address);
+        appendGroupSystemMessage(ev.groupId, ev.status === "joined" ? `${who} joined the group` : `${who} declined the invite`, lineAt, `sys:${ev.groupId}:status:${String(ev.txId || "").slice(0, 12)}`);
+      }
+      if (groupManageScreen && !groupManageScreen.hidden && activeGroupId === ev.groupId) { try { openGroupManage(activeGroupId); } catch {} }
+      continue;
+    }
     // A group photo the admin changed — system line + refresh the open header/list.
     if (ev.kind === "photo-updated") {
       if (ev.changed && isNews) {
@@ -33480,7 +33824,7 @@ function applyGroupSyncResult(result, { catchUp = false } = {}) {
     }
     for (const addr of ev.added || []) {
       if (addr === engine.address) continue;
-      appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(addr)} was added to the group chat`, lineAt, `sys:${ev.groupId}:${ev.epoch}:add:${addr}`);
+      appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(addr)} was invited to the group chat`, lineAt, `sys:${ev.groupId}:${ev.epoch}:add:${addr}`);
     }
     for (const addr of ev.removed || []) {
       appendGroupSystemMessage(ev.groupId, `${groupSenderLabel(addr)} was removed from the group chat`, lineAt, `sys:${ev.groupId}:${ev.epoch}:rem:${addr}`);
@@ -33489,7 +33833,7 @@ function applyGroupSyncResult(result, { catchUp = false } = {}) {
   // Only events that changed something repaint: an unchanged photo or an epoch notice is not news.
   for (const ev of result.controls || []) {
     if (!ev || ev.kind === "epoch-notice") continue;
-    if (ev.kind === "photo-updated" && !ev.changed) continue;
+    if ((ev.kind === "photo-updated" || ev.kind === "member-status") && !ev.changed) continue;
     changed++;
   }
   if (changed) {
@@ -33580,8 +33924,8 @@ groupMembersList?.addEventListener("click", (event) => {
 // The Chats "New" sheet (iOS 5da8ccf..e6400d6). The floating + used to do something different per
 // tab (create chat, group builder, join room); it is now the same + on Chats, Group Chats and
 // Public Chats, opening one sheet of tiles: New Chat, New Group Chat, New Public Chat and Chatting
-// Address. Send Kaspa, Receive Kaspa and Request Payment moved to Profile's Send and Receive button
-// (iOS 7abc06e8); Desktop keeps New Group Chat and New Public Chat here, having no Groups tab.
+// Address. Send Kaspa, Receive Kaspa and Request Payment moved to Wallet's buttons (iOS 7abc06e8,
+// bfe9f022); Desktop keeps New Group Chat and New Public Chat here, having no Groups tab.
 // - New Chat / New Group Chat swap the sheet for the existing create modals; their Cancel (or a
 //   backdrop click / Escape) comes back to this menu, and a chat or group made lands on its tab.
 // - New Public Chat swaps the sheet's content for the room-name field. Errors show in place;
@@ -33609,16 +33953,14 @@ function newChatSheetIcon(kind) {
 function newChatSheetMenuHtml() {
   const rows = [
     { id: "chat", title: "New Chat", subtitle: "Message someone by their address or name." },
-    { id: "group", title: "New Group Chat", subtitle: "Start an encrypted group with several people." },
+    { id: "group", title: "New Group Chat", subtitle: "Start a group with the people you choose." },
     // Simple Mode hides Public Chats, so it has no tile here either.
     ...(isChildModeEnabled() ? [] : [{ id: "public", title: "New Public Chat", subtitle: "Join a public room, or create one." }]),
-    // "Chatting Address" (owner, 2026-10-20; iOS still says "Fund Chatting Address").
-    { id: "fund", title: "Chatting Address", subtitle: "Show the QR code to add Kaspa for sending messages." },
   ];
-  return actionTilesSheetHtml("New", rows);
+  return actionRowsSheetHtml("New", rows);
 }
 
-/** A sheet of square tiles under a title (the Chats New sheet, Profile's Send and Receive). */
+/** A sheet of square tiles under a title (the Chats New sheet). */
 function actionTilesSheetHtml(title, rows) {
   return `
     <button class="modal-close" type="button" data-new-chat-sheet-close aria-label="Close">×</button>
@@ -33632,6 +33974,20 @@ function actionTilesSheetHtml(title, rows) {
     </div>`;
 }
 
+
+/** The Chats New sheet: full-width rows under a title (iOS d1844582). */
+function actionRowsSheetHtml(title, rows) {
+  return `
+    <button class="modal-close" type="button" data-new-chat-sheet-close aria-label="Close">×</button>
+    <h2 class="new-chat-sheet-title">${escapeHtml(title)}</h2>
+    <div class="new-chat-sheet-rows">
+      ${rows.map((row) => `
+        <button type="button" class="new-chat-sheet-row" data-new-chat-choice="${escapeHtml(row.id)}">
+          <span class="new-chat-sheet-row-icon" aria-hidden="true">${newChatSheetIcon(row.id)}</span>
+          <span class="new-chat-sheet-row-text"><strong>${escapeHtml(row.title)}</strong><span>${escapeHtml(row.subtitle)}</span></span>
+        </button>`).join("")}
+    </div>`;
+}
 
 function newChatSheetJoinHtml() {
   return `
@@ -33744,49 +34100,6 @@ document.querySelectorAll("[data-new-chat-fab]").forEach((button) => {
   button.addEventListener("click", openNewChatSheet);
 });
 
-// Profile's Send and Receive (iOS 7abc06e8 walletActionsSheet): the floating up/down arrow opens a
-// half sheet of three tiles - Send Kaspa, Receive Kaspa, Request Payment - and the one picked opens
-// once the sheet has closed.
-function openSendReceiveSheet() {
-  closeNewChatSheet();
-  const backdrop = document.createElement("div");
-  backdrop.className = "modal-backdrop new-chat-sheet-backdrop";
-  backdrop.setAttribute("data-new-chat-sheet", "");
-  backdrop.innerHTML = `<section class="contact-modal new-chat-sheet" role="dialog" aria-modal="true" aria-label="Send and Receive"></section>`;
-  const sheet = backdrop.querySelector(".new-chat-sheet");
-  sheet.innerHTML = actionTilesSheetHtml("Send and Receive", [
-    { id: "send", title: "Send Kaspa", subtitle: "Send Kaspa from any of your addresses." },
-    { id: "receive", title: "Receive Kaspa", subtitle: "Show a fresh address to get paid." },
-    { id: "request", title: "Request Payment", subtitle: "A link asking for an exact amount, with what it's for." },
-  ]);
-  const onKey = (event) => {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    event.stopPropagation();
-    close();
-  };
-  function close() {
-    backdrop.remove();
-    document.removeEventListener("keydown", onKey, true);
-  }
-  backdrop.closeSheet = close;
-  backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
-  sheet.addEventListener("click", (event) => {
-    if (event.target.closest("[data-new-chat-sheet-close]")) { close(); return; }
-    const choice = event.target.closest("[data-new-chat-choice]")?.dataset.newChatChoice;
-    if (!choice) return;
-    close();
-    if (choice === "send") openSendKaspaModal(); // From the chatting address or any other (iOS 6333dd3)
-    else if (choice === "receive") openReceiveKaspaScreen();
-    else if (choice === "request") openCreatePaymentRequest();
-  });
-  document.addEventListener("keydown", onKey, true);
-  document.body.append(backdrop);
-  sheet.querySelector("[data-new-chat-choice]")?.focus();
-}
-document.querySelector("[data-profile-send-receive]")?.addEventListener("click", () => {
-  if (engine.address) openSendReceiveSheet();
-});
 groupMemberPicker?.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-group-member-toggle]");
   if (!btn) return;
@@ -33866,7 +34179,7 @@ async function runGroupAddMembers(groupId, members) {
       });
       // iMessage-style membership line for the admin (other members get theirs on the rotation).
       const epAdd = mgr.getGroup(groupId)?.currentEpoch;
-      appendGroupSystemMessage(groupId, `${groupSenderLabel(address)} was added to the group chat`, Date.now(), `sys:${groupId}:${epAdd}:add:${address}`);
+      appendGroupSystemMessage(groupId, `${groupSenderLabel(address)} was invited to the group chat`, Date.now(), `sys:${groupId}:${epAdd}:add:${address}`);
       groupAddRun.added.push(address);
     } catch (error) {
       appendEngineLog(`Add member failed for ${address}: ${error.message}`);
@@ -34414,6 +34727,9 @@ function syncGroupComposerSlots() {
     const hasText = /\S/.test(String(groupComposerInput?.value || ""));
     groupComposer.classList.toggle("composer-field-replaced", recording || hasPhoto);
     groupComposer.classList.toggle("composer-has-content", recording || hasPhoto || hasText);
+    const emoji = groupComposer.querySelector("[data-group-composer-emoji]");
+    if (emoji) emoji.hidden = recording || hasPhoto;
+    syncComposerPayPreview(document.querySelector("[data-group-composer-pay-preview]"), recording || hasPhoto ? "" : groupComposerInput?.value);
     const send = groupComposer.querySelector(".composer-send");
     // Not before a staged photo's Nextcloud upload is back (iOS 7abc06e8).
     const uploading = hasPhoto && groupNextcloudStaged?.phase === "uploading";
@@ -34421,6 +34737,22 @@ function syncGroupComposerSlots() {
   } catch { /* group section not evaluated yet */ }
 }
 groupPendingPhotoRemove?.addEventListener("click", clearGroupPendingPhoto);
+wireComposerPayPreview(document.querySelector("[data-group-composer-pay-preview]"), groupComposerInput, () => scheduleGroupFeeEstimate());
+// The emoji button in the group composer too (iOS d1844582 ComposerEmojiButton).
+document.querySelector("[data-group-composer-emoji]")?.addEventListener("click", (event) => {
+  closeGroupPlusMenu();
+  if (!groupComposerInput) return;
+  openComposerEmojiPopover({
+    anchor: event.currentTarget,
+    onSelect: (emoji) => {
+      const start = groupComposerInput.selectionStart ?? groupComposerInput.value.length;
+      const end = groupComposerInput.selectionEnd ?? start;
+      groupComposerInput.setRangeText(emoji, start, end, "end");
+      groupComposerInput.dispatchEvent(new Event("input", { bubbles: true }));
+      groupComposerInput.focus();
+    },
+  });
+});
 async function handleGroupMediaFile(input) {
   const file = input?.files?.[0];
   if (input) { input.value = ""; input.accept = "image/*"; }
@@ -34672,7 +35004,7 @@ groupManageBody?.addEventListener("click", async (event) => {
           <span class="kaposts-spinner group-refresh-spinner" aria-hidden="true"></span>
           <h2>Rebuilding this group</h2>
           <p class="field-hint" data-group-refresh-phase>Starting</p>
-          <p class="field-hint">Re-reading the whole group from the chain, the same way importing your seed phrase does. Leaving now would stop it partway.</p>
+          <p class="field-hint">Re-reading the whole group from the chain, the same way importing your 12 or 24 words does. Leaving now would stop it partway.</p>
         </div>
       </section>`;
     document.body.appendChild(modal);

@@ -1724,8 +1724,7 @@ function renderSettings() {
     settingsEl.innerHTML = `
       <div class="settings-list-card nc-testnet-off">
         <div class="settings-page-form"><strong>Nextcloud is off while Testnet is on.</strong></div>
-      </div>
-      <p class="settings-group-footer">Backups, sync, media and calls through Nextcloud work on mainnet only, so testnet can never overwrite your mainnet backup. Turn off Testnet in Settings &gt; Connection and your Nextcloud connection comes back as it was.</p>`;
+      </div>`;
     updateComposerButton();
     return;
   }
@@ -1745,8 +1744,7 @@ function renderSettings() {
       <p class="settings-group-footer" data-nc-locked-note>Connected to ${deps.escapeHtml(lockedHost)} as ${deps.escapeHtml(ncLocked.username)}. ${deps.escapeHtml(note)}</p>
       <div class="settings-list-card danger-list-card">
         <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
-      </div>
-      <p class="settings-group-footer">Disconnecting removes the stored app password from this device. Nothing changes on your Nextcloud server.</p>`;
+      </div>`;
     updateComposerButton();
     return;
   }
@@ -1760,8 +1758,7 @@ function renderSettings() {
         <label class="field-label">App password<span class="password-field-wrap"><input class="field-input" type="password" data-nc-password autocomplete="off" /><button class="password-eye-btn" type="button" data-eye-toggle aria-label="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.3 12.3C4.4 7.7 8 5.2 12 5.2s7.6 2.5 9.7 7.1a.9.9 0 0 1 0 .8c-2.1 4.6-5.7 7.1-9.7 7.1s-7.6-2.5-9.7-7.1a.9.9 0 0 1 0-.8Z"/><circle cx="12" cy="12.7" r="3.1"/></svg></button></span></label>
         <p class="field-error" data-nc-connect-error hidden></p>
         <button class="primary-button full" type="button" data-nc-connect disabled>Connect</button>
-      </div>
-      <p class="settings-group-footer">Create an app password in Nextcloud under Settings → Security → Devices &amp; sessions - don't use your account password. KaChat stores it on this device, encrypted with your KaChat password when you have set one.</p>`;
+      </div>`;
     updateComposerButton();
     return;
   }
@@ -1778,8 +1775,6 @@ function renderSettings() {
     <div class="settings-list-card">
       <button class="settings-list-row" type="button" data-nc-pick-start><span class="settings-row-copy"><strong>Start Folder</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.startFolder || "All Files")}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
     </div>
-    <p class="settings-group-footer">"File" in a chat's + menu opens this folder first.</p>
-    <p class="settings-group-footer">In a chat's + menu, Camera, Photo and Voice Message ask whether to send on chain or via Nextcloud. Via Nextcloud, the file uploads in full quality to this server's KaChat/Media folder and the chat carries a share link (voice messages up to 5 minutes). The message with the link stays end-to-end encrypted, but the file itself is stored unencrypted on your server and is reachable by anyone who has the unguessable link.</p>
     <p class="settings-group-label">Message Backup</p>
     <div class="settings-list-card">
       <div class="settings-toggle-row"><span><strong>Automatic Sync</strong><small>Automatic sync works with one cloud service at a time.</small></span><label class="switch-control"><input type="checkbox" data-nc-auto ${nc.autoBackup ? "checked" : ""}><span></span></label></div>
@@ -1791,12 +1786,9 @@ function renderSettings() {
       <div class="settings-list-row settings-info-row" data-nc-backup-status-row hidden><span class="settings-row-copy"><small data-nc-backup-status></small></span></div>
       <div class="settings-list-row settings-info-row" data-nc-backup-result-row hidden><span class="settings-row-copy"><small data-nc-backup-result></small></span></div>
     </div>
-    <p class="settings-group-footer">Keeps your chat history in ${deps.escapeHtml(BACKUP_FILENAME)} in the folder above (choosing All Files resets to the default ${deps.escapeHtml(DEFAULT_BACKUP_FOLDER)} folder). Automatic Sync keeps your devices in near-live sync: new messages upload moments after they arrive, and while the app is open it also watches the server and quietly pulls in what your other devices upload, fastest while you are in a chat. A wallet that connects to an existing backup restores it once automatically. Every upload merges with what is already on the server, so no device can erase another's history. Restoring merges the archive into this device's history. Your contacts also sync with KaPay on the same account, through KaPay's contacts file in the KaChat folder. That file isn't encrypted, unlike your chat history.</p>
-    <p class="settings-group-footer">Your contacts and portfolios are in the same backup and sync between your devices the same way.</p>
     <div class="settings-list-card danger-list-card">
       <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
-    </div>
-    <p class="settings-group-footer">Disconnecting removes the stored app password from this device. Nothing changes on your Nextcloud server.</p>`;
+    </div>`;
   updateComposerButton();
   refreshBackupStatusLine();
 }

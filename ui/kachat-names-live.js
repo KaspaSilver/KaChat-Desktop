@@ -28,6 +28,7 @@ import "./kachat-names-live.css";
 import { KAS_UNIT, kasLabel, isNetworkAddress, NETWORK } from "../engine/network.js";
 import { kachatNames, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { profileMissPauseMs } from "../engine/kachat-names/registry.js";
+import { addressNumber } from "../engine/quantum.js";
 import { userFacingError, chooseDialog } from "./dialogs.js";
 import { Operation, Stage, isOpen, needsDriving, validateKey, maxOfferDays, FeeTier, FeeChoice, TxStage } from "../engine/kachat-names/actions.js";
 import { paramsExpiresSoonMs, paramsRegisterCost } from "../engine/kachat-names/manifest.js";
@@ -3288,7 +3289,7 @@ export function createNameDetail(initial, { mode = "market", owner = "market", h
     const held = d.heldBy;
     let label = "";
     if (mine()) label = "You";
-    else if (held?.kind === "spending") label = `Your spending address #${held.index}`;
+    else if (held?.kind === "spending") label = `Your spending address #${addressNumber(held.index)}`;
     else if (held?.kind === "kasSigner") label = held.account ? `Your KasSigner address (${held.account} #${held.index})` : `Your KasSigner address #${held.index}`;
     else if (d.ownerLabel) label = `${d.ownerLabel}.kachat`;
     return `

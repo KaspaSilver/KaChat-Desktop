@@ -66,22 +66,43 @@ export async function encryptKasiaMessage(receiverAddress, clearText) {
  *  KasiaTransactionBuilder.encryptContextualMessage: a photo or voice note (media-file JSON with
  *  an image/* or audio/* base64 data URL) is sealed as the binary media frame
  *  (engine/media-frame.js), everything else as UTF-8 text exactly as encryptKasiaMessage. */
-export async function encryptKasiaContextualMessage(receiverAddress, clearText) {
+export async function encryptKasiaContextualMessage(receiverAddress, clearText, senderPrivateKeyHex = null) {
   const cipher = await loadKasiaCipher();
-  return encryptKasiaContextualMessageWith(cipher, receiverAddress, clearText);
+  return encryptKasiaContextualMessageWith(cipher, receiverAddress, clearText, senderPrivateKeyHex);
 }
 
-export function encryptKasiaContextualMessageWith(cipher, receiverAddress, clearText) {
+export function encryptKasiaContextualMessageWith(cipher, receiverAddress, clearText, senderPrivateKeyHex = null) {
   const frame = mediaFrameForEnvelope(String(clearText));
-  if (!frame) {
+  if (!frame && !senderPrivateKeyHex) {
     const encryptedHex = cipher.encrypt_message(String(receiverAddress), String(clearText)).to_hex();
     return { encryptedHex, encryptedBytes: hexToBytes(encryptedHex), mediaFrame: false };
   }
-  // The WASM only seals a &str, so raw bytes go through the same scheme in JS. The receiver's key
-  // comes from the WASM's own address reading (x-only payload, even parity, as encrypt_message).
+  // The WASM only seals a &str with a random key, so raw bytes and a message the seed can read back
+  // go through the same scheme in JS. The receiver's key comes from the WASM's own address reading
+  // (x-only payload, even parity, as encrypt_message).
   const receiverPublicKeyHex = cipher.debug_address_to_pubkey(String(receiverAddress));
-  const encryptedBytes = sealKasiaBytes(hexToBytes(receiverPublicKeyHex), frame);
-  return { encryptedHex: bytesToHex(encryptedBytes), encryptedBytes, mediaFrame: true };
+  const plaintext = frame || new TextEncoder().encode(String(clearText));
+  const encryptedBytes = sealKasiaBytes(hexToBytes(receiverPublicKeyHex), plaintext, senderPrivateKeyHex ? hexToBytes(senderPrivateKeyHex) : null);
+  return { encryptedHex: bytesToHex(encryptedBytes), encryptedBytes, mediaFrame: Boolean(frame) };
+}
+
+/** A message this wallet sent, read back with the seed (iOS bfe9f022 KasiaCipher.decryptSent), as
+ *  decryptKasiaMessage's plaintext. Throws on anything sealed before sends were recoverable, or by
+ *  a client that doesn't do this: its random key is gone. */
+export async function decryptSentKasiaMessage(encryptedHex, senderPrivateKeyHex, recipientAddress) {
+  const cipher = await loadKasiaCipher();
+  return decryptSentKasiaMessageWith(cipher, encryptedHex, senderPrivateKeyHex, recipientAddress);
+}
+
+export function decryptSentKasiaMessageWith(cipher, encryptedHex, senderPrivateKeyHex, recipientAddress) {
+  const recipientPublicKey = hexToBytes(cipher.debug_address_to_pubkey(String(recipientAddress)));
+  const bytes = openSentKasiaBytes(hexToBytes(encryptedHex), hexToBytes(senderPrivateKeyHex), recipientPublicKey);
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch {
+    const media = mediaEnvelopeFromFrame(bytes);
+    if (media == null) throw new Error("A sent message's plaintext is not readable.");
+    return media;
+  }
 }
 
 /** The plaintext of a Kasia-sealed message. Text decrypts in the WASM as always; only when its
@@ -116,17 +137,27 @@ export function decryptKasiaMessageWith(cipher, encryptedHex, privateKeyHex) {
 const NONCE_BYTES = 12;
 const EPHEMERAL_KEY_BYTES = 33;
 const TAG_BYTES = 16;
+const SENT_MESSAGE_INFO = new TextEncoder().encode("kachat-sent-message-v1");
 
 function kasiaKey(sharedPoint) {
   return hkdf(sha256, sharedPoint.subarray(1, 33), undefined, new Uint8Array(0), 32);
 }
 
-/** Seals `plaintext` bytes to a SEC1 public key (33 or 65 bytes). */
-export function sealKasiaBytes(receiverPublicKey, plaintext) {
-  const ephemeralSecret = secp256k1.utils.randomSecretKey();
+/** The ephemeral private key of a message this wallet sends (iOS bfe9f022, MESSAGING.md "Reading
+ *  back your own sends"). The nonce is random and travels in the message, so no two messages share
+ *  a key and nothing extra goes on chain; only someone holding the seed can work this out. */
+function sentMessageKey(senderPrivateKey, nonce) {
+  return hkdf(sha256, senderPrivateKey, nonce, SENT_MESSAGE_INFO, 32);
+}
+
+/** Seals `plaintext` bytes to a SEC1 public key (33 or 65 bytes). With `senderPrivateKey` the
+ *  ephemeral key is derived from it instead of random, so the seed can read the message back; to
+ *  the recipient it's an ordinary message. */
+export function sealKasiaBytes(receiverPublicKey, plaintext, senderPrivateKey = null) {
+  const nonce = randomBytes(NONCE_BYTES);
+  const ephemeralSecret = senderPrivateKey ? sentMessageKey(senderPrivateKey, nonce) : secp256k1.utils.randomSecretKey();
   const ephemeralPublic = secp256k1.getPublicKey(ephemeralSecret, true);
   const key = kasiaKey(secp256k1.getSharedSecret(ephemeralSecret, receiverPublicKey, true));
-  const nonce = randomBytes(NONCE_BYTES);
   const ciphertext = chacha20poly1305(key, nonce).encrypt(plaintext);
   const out = new Uint8Array(NONCE_BYTES + EPHEMERAL_KEY_BYTES + ciphertext.length);
   out.set(nonce, 0);
@@ -144,6 +175,20 @@ export function openKasiaBytes(sealed, privateKey) {
   const nonce = sealed.subarray(0, NONCE_BYTES);
   const ephemeralPublic = sealed.subarray(NONCE_BYTES, NONCE_BYTES + EPHEMERAL_KEY_BYTES);
   const key = kasiaKey(secp256k1.getSharedSecret(privateKey, ephemeralPublic, true));
+  return chacha20poly1305(key, nonce).decrypt(sealed.subarray(NONCE_BYTES + EPHEMERAL_KEY_BYTES));
+}
+
+/** Opens a message this wallet sent with its seed: the ephemeral key comes from the seed again and
+ *  the shared secret from its side of the exchange. Throws when the message's ephemeral key isn't
+ *  the one the seed derives: an older send, or another client's. */
+export function openSentKasiaBytes(sealed, senderPrivateKey, recipientPublicKey) {
+  if (!sealed || sealed.length < NONCE_BYTES + EPHEMERAL_KEY_BYTES + TAG_BYTES) throw new Error("Encrypted message is too short.");
+  const nonce = sealed.subarray(0, NONCE_BYTES);
+  const ephemeralSecret = sentMessageKey(senderPrivateKey, nonce);
+  const expected = secp256k1.getPublicKey(ephemeralSecret, true);
+  const ephemeralPublic = sealed.subarray(NONCE_BYTES, NONCE_BYTES + EPHEMERAL_KEY_BYTES);
+  if (expected.some((byte, index) => byte !== ephemeralPublic[index])) throw new Error("This send can't be read back.");
+  const key = kasiaKey(secp256k1.getSharedSecret(ephemeralSecret, recipientPublicKey, true));
   return chacha20poly1305(key, nonce).decrypt(sealed.subarray(NONCE_BYTES + EPHEMERAL_KEY_BYTES));
 }
 

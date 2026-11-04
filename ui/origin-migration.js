@@ -643,7 +643,7 @@ function showOldOffer(cfg) {
   card.append(actions, status);
   const standaloneIos = (navigator.standalone === true) || (/iPhone|iPad|iPod/.test(navigator.userAgent || "") && matchMedia("(display-mode: standalone)").matches);
   card.append(el("p", { class: "kom-fine", text: standaloneIos
-    ? `On iPhone and iPad a Home Screen app keeps its own storage and cannot hand it to a browser window. Open KaChat here this time, write down each account's seed phrase (or export a backup), then restore it at ${hostOf(cfg.to)}.`
+    ? `On iPhone and iPad a Home Screen app keeps its own storage and cannot hand it to a browser window. Open KaChat here this time, write down each account's 12 or 24 words (or export a backup), then restore it at ${hostOf(cfg.to)}.`
     : `Allow pop-ups for kachat.app if your browser blocks the new window. Keep this tab open until the move is confirmed.` }));
 }
 
@@ -753,7 +753,7 @@ function confirmOnScreen(cfg, summary, ui) {
       ? "These accounts are protected by your app password. Sign in here with the same password."
       : "These accounts have no app password. Consider setting one in Settings after the move." }));
     if (summary.existingAccounts > 0) {
-      fresh.card.append(el("p", { class: "kom-warn", text: `This address already has ${summary.existingAccounts} account${summary.existingAccounts === 1 ? "" : "s"}. Moving replaces all KaChat data here with what was sent. Make sure you have their seed phrases first.` }));
+      fresh.card.append(el("p", { class: "kom-warn", text: `This address already has ${summary.existingAccounts} account${summary.existingAccounts === 1 ? "" : "s"}. Moving replaces all KaChat data here with what was sent. Make sure you have their 12 or 24 words first.` }));
     }
     fresh.card.append(el("p", { class: "kom-fine", text: `Only accept if you pressed "Move my accounts" on ${oldAddressLabel(cfg)} just now.` }));
     const yes = el("button", { type: "button", class: "kom-btn kom-primary", text: summary.existingAccounts > 0 ? "Replace and move here" : "Move accounts here" });

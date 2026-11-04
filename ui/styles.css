@@ -10135,7 +10135,6 @@ button.quick-reaction-slot { cursor: pointer; padding: 0; line-height: 1; }
 .quantum-shield.safe { color: var(--ios-green); }
 .quantum-shield.spent { color: var(--muted); }
 .quantum-shield.spent.funded { color: var(--ios-orange); }
-.spending-actions-pill { width: 100%; margin: 12px 0 4px; }
 .spending-total { padding: 10px 16px 6px; }
 .spending-address-row.active { border-color: var(--card-border, var(--line)); background: var(--surface-1, rgba(255, 255, 255, .04)); }
 
@@ -12862,7 +12861,6 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
   border-top: .5px solid var(--line);
 }
 .message-request-bar[hidden], .composer-shell[hidden], .private-chat-notice[hidden] { display: none !important; }
-.message-request-bar p { margin: 0; text-align: center; font-size: 12px; line-height: 1.35; color: var(--muted); }
 .message-request-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .message-request-actions button { padding: 12px; border: 0; border-radius: 12px; font: inherit; font-size: 15px; font-weight: 700; cursor: pointer; }
 .message-request-reject { background: rgba(255,59,48,.15); color: var(--ios-red); }
@@ -13843,9 +13841,6 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .kmkt-guide-bullet { display: flex; align-items: flex-start; gap: 10px; font-size: 15px; line-height: 1.35; color: var(--text); }
 .kmkt-guide-check { flex: 0 0 20px; width: 20px; height: 20px; color: var(--accent); margin-top: 1px; }
 
-/* Setup guide, Your Chatting Address: the Profile screenshot (iOS 8852cdb). */
-.setup-address-explainer { display: block; width: 100%; max-width: 340px; margin: 0 auto 16px; border-radius: 16px; }
-
 /* Smooth scrolling: no live blur on cards inside a scrolling list. Each one was redrawn on every
    scroll frame (the costliest effect on a phone), and over the lists' plain backgrounds a blur
    shows nothing - the same semi-transparent material looks identical without it. Bars, sheets
@@ -13989,9 +13984,6 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 /* The address card's "Your own address: Address #3" line (iOS 56f004f). */
 .create-chat-preview-own { display: inline-flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 12px; font-weight: 600; color: var(--kaspa-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .create-chat-preview-own svg { flex: 0 0 14px; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-
-/* User Info's Rescan Profile row: a spinner while it looks everything up again (iOS bc95d17). */
-.chat-info-rescan-spinner { margin-left: auto; width: 16px; height: 16px; }
 
 /* The password fields' show / hide button (owner, 2026-10-14). */
 .password-field { position: relative; display: block; }
@@ -14189,20 +14181,14 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .kachat-composer.composer-field-replaced > .composer-field-wrap > .composer-input { display: none; }
 .kachat-composer > .composer-emoji,
 .kachat-composer > .composer-plus,
-.kachat-composer > .composer-send,
-.kachat-composer > .composer-audio-switch > .composer-tool {
+.kachat-composer > .composer-send {
   flex: 0 0 44px; width: 44px; height: 44px; margin: 0; padding: 0; border-radius: 14px;
   display: grid; place-items: center; cursor: pointer;
   background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur);
   border: 1px solid var(--glass-stroke); box-shadow: var(--glass-shadow);
 }
-.kachat-composer > .composer-emoji, .kachat-composer > .composer-audio-switch > .composer-tool { color: var(--text); }
-.kachat-composer > .composer-audio-switch > .composer-tool[data-composer-audio-text] { color: var(--kaspa-ink); }
-.kachat-composer > .composer-emoji svg,
-.kachat-composer > .composer-audio-switch svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.kachat-composer > .composer-audio-switch img { width: 28px; height: 28px; border-radius: 999px; }
-.composer-audio-switch { display: inline-flex; gap: 8px; flex: 0 0 auto; }
-.composer-audio-switch[hidden] { display: none !important; }
+.kachat-composer > .composer-emoji { color: var(--text); }
+.kachat-composer > .composer-emoji svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 /* Send: arrow.up.circle.fill in accent, on the same 44pt glass as the "+". */
 .kachat-composer > .composer-send { color: var(--kaspa-ink); align-self: flex-end; }
 .kachat-composer > .composer-send svg { width: 30px; height: 30px; padding: 6px; border-radius: 50%; background: var(--kaspa); color: #fff; box-sizing: border-box; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
@@ -14287,7 +14273,6 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .photo-preview-overlay.zoomed .photo-preview-stage img { cursor: zoom-out; }
 .message-photo-hidden { width: 220px; height: 160px; padding: 12px; border: 0; border-radius: 12px; background: var(--ios-gray6); color: var(--muted); font-size: 12px; font-weight: 400; text-align: center; cursor: default; }
 .message-photo-hidden svg { width: 26px; height: 26px; }
-.message-photo-show { border: 0; border-radius: 999px; padding: 5px 12px; background: var(--kaspa); color: #fff; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
 /* Chess in the thread (iOS chessInviteBubble / chessLiveCard / chessLogEntry). */
 .message-bubble.chess-bubble { background: transparent; padding: 0; }
 .chess-invite-bubble { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; max-width: 300px; padding: 12px; border-radius: 16px; background: var(--ios-gray6); color: var(--text); cursor: pointer; }
@@ -15321,3 +15306,172 @@ body.settings-tab [data-account-overlay] .settings-done-button { visibility: hid
 .pending-photo-state.ready { stroke: var(--kaspa-ink); }
 .pending-photo-state.failed { stroke: var(--ios-orange, #ff9f0a); }
 .composer-send.composer-send-busy { opacity: .5; }
+
+/* Groups in the chat list and their invites (iOS d1844582, bfe9f022). */
+.group-row-avatar { display: flex; align-items: center; justify-content: center; overflow: hidden; background: color-mix(in srgb, var(--kaspa-ink) 20%, transparent); color: var(--kaspa-ink); }
+.group-row-avatar .group-avatar-photo { width: 100%; height: 100%; object-fit: cover; }
+.group-row-avatar .group-avatar-fallback { display: flex; align-items: center; justify-content: center; width: 60%; height: 60%; background: none; color: inherit; }
+.group-row-avatar .group-avatar-fallback svg { width: 100%; height: 100%; }
+.group-row-silenced { width: 13px; height: 13px; margin-left: 5px; vertical-align: -1px; fill: none; stroke: var(--text-muted, currentColor); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.message-requests-section { margin: 14px 16px 6px; font-size: 13px; font-weight: 600; color: var(--text-muted, inherit); }
+.message-requests-section:first-child { margin-top: 2px; }
+.message-requests-list > .message-requests-card + .message-requests-card { margin-top: 14px; }
+.group-invite-row { position: relative; }
+.group-invite-head { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 8px 14px; text-align: center; }
+.group-invite-head strong { font-size: 20px; }
+.group-invite-head span:not(.group-invite-avatar):not(.group-avatar-fallback) { color: var(--text-muted, inherit); font-size: 14px; }
+.group-invite-head p { margin: 10px 0 0; font-size: 13px; line-height: 1.35; color: var(--text-muted, inherit); }
+.group-invite-avatar { display: flex; align-items: center; justify-content: center; width: 76px; height: 76px; margin-bottom: 6px; border-radius: 50%; background: color-mix(in srgb, var(--kaspa-ink) 20%, transparent); color: var(--kaspa-ink); }
+.group-invite-avatar svg { width: 42px; height: 42px; }
+.group-invite-member { display: flex; align-items: center; gap: 10px; padding: 8px 12px; min-width: 0; }
+.group-invite-member .chat-avatar { width: 32px; height: 32px; flex: none; }
+.group-invite-member > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-invite-modal { display: flex; flex-direction: column; }
+.group-invite-modal .message-requests-list { flex: 1; min-height: 0; }
+.group-invite-actions { display: flex; flex: none; gap: 10px; padding: 12px 16px 16px; }
+.group-invite-actions button { flex: 1; min-height: 46px; border: 0; border-radius: 14px; font-size: 16px; font-weight: 600; cursor: pointer; }
+.new-chat-sheet-rows { display: flex; flex-direction: column; gap: 10px; }
+.new-chat-sheet-row { display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px; border: 0; border-radius: 16px; background: var(--grouped-cell, rgba(127,127,127,.12)); color: var(--text); text-align: left; cursor: pointer; }
+.new-chat-sheet-row-icon { display: flex; flex: none; width: 28px; height: 28px; color: var(--kaspa-ink); }
+.new-chat-sheet-row-icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.new-chat-sheet-row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.new-chat-sheet-row-text strong { font-size: 16px; font-weight: 600; }
+.new-chat-sheet-row-text span { font-size: 13px; color: var(--text-muted, inherit); }
+.group-member-invite-status { flex: none; margin-left: 6px; font-size: 12px; color: var(--text-muted); }
+.group-member-invite-status.declined { color: var(--ios-red); }
+
+/* ==== Wallet tab, 1:1 with iOS WalletView (bfe9f022) ==== */
+:root[data-theme="light"] body:has([data-app-tab-screen="wallet"]:not([hidden])) { background: var(--bg-plain); }
+.wallet-screen { gap: 20px; }
+.wallet-screen > * { flex-shrink: 0; }
+.wallet-refresh { margin-left: auto; }
+/* Radius 22, the accent gradient and its tinted outline. */
+.wallet-balance-card {
+  display: flex; flex-direction: column; gap: 14px; padding: 18px; border-radius: 22px;
+  background: linear-gradient(to bottom right, color-mix(in srgb, var(--kaspa) 32%, transparent), color-mix(in srgb, var(--kaspa) 8%, transparent));
+  border: .8px solid color-mix(in srgb, var(--kaspa) 35%, transparent);
+}
+.wallet-balance-head { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.wallet-balance-label { font-size: 15px; color: var(--muted); }
+.wallet-total {
+  max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; cursor: pointer; text-align: left;
+  font-size: clamp(24px, 8vw, 34px); font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wallet-fiat { font-size: 15px; color: var(--muted); }
+.wallet-balance-divider { height: 1px; background: var(--line); }
+.wallet-balance-parts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.wallet-balance-part { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.wallet-balance-part span { font-size: 12px; color: var(--muted); }
+.wallet-balance-part strong { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Three 60pt accent circles with black icons. */
+.wallet-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.wallet-action { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 15px; cursor: pointer; }
+.wallet-action-circle { width: 60px; height: 60px; display: grid; place-items: center; border-radius: 50%; background: var(--kaspa); color: #000; }
+.wallet-action-circle svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2.3; stroke-linecap: round; stroke-linejoin: round; }
+/* Two 1:1 squares, radius 18. */
+.wallet-squares { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.wallet-square { aspect-ratio: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 10px; color: var(--text); font: inherit; text-align: center; cursor: pointer; }
+.wallet-square strong { font-size: 15px; font-weight: 600; }
+.wallet-square-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%; background: var(--fill-tertiary); color: var(--kaspa-ink); }
+.wallet-square-icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.wallet-square-icon svg.qr-glyph { fill: currentColor; stroke: none; }
+
+/* ==== The backup strip, 1:1 with iOS AccountBackupBanner (bfe9f022) ==== */
+.account-backup-banner {
+  --tone: var(--ios-orange);
+  flex: 0 0 auto; width: 100%; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+  border: 0; border-radius: 0; background: color-mix(in srgb, var(--tone) 12%, transparent); color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.account-backup-banner[hidden] { display: none; }
+.account-backup-banner[data-tone="funds"] { --tone: var(--ios-red); }
+.account-backup-banner-shield { flex: 0 0 auto; width: 20px; height: 20px; fill: var(--tone); stroke: none; }
+.account-backup-banner-shield .mark { fill: none; stroke: var(--bg-plain); stroke-width: 2.2; stroke-linecap: round; }
+.account-backup-banner-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.account-backup-banner-copy strong { font-size: 13px; font-weight: 600; line-height: 1.25; }
+.account-backup-banner-copy small { font-size: 11px; line-height: 1.25; color: var(--muted); }
+.account-backup-banner[data-tone="funds"] .account-backup-banner-copy small { color: var(--ios-red); }
+.account-backup-banner-chevron { flex: 0 0 auto; width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+/* Under the bar, out of the flow like the bar: the screens reserve its published height on top of
+   the bar's, and on wide windows it is as wide as the bar is on that tab. */
+.app-backup-banner { position: absolute; top: var(--topbar-h); left: 0; right: 0; z-index: 299; }
+body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--backup-banner-h, 0px)); }
+@media (max-width: 859px) {
+  body.chats-tab.conversation-open .app-backup-banner { display: none; }
+  body.has-backup-banner.chats-tab .app-body.conversation-open { padding-top: 0; }
+}
+@media (min-width: 860px) {
+  body.chats-tab .app-backup-banner { right: auto; width: var(--sidebar-w); border-right: 1px solid var(--line); }
+  body.has-backup-banner.chats-tab .app-body { padding-top: 0; }
+  body.has-backup-banner.chats-tab .app-sidebar { padding-top: calc(var(--topbar-h) + var(--backup-banner-h, 0px)); }
+  body:not(.chats-tab) .app-backup-banner { left: 50%; right: auto; transform: translateX(-50%); width: min(100%, 560px); }
+  body[data-app-tab="kaposts"]:not(.chats-tab) .app-backup-banner { width: min(100%, 900px); }
+}
+/* In Settings, above the title: the hub's only, like the title. */
+.settings-overlay-header.settings-pushed ~ .account-backup-banner,
+.settings-overlay-header.settings-pushed ~ .settings-large-title { display: none; }
+
+/* ==== Settings and Profile, iOS d1844582 / bfe9f022 ==== */
+.settings-link-row { color: inherit; text-decoration: none; }
+.settings-row-icon-orange { color: var(--ios-orange); }
+.settings-row-icon-orange svg .mark { fill: none; stroke: var(--bg-plain); stroke-width: 2.2; }
+/* Log Out: red, its icon leading like the other rows', no chevron. */
+.profile-logout-row { justify-content: flex-start; gap: 12px; }
+.profile-logout-row > svg { order: -1; }
+/* The QR screen's bar: no balance (Profile's row, Receive), and Receive's centred title with Done. */
+.chatting-address-header:has([data-chatting-address-title]:not([hidden])) { position: relative; justify-content: flex-end; }
+[data-chatting-address-title] { position: absolute; left: 50%; transform: translateX(-50%); font-size: 17px; font-weight: 600; white-space: nowrap; }
+.chatting-address-done { color: var(--kaspa, #70c7ba); font-size: 17px; font-weight: 600; }
+/* Manage Addresses' floating Address Actions (iOS d1844582 addressActionsButton): a 56pt material
+   circle bottom right, with room under the list to scroll the last row out from under it. */
+.spending-manage-screen .manage-address-card { position: relative; }
+.spending-manage-screen .manage-address-body { padding-bottom: 72px; }
+.spending-actions-fab {
+  position: absolute; right: 20px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 1;
+  width: 56px; height: 56px; padding: 0; display: grid; place-items: center;
+  border: .8px solid var(--glass-stroke); border-radius: 999px;
+  background: var(--glass-fill); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+  box-shadow: 0 5px 10px rgba(0,0,0,.12);
+  color: var(--kaspa); cursor: pointer;
+}
+.spending-actions-fab:disabled { cursor: default; }
+.spending-actions-fab svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.spending-actions-fab .sk-spinner { margin: 0; }
+/* Address Visibility (iOS d1844582): a chain card's balance, in the accent when above 0, and the
+   Chatting Address's fixed #0 row. */
+.spending-visibility-chain-balance { max-width: 100%; font-size: 12px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spending-visibility-chain-balance.funded { color: var(--accent, var(--kaspa)); }
+.spending-visibility-row.spending-visibility-row-fixed { cursor: default; }
+.spending-visibility-row-fixed .spending-visibility-toggle { cursor: default; }
+.spending-visibility-chatting-balance { color: var(--accent, var(--kaspa)); }
+/* User Info: the round share button (iOS d1844582 shareButton, 58pt), the inline Info section, and
+   a bot's inline Address section. */
+.chat-info-share-button { display: grid; place-items: center; width: 58px; height: 58px; margin: 6px auto 14px; padding: 0; border: 1px solid var(--glass-stroke); border-radius: 50%; background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur); color: var(--kaspa-ink); cursor: pointer; }
+.chat-info-share-button[hidden], .chat-info-bot-address[hidden], [data-chat-info-info-section][hidden], .chat-info-rows[hidden] { display: none; }
+.chat-info-share-button svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; }
+.chat-info-bot-address-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.chat-info-bot-address-head .chat-info-sheet-link { margin-right: 4px; }
+.chat-info-bot-address .chat-info-qr-card { width: 100%; }
+
+/* An incoming photo that hasn't unlocked says when it will (iOS d1844582 hiddenBubble). */
+.message-photo-hidden small { font-size: 11px; line-height: 1.25; color: inherit; }
+
+/* An empty bot chat's prompt, in the middle of the thread (iOS d1844582 botPrompt). */
+.message-area:has(> .bot-chat-prompt) { align-content: center; }
+.bot-chat-prompt { justify-self: center; align-self: center; margin: auto; max-width: min(80%, 320px); padding: 8px 14px; border-radius: 999px; background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur); color: var(--muted); font-size: 13px; font-weight: 500; text-align: center; pointer-events: none; }
+
+/* A payment request link in the composer (iOS bfe9f022 ComposerPaymentRequestPreview). */
+.composer-pay-preview { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; padding: 12px; border: 1px solid var(--glass-stroke); border-radius: 14px; background: var(--material); -webkit-backdrop-filter: var(--material-blur); backdrop-filter: var(--material-blur); }
+.composer-pay-preview[hidden] { display: none; }
+.composer-pay-preview-icon { display: grid; place-items: center; flex: 0 0 40px; width: 40px; height: 40px; border-radius: 10px; background: color-mix(in srgb, var(--kaspa) 18%, transparent); color: var(--kaspa-ink); }
+.composer-pay-preview-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.composer-pay-preview-copy { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.composer-pay-preview-copy small { color: var(--kaspa-ink); font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.composer-pay-preview-copy strong { overflow: hidden; color: var(--text); font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.composer-pay-preview-copy span { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 12px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.composer-pay-preview-remove { flex: 0 0 auto; width: 24px; height: 24px; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.composer-pay-preview-remove svg { display: block; width: 100%; height: 100%; }
+.composer-pay-preview-remove path { fill: none; stroke: var(--panel, #fff); stroke-width: 2; stroke-linecap: round; }
+
+/* Under the chat list (iOS "{n} chat(s)"). */
+.chat-list-count { margin: 10px 0 14px; color: var(--muted); font-size: 13px; text-align: center; }
