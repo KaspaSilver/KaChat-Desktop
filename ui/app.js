@@ -4874,7 +4874,7 @@ function renderMessageRequestsSheet() {
   }
   const invitesHtml = invites.length ? `<h3 class="message-requests-section">Group Invites</h3>
   <div class="message-requests-card">${invites.map((invite) => `
-    <button class="chat-row group-invite-row" type="button" data-group-invite-id="${escapeHtml(invite.groupId)}">
+    <button class="chat-row group-invite-row" type="button" data-group-invite-id="${escapeHtml(invite.id)}">
       <span class="chat-avatar group-row-avatar"><span class="group-avatar-fallback">${GROUP_AVATAR_SVG}</span></span>
       <span class="chat-meta"><strong>${escapeHtml(invite.name)}</strong><span>Invited by ${escapeHtml(groupSenderLabel(invite.adminAddress))}</span></span>
     </button>`).join("")}</div>` : "";
@@ -4886,8 +4886,8 @@ function pendingGroupInvites() {
 }
 /** Group Invite (iOS GroupInvitePreviewView): who invited you and who's in it, then Reject or Accept.
  *  Neither asks again, and each answer goes out as a small transaction. */
-function openGroupInvitePreview(groupId) {
-  const invite = pendingGroupInvites().find((entry) => entry.groupId === groupId);
+function openGroupInvitePreview(inviteId) {
+  const invite = pendingGroupInvites().find((entry) => entry.id === inviteId);
   if (!invite) { renderMessageRequestsSheet(); return; }
   document.querySelector("[data-group-invite-modal]")?.remove();
   const el = document.createElement("div");
@@ -4922,13 +4922,13 @@ function openGroupInvitePreview(groupId) {
     if (!mgr) return;
     if (event.target.closest("[data-group-invite-reject]")) {
       el.remove();
-      mgr.rejectGroupInvite(groupId);
+      mgr.rejectGroupInvite(inviteId);
       refreshMessageRequestsSheet();
       return;
     }
     if (event.target.closest("[data-group-invite-accept]")) {
       el.remove();
-      const joined = await mgr.acceptGroupInvite(groupId);
+      const joined = await mgr.acceptGroupInvite(inviteId);
       if (joined) applyGroupSyncResult({ controls: [joined], messages: [] }, { catchUp: true });
       refreshMessageRequestsSheet();
       syncGroupsNow().catch(() => {});
@@ -4947,8 +4947,8 @@ function notifyGroupInvite(invite) {
   showAppNotification({
     title: "New message request",
     body: `You were invited to "${invite.name}"`,
-    tag: `kachat-group-invite-${invite.groupId}`,
-    key: `group-invite-${invite.groupId}`,
+    tag: `kachat-group-invite-${invite.id}`,
+    key: `group-invite-${invite.id}`,
     route: { kind: "requests" },
     onClick: () => { setActiveAppTab("chats"); openMessageRequestsSheet(); },
   }).catch(() => { /* best-effort */ });
@@ -12668,7 +12668,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 264;
+const APP_BUILD = 265;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -26644,7 +26644,7 @@ function mergeChatArchives(remote, local) {
   const absorbGroup = (g) => {
     const id = String(g?.groupId || "").trim();
     if (!id) return;
-    if (mgr?.isGroupTombstoned?.(id)) return;
+    if (mgr?.isGroupTombstoned?.(id, g.adminSigningPub || null)) return;
     const incomingEpoch = Number(g.currentEpoch || 0);
     const existing = groupsById.get(id);
     const msgMap = existing?.__msgMap || new Map();

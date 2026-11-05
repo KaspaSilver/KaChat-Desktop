@@ -10,7 +10,9 @@
 import * as G from "./group.js";
 
 const GROUPS_KEY = "kachat-groups-v1";
-// Per-wallet group deletion tombstones: { [wallet]: { deleted: [groupId...], published: [groupId...] } }.
+// Per-wallet group deletion tombstones: { [wallet]: { deleted: [entry...], published: [entry...] } }.
+// An entry is G.groupInviteKey (that admin's offer of the id), or a bare group id for that id from
+// any admin, which is what a v1 marker means.
 // `deleted` blocks a group from ever being re-added by discovery/recovery; `published` tracks
 // which tombstones have been written on-chain (so the delete survives a seedless re-import).
 const GROUP_TOMBSTONES_KEY = "kachat-group-tombstones-v1";
@@ -40,7 +42,7 @@ export const GROUP_MSG_COUNTER_KEY = "kachat-group-msg-counter-v1";
 // { [wallet]: [{ groupId, adminAddress, invitedAt, roots: [root payload, oldest first], rejected? }] }.
 export const GROUP_INVITES_KEY = "kachat-group-invites-v1";
 // What this wallet has answered and which of it is on chain:
-// { [wallet]: { accepted: [groupId], published: [groupId], statusOutbox: [groupId] } }.
+// { [wallet]: { accepted: [invite key], published: [invite key], statusOutbox: [groupId] } }.
 export const GROUP_INVITE_ANSWERS_KEY = "kachat-group-invite-answers-v1";
 // Where members stand on their invite: { [wallet]: { [groupId]: { [address]: "invited" | "joined" |
 // "declined" } } }. A member with no entry has no invite on record: groups from before invites.
@@ -51,6 +53,11 @@ export const GROUP_MEMBER_STATUS_KEY = "kachat-group-member-status-v1";
 const COUNTER_MARKS_KEPT = 16;
 // _commitRoot's answer on the quick path when the root does need its roster resolved.
 const NEEDS_ROSTER = Symbol("needs-roster");
+
+/** G.groupInviteKey of a held invite: its roots all come from one admin. */
+function inviteKeyOf(invite) {
+  return G.groupInviteKey(invite.groupId, invite.roots[invite.roots.length - 1].admin_signing_pub);
+}
 
 // Deep-ish clone via JSON is fine — records are plain data (hex strings, numbers).
 function loadAll() {
@@ -243,6 +250,7 @@ export class GroupManager {
   }
 
   deleteGroup(groupId) {
+    const admin = this.getGroup(groupId)?.adminSigningPub || null;
     const { all, bucket } = this._bucket();
     delete bucket[groupId];
     all[this.walletAddress] = bucket;
@@ -251,8 +259,8 @@ export class GroupManager {
     // Tombstone it so discovery/recovery never re-adds it, and publish an on-chain delete
     // marker (best-effort now, retried by syncGroups' backfill) so the delete survives a
     // seedless re-import too. Local intent is recorded synchronously; the chain write is async.
-    this._recordTombstone(groupId, { published: false });
-    Promise.resolve().then(() => this._publishTombstone(groupId)).catch(() => {});
+    this._recordTombstone(groupId, admin, { published: false });
+    Promise.resolve().then(() => this._publishTombstone(groupId, admin)).catch(() => {});
   }
 
   // --- deletion tombstones ---
@@ -263,23 +271,29 @@ export class GroupManager {
     bucket.published = Array.isArray(bucket.published) ? bucket.published : [];
     return { all, bucket };
   }
-  isGroupTombstoned(groupId) {
-    return this._tombstoneBucket().bucket.deleted.includes(String(groupId));
-  }
-  _recordTombstone(groupId, { published }) {
+  /** With no admin to go on (an older backup), any marker for this id counts. */
+  isGroupTombstoned(groupId, adminSigningPub = null) {
     const id = String(groupId);
+    const { deleted } = this._tombstoneBucket().bucket;
+    if (deleted.includes(id)) return true;
+    if (!adminSigningPub) return deleted.some((entry) => entry.startsWith(`${id}:`));
+    return deleted.includes(G.groupInviteKey(id, adminSigningPub));
+  }
+  _recordTombstone(groupId, adminSigningPub, { published }) {
+    const id = String(groupId);
+    const entry = adminSigningPub ? G.groupInviteKey(id, adminSigningPub) : id;
     const { all, bucket } = this._tombstoneBucket();
-    if (!bucket.deleted.includes(id)) bucket.deleted.push(id);
-    if (published && !bucket.published.includes(id)) bucket.published.push(id);
+    if (!bucket.deleted.includes(entry)) bucket.deleted.push(entry);
+    if (published && !bucket.published.includes(entry)) bucket.published.push(entry);
     all[this.walletAddress] = bucket;
     saveTombstonesAll(all);
     // A deleted group's invite goes with it, unless it's only waiting to say you declined.
-    this._saveInvites(this._loadInvites().filter((invite) => invite.groupId !== id || invite.rejected === true));
+    this._saveInvites(this._loadInvites().filter((invite) => invite.groupId !== id || invite.rejected === true
+      || (adminSigningPub && inviteKeyOf(invite) !== entry)));
   }
-  _markTombstonePublished(groupId) {
-    const id = String(groupId);
+  _markTombstonePublished(entry) {
     const { all, bucket } = this._tombstoneBucket();
-    if (!bucket.published.includes(id)) bucket.published.push(id);
+    if (!bucket.published.includes(entry)) bucket.published.push(entry);
     all[this.walletAddress] = bucket;
     saveTombstonesAll(all);
   }
@@ -377,7 +391,7 @@ export class GroupManager {
       .sort((a, b) => Number(b.invitedAt || 0) - Number(a.invitedAt || 0))
       .map((invite) => {
         const latest = invite.roots[invite.roots.length - 1];
-        return { groupId: invite.groupId, adminAddress: invite.adminAddress, invitedAt: invite.invitedAt, name: latest.name || "Group", members: latest.members || [] };
+        return { id: inviteKeyOf(invite), groupId: invite.groupId, adminAddress: invite.adminAddress, invitedAt: invite.invitedAt, name: latest.name || "Group", members: latest.members || [] };
       });
   }
 
@@ -394,15 +408,16 @@ export class GroupManager {
     }
     adminAddress = adminAddress || senderAddress || null;
     return this._withGroupLock(() => {
-      if (this.isGroupTombstoned(payload.group_id) || this.getGroup(payload.group_id)) return null;
+      if (this.isGroupTombstoned(payload.group_id, adminPub) || this.getGroup(payload.group_id)) return null;
+      const key = G.groupInviteKey(payload.group_id, adminPub);
       const invites = this._loadInvites();
-      const index = invites.findIndex((invite) => invite.groupId === payload.group_id);
+      const index = invites.findIndex((invite) => inviteKeyOf(invite) === key);
       if (index >= 0) {
         // Later roots of the same invite, from the same admin: the group's history if you join.
-        // One that leaves you out takes the invite back.
+        // One that leaves you out takes the invite back. A different admin's root for this id is
+        // its own invite, so whoever got here first can't shut the real one out.
         const invite = invites[index];
         const latest = invite.roots[invite.roots.length - 1];
-        if (String(latest.admin_signing_pub || "").toLowerCase() !== adminPub) return null;
         if (Number(payload.epoch) >= Number(latest.epoch) && !includesMe) {
           invites.splice(index, 1);
         } else {
@@ -418,14 +433,17 @@ export class GroupManager {
       if (!includesMe || !adminAddress || this.isInviterBlocked?.(adminAddress)) return null;
       invites.push({ groupId: payload.group_id, adminAddress, invitedAt: Number(blockTime) || 0, roots: [payload] });
       this._saveInvites(invites);
-      return { kind: "invite", groupId: payload.group_id, name: payload.name || "Group", adminAddress, invitedAt: Number(blockTime) || 0 };
+      return { kind: "invite", id: key, groupId: payload.group_id, name: payload.name || "Group", adminAddress, invitedAt: Number(blockTime) || 0 };
     });
   }
 
   /** Newest root first, so the older ones only fill in history and nothing reads as a membership
-   *  change. Returns the "joined" event. */
+   *  change. A device holds one group per id, so another admin's offer of it goes too, unless it's
+   *  only waiting to say you declined. Returns the "joined" event. */
   async _joinInvite(invite) {
-    this._saveInvites(this._loadInvites().filter((entry) => entry.groupId !== invite.groupId));
+    const key = inviteKeyOf(invite);
+    this._saveInvites(this._loadInvites().filter((entry) => entry.groupId !== invite.groupId
+      || (entry.rejected === true && inviteKeyOf(entry) !== key)));
     let joined = null;
     for (const root of [...invite.roots].sort((a, b) => Number(b.epoch) - Number(a.epoch))) {
       const event = await this._applyRoot(root, invite.adminAddress, invite.invitedAt);
@@ -436,30 +454,32 @@ export class GroupManager {
 
   /** Accept: the group is joined now and its history comes in with the next sync. The answer goes
    *  on chain, encrypted: to your own devices, and to the group as a status message. */
-  async acceptGroupInvite(groupId) {
-    const invite = this._loadInvites().find((entry) => entry.groupId === groupId);
+  async acceptGroupInvite(key) {
+    const invite = this._loadInvites().find((entry) => inviteKeyOf(entry) === key);
     if (!invite) return null;
     const answers = this._inviteAnswers();
-    if (!answers.accepted.includes(groupId)) answers.accepted.push(groupId);
-    if (!answers.statusOutbox.includes(groupId)) answers.statusOutbox.push(groupId);
+    if (!answers.accepted.includes(key)) answers.accepted.push(key);
+    if (!answers.statusOutbox.includes(invite.groupId)) answers.statusOutbox.push(invite.groupId);
     this._saveInviteAnswers(answers);
     const joined = await this._joinInvite(invite);
     Promise.resolve().then(() => this._publishGroupAnswers()).catch(() => {});
     return joined;
   }
 
-  /** Reject: this group is never offered again, here or after a restore (the same on-chain delete
-   *  marker a deleted group publishes), and its members see you declined. The invite's keys stay
-   *  only until that message has gone out, since they're what it's sent with. */
-  rejectGroupInvite(groupId) {
+  /** Reject: this admin's offer is never made again, here or after a restore (the same on-chain
+   *  delete marker a deleted group publishes), and its members see you declined. The invite's keys
+   *  stay only until that message has gone out, since they're what it's sent with. */
+  rejectGroupInvite(key) {
     const invites = this._loadInvites();
-    const invite = invites.find((entry) => entry.groupId === groupId);
+    const invite = invites.find((entry) => inviteKeyOf(entry) === key);
     if (!invite) return;
     invite.rejected = true;
     this._saveInvites(invites);
-    this._recordTombstone(groupId, { published: false });
+    const { groupId } = invite;
+    const admin = key.split(":")[1];
+    this._recordTombstone(groupId, admin, { published: false });
     Promise.resolve()
-      .then(() => this._publishTombstone(groupId)).catch(() => {})
+      .then(() => this._publishTombstone(groupId, admin)).catch(() => {})
       .then(() => this._publishGroupAnswers()).catch(() => {});
   }
 
@@ -469,14 +489,16 @@ export class GroupManager {
     if (this._publishingAnswers) return;
     this._publishingAnswers = true;
     try {
-      for (const groupId of this._inviteAnswers().accepted) {
-        if (this._inviteAnswers().published.includes(groupId)) continue;
+      for (const key of this._inviteAnswers().accepted) {
+        if (this._inviteAnswers().published.includes(key)) continue;
+        const [groupId, admin] = key.split(":");
+        if (!admin) continue;
         try {
-          const payload = G.buildSignedInviteAcceptPayload({ groupId: G.hexToBytes(groupId), signingPub: this.selfPubHex(), privateKey: this.engine.privateKeyHex });
+          const payload = G.buildSignedInviteAcceptPayload({ groupId: G.hexToBytes(groupId), adminSigningPub: G.hexToBytes(admin), signingPub: this.selfPubHex(), privateKey: this.engine.privateKeyHex });
           const encryptedHex = await this.engine.encryptGroupControl(this.walletAddress, JSON.stringify(payload));
           await this.engine.sendGroupPayload(G.buildControlPayload({ recipientXOnlyPubKey: this.selfPubHex(), encryptedHex }));
           const answers = this._inviteAnswers();
-          if (!answers.published.includes(groupId)) answers.published.push(groupId);
+          if (!answers.published.includes(key)) answers.published.push(key);
           this._saveInviteAnswers(answers);
         } catch (error) { this.engine.log?.(`Group invite answer failed: ${error?.message || error}`); }
       }
@@ -501,7 +523,8 @@ export class GroupManager {
             groupId: invite.groupId, rootHex: root.group_root_epoch, blindingHex: root.blinding_key, epoch: root.epoch,
             deviceId: G.generateDeviceId(), counter: 1,
           });
-          this._saveInvites(this._loadInvites().filter((entry) => entry.groupId !== invite.groupId));
+          const key = inviteKeyOf(invite);
+          this._saveInvites(this._loadInvites().filter((entry) => inviteKeyOf(entry) !== key));
         } catch (error) { this.engine.log?.(`Group invite answer failed: ${error?.message || error}`); }
       }
     } finally { this._publishingAnswers = false; }
@@ -567,12 +590,12 @@ export class GroupManager {
 
   // Self-addressed, self-signed delete marker. Only our own key can produce one, and only our
   // own key can read it — see verifyTombstonePayload + the signing_pub === self check on receipt.
-  async _publishTombstone(groupId) {
-    const payload = G.buildSignedTombstonePayload({ groupId, signingPub: this.selfPubHex(), privateKey: this.engine.privateKeyHex });
+  async _publishTombstone(groupId, adminSigningPub = null) {
+    const payload = G.buildSignedTombstonePayload({ groupId, adminSigningPub, signingPub: this.selfPubHex(), privateKey: this.engine.privateKeyHex });
     const encryptedHex = await this.engine.encryptGroupControl(this.walletAddress, JSON.stringify(payload));
     const wire = G.buildControlPayload({ recipientXOnlyPubKey: this.selfPubHex(), encryptedHex });
     await this.engine.sendGroupPayload(wire);
-    this._markTombstonePublished(groupId);
+    this._markTombstonePublished(adminSigningPub ? G.groupInviteKey(groupId, adminSigningPub) : String(groupId));
   }
 
   /**
@@ -590,7 +613,7 @@ export class GroupManager {
     const groupId = String(g.groupId);
     // A tombstoned (deleted) group is never re-created from a backup — same rule as the
     // on-chain recovery path, so a restore can't resurrect a group you deleted.
-    if (this.isGroupTombstoned(groupId)) return false;
+    if (this.isGroupTombstoned(groupId, g.adminSigningPub || null)) return false;
     const incomingEpoch = Number(g.currentEpoch || 0);
     const existing = this.getGroup(groupId);
     // Never downgrade to an older epoch than what we already hold.
@@ -987,11 +1010,11 @@ export class GroupManager {
     if (payload.type === "gctl_invite_accept") {
       if (payload.signing_pub !== this.selfPubHex() || !G.verifyInviteAcceptPayload(payload)) return null;
       const answers = this._inviteAnswers();
-      const id = String(payload.group_id);
-      if (!answers.accepted.includes(id)) answers.accepted.push(id);
-      if (!answers.published.includes(id)) answers.published.push(id);
+      const key = G.groupInviteKey(payload.group_id, payload.admin_signing_pub);
+      if (!answers.accepted.includes(key)) answers.accepted.push(key);
+      if (!answers.published.includes(key)) answers.published.push(key);
       this._saveInviteAnswers(answers);
-      const invite = this._loadInvites().find((entry) => entry.groupId === id);
+      const invite = this._loadInvites().find((entry) => inviteKeyOf(entry) === key);
       return invite ? this._joinInvite(invite) : null;
     }
     // gctl_epoch is a heads-up only; the real state change lands on the matching gctl_root.
@@ -1031,12 +1054,18 @@ export class GroupManager {
     // tombstone (already on chain, so mark it published) and drop the group if we still hold it.
     if (payload.type === "gctl_tombstone") {
       if (payload.signing_pub !== this.selfPubHex() || !G.verifyTombstonePayload(payload)) return null;
-      const id = String(payload.group_id);
-      const had = this.getGroup(id) != null;
-      this._recordTombstone(id, { published: true });
-      if (had) { const { all, bucket } = this._bucket(); delete bucket[id]; all[this.walletAddress] = bucket; saveAll(all); }
+      const id = String(payload.group_id).toLowerCase();
+      const admin = payload.admin_signing_pub || null;
+      const held = this.getGroup(id);
+      this._recordTombstone(id, admin, { published: true });
+      // A marker about another admin's offer of this id says nothing about the group held here.
+      if (!held || (admin && String(admin).toLowerCase() !== String(held.adminSigningPub || "").toLowerCase())) return null;
+      const { all, bucket } = this._bucket();
+      delete bucket[id];
+      all[this.walletAddress] = bucket;
+      saveAll(all);
       this._dropCounterMarks(id);
-      return had ? { kind: "deleted", groupId: id } : null;
+      return { kind: "deleted", groupId: id };
     }
     return null;
   }
@@ -1057,12 +1086,15 @@ export class GroupManager {
     return incoming.length === held.length && incoming.every((a, i) => a === held[i]);
   }
 
-  async _applyRoot(payload, senderAddress, blockTime = 0) {
+  async _applyRoot(received, senderAddress, blockTime = 0) {
+    // The signature covers bytes, while everything remembered about a group is keyed by this text:
+    // another spelling of an id would read as one you never answered or deleted.
+    const payload = { ...received, group_id: G.canonicalHex(received.group_id), admin_signing_pub: G.canonicalHex(received.admin_signing_pub) };
     if (!G.verifyRootPayload(payload)) return null;
     const groupId = payload.group_id;
     // A tombstoned group must never be re-added — this is what makes a delete survive a
     // seedless re-import against the recovery invite.
-    if (this.isGroupTombstoned(groupId)) return null;
+    if (this.isGroupTombstoned(groupId, payload.admin_signing_pub)) return null;
     // A first look, only to skip the work for a root that changes nothing. The decision and the
     // write happen in _commitRoot on a record read AFTER the roster lookups below (DSK-053).
     const before = this.getGroup(groupId);
@@ -1071,9 +1103,10 @@ export class GroupManager {
     // removed member could take it over with a higher epoch (iOS bfe9f022).
     if (before?.adminSigningPub && before.adminSigningPub.toLowerCase() !== String(payload.admin_signing_pub || "").toLowerCase()) return null;
     // Nobody joins a group by being added to it: a group this device doesn't hold waits in Message
-    // Requests. Your own (the admin's recovery copy) just comes back.
+    // Requests. Your own (the admin's recovery copy) just comes back, and so does one you already
+    // said yes to: that admin's, not whoever else signs a root for this id.
     if (!before && String(payload.admin_signing_pub || "").toLowerCase() !== this.selfPubHex().toLowerCase()
-      && !this._inviteAnswers().accepted.includes(groupId)) {
+      && !this._inviteAnswers().accepted.includes(G.groupInviteKey(groupId, payload.admin_signing_pub))) {
       return this._holdInvite(payload, senderAddress, blockTime);
     }
     if (before && (payload.epoch < before.currentEpoch || this._isSameRoot(before, payload))) {
@@ -1119,7 +1152,7 @@ export class GroupManager {
   // the root turns out to need applying.
   _commitRoot(payload, senderAddress, roster, recoveredSeedHex) {
     const groupId = payload.group_id;
-    if (this.isGroupTombstoned(groupId)) return null;
+    if (this.isGroupTombstoned(groupId, payload.admin_signing_pub)) return null;
     const existing = this.getGroup(groupId);
     // Read again here, after the lookups: see _applyRoot.
     if (existing?.adminSigningPub && existing.adminSigningPub.toLowerCase() !== String(payload.admin_signing_pub || "").toLowerCase()) return null;
@@ -1293,9 +1326,10 @@ export class GroupManager {
     // offline (or whose delete-time publish failed), so the delete survives a seedless re-import.
     {
       const { bucket } = this._tombstoneBucket();
-      for (const id of bucket.deleted) {
-        if (bucket.published.includes(id)) continue;
-        try { await this._publishTombstone(id); }
+      for (const entry of bucket.deleted) {
+        if (bucket.published.includes(entry)) continue;
+        const [id, admin] = entry.split(":");
+        try { await this._publishTombstone(id, admin || null); }
         catch (error) { this.engine.log?.(`Group tombstone backfill failed: ${error?.message || error}`); }
       }
     }

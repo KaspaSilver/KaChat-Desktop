@@ -8,7 +8,7 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { sealKasiaBytes, openKasiaBytes, openSentKasiaBytes, encryptKasiaContextualMessageWith, decryptSentKasiaMessageWith } from "../engine/kasia-cipher.js";
-import { encodeMemberStatus, parseMemberStatus, MEMBER_STATUS, buildSignedInviteAcceptPayload, verifyInviteAcceptPayload, buildInviteAcceptSigningPayload } from "../engine/group.js";
+import { encodeMemberStatus, parseMemberStatus, MEMBER_STATUS, buildSignedInviteAcceptPayload, verifyInviteAcceptPayload, buildInviteAcceptSigningPayload, buildTombstoneSigningPayload, buildSignedTombstonePayload, verifyTombstonePayload, groupInviteKey } from "../engine/group.js";
 
 const hex = (bytes) => Buffer.from(bytes).toString("hex");
 const utf8 = (text) => new TextEncoder().encode(text);
@@ -57,12 +57,34 @@ assert.equal(parseMemberStatus("joined"), null);
 assert.equal(parseMemberStatus("{bad"), null);
 assert.equal(encodeMemberStatus("joined"), '{"type":"member_status","status":"joined"}');
 
-// gctl_invite_accept signs v || "gctl_invite_accept" || group_id.
+// gctl_invite_accept signs v || "gctl_invite_accept" || group_id || admin_signing_pub (iOS 30309e93).
 const groupId = new Uint8Array(32).fill(7);
-assert.equal(hex(buildInviteAcceptSigningPayload({ groupId })), `01${hex(utf8("gctl_invite_accept"))}${hex(groupId)}`);
-const accept = buildSignedInviteAcceptPayload({ groupId, signingPub: secp256k1.getPublicKey(sender, true).subarray(1), privateKey: hex(sender) });
+const adminSigningPub = new Uint8Array(32).fill(9);
+assert.equal(hex(buildInviteAcceptSigningPayload({ groupId, adminSigningPub })), `02${hex(utf8("gctl_invite_accept"))}${hex(groupId)}${hex(adminSigningPub)}`);
+const accept = buildSignedInviteAcceptPayload({ groupId, adminSigningPub, signingPub: secp256k1.getPublicKey(sender, true).subarray(1), privateKey: hex(sender) });
 assert.equal(accept.type, "gctl_invite_accept");
 assert.equal(verifyInviteAcceptPayload(accept), true);
+assert.equal(accept.v, 2);
+assert.equal(accept.admin_signing_pub, hex(adminSigningPub));
 assert.equal(verifyInviteAcceptPayload({ ...accept, group_id: "08".repeat(32) }), false);
+assert.equal(verifyInviteAcceptPayload({ ...accept, admin_signing_pub: "08".repeat(32) }), false);
+const { admin_signing_pub: _omitted, ...noAdmin } = accept;
+assert.equal(verifyInviteAcceptPayload(noAdmin), false);
+
+// gctl_tombstone: v2 signs the admin too; v1 has no admin and covers the id from anyone.
+const signingPub = secp256k1.getPublicKey(sender, true).subarray(1);
+assert.equal(hex(buildTombstoneSigningPayload({ v: 2, groupId, adminSigningPub })), `02${hex(utf8("gctl_tombstone"))}${hex(groupId)}${hex(adminSigningPub)}`);
+assert.equal(hex(buildTombstoneSigningPayload({ groupId })), `01${hex(utf8("gctl_tombstone"))}${hex(groupId)}`);
+const markerV2 = buildSignedTombstonePayload({ groupId, adminSigningPub, signingPub, privateKey: hex(sender) });
+assert.equal(markerV2.v, 2);
+assert.equal(markerV2.admin_signing_pub, hex(adminSigningPub));
+assert.equal(verifyTombstonePayload(markerV2), true);
+assert.equal(verifyTombstonePayload({ ...markerV2, admin_signing_pub: "08".repeat(32) }), false);
+const markerV1 = buildSignedTombstonePayload({ groupId, signingPub, privateKey: hex(sender) });
+assert.equal(markerV1.v, 1);
+assert.equal("admin_signing_pub" in markerV1, false);
+assert.equal(verifyTombstonePayload(markerV1), true);
+
+assert.equal(groupInviteKey("AB", "CD"), "ab:cd");
 
 console.log("test-sent-recovery: all passed");

@@ -169,43 +169,64 @@ export function buildEpochSigningPayload({ v = 1, groupId, epoch, reason }) {
 // A self-addressed "I deleted this group" marker so a delete survives a seedless re-import
 // (the recovery invite would otherwise resurrect the group). Signed by the deleter and only
 // honored when the signature matches the reader's OWN key — nobody else can tombstone a group
-// out from under you, and it can't touch other members' copies.
-export function buildTombstoneSigningPayload({ v = 1, groupId }) {
-  return concatBytes(new Uint8Array([v]), utf8Bytes("gctl_tombstone"), asBytes(groupId));
+// out from under you, and it can't touch other members' copies. v2 names the admin it's about, so a
+// stranger reusing a group id can't get the real group refused by being rejected (iOS 30309e93).
+// v1 (no admin) covers that id from any admin.
+export function buildTombstoneSigningPayload({ v = 1, groupId, adminSigningPub = null }) {
+  const head = concatBytes(new Uint8Array([v]), utf8Bytes("gctl_tombstone"), asBytes(groupId));
+  return adminSigningPub == null ? head : concatBytes(head, asBytes(adminSigningPub));
 }
 
-export function buildSignedTombstonePayload({ groupId, signingPub, privateKey }) {
-  const sig = signBytes(buildTombstoneSigningPayload({ v: 1, groupId }), privateKey);
+export function buildSignedTombstonePayload({ groupId, adminSigningPub = null, signingPub, privateKey }) {
+  const v = adminSigningPub == null ? 1 : 2;
+  const sig = signBytes(buildTombstoneSigningPayload({ v, groupId, adminSigningPub }), privateKey);
   return {
     type: "gctl_tombstone",
-    v: 1,
+    v,
     group_id: bytesToHex(asBytes(groupId)),
     signing_pub: bytesToHex(asBytes(signingPub)),
+    ...(adminSigningPub == null ? {} : { admin_signing_pub: bytesToHex(asBytes(adminSigningPub)) }),
     sig: bytesToHex(sig),
   };
 }
 
 export function verifyTombstonePayload(payload) {
   try {
-    const signingPayload = buildTombstoneSigningPayload({ v: payload.v ?? 1, groupId: payload.group_id });
+    const signingPayload = buildTombstoneSigningPayload({ v: payload.v ?? 1, groupId: payload.group_id, adminSigningPub: payload.admin_signing_pub ?? null });
     return verifyBytes(payload.sig, signingPayload, payload.signing_pub);
   } catch { return false; }
+}
+
+// An invite is one admin's offer of one group id, not the group: nothing ties an id to its admin, and
+// anyone who knows one can sign a root for it, so two admins' roots for an id are two invites.
+export function groupInviteKey(groupId, adminSigningPub) {
+  return `${String(groupId).toLowerCase()}:${String(adminSigningPub).toLowerCase()}`;
+}
+
+// The one spelling of a hex field. hexToBytes reads uppercase, spaces and 0x alike, so a signature
+// holds for all of them, while everything remembered about a group is keyed by the text.
+export function canonicalHex(value) {
+  try { return typeof value === "string" ? bytesToHex(hexToBytes(value)) : value; }
+  catch { return value; }
 }
 
 // --- gctl_invite_accept: you joined this group --------------------------------
 // Self-addressed and signed, like gctl_tombstone (which is what a rejection publishes): it's how
 // your other devices and a restore of your words learn the answer (iOS bfe9f022, MESSAGING.md
-// "Group invites"). Older clients ignore it.
-export function buildInviteAcceptSigningPayload({ v = 1, groupId }) {
-  return concatBytes(new Uint8Array([v]), utf8Bytes("gctl_invite_accept"), asBytes(groupId));
+// "Group invites"). Older clients ignore it. It names the admin you said yes to: another root for
+// that group id is still a separate invite (iOS 30309e93). v1 carried no admin and fails to verify
+// here: that group is simply offered again.
+export function buildInviteAcceptSigningPayload({ v = 2, groupId, adminSigningPub }) {
+  return concatBytes(new Uint8Array([v]), utf8Bytes("gctl_invite_accept"), asBytes(groupId), asBytes(adminSigningPub));
 }
 
-export function buildSignedInviteAcceptPayload({ groupId, signingPub, privateKey }) {
-  const sig = signBytes(buildInviteAcceptSigningPayload({ v: 1, groupId }), privateKey);
+export function buildSignedInviteAcceptPayload({ groupId, adminSigningPub, signingPub, privateKey }) {
+  const sig = signBytes(buildInviteAcceptSigningPayload({ v: 2, groupId, adminSigningPub }), privateKey);
   return {
     type: "gctl_invite_accept",
-    v: 1,
+    v: 2,
     group_id: bytesToHex(asBytes(groupId)),
+    admin_signing_pub: bytesToHex(asBytes(adminSigningPub)),
     signing_pub: bytesToHex(asBytes(signingPub)),
     sig: bytesToHex(sig),
   };
@@ -213,7 +234,7 @@ export function buildSignedInviteAcceptPayload({ groupId, signingPub, privateKey
 
 export function verifyInviteAcceptPayload(payload) {
   try {
-    const signingPayload = buildInviteAcceptSigningPayload({ v: payload.v ?? 1, groupId: payload.group_id });
+    const signingPayload = buildInviteAcceptSigningPayload({ v: payload.v ?? 2, groupId: payload.group_id, adminSigningPub: payload.admin_signing_pub });
     return verifyBytes(payload.sig, signingPayload, payload.signing_pub);
   } catch { return false; }
 }
