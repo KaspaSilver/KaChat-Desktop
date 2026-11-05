@@ -348,6 +348,9 @@ export class ActionError extends Error {
   /** accept on an offer past its refund time */
   static offerExpired() { return new ActionError("offerExpired", "This offer has expired. It's going back to the buyer."); }
   /** accept on an offer made to an earlier owner of the name */
+  static offerAmountChanged() {
+    return new ActionError("offerAmountChanged", "This offer holds a different amount than was shown. Nothing was sent.");
+  }
   static offerDeclined() {
     return new ActionError("offerDeclined", "This offer was made before the name changed hands, so it's declined and going back to the buyer.");
   }
@@ -1170,7 +1173,13 @@ export class KachatNamesActions {
         // Made to an earlier owner: the contract refuses it, and it goes back to the buyer.
         if (op.offer.isDeclined(op.name.owner)) throw ActionError.offerDeclined();
         validateKey(op.offer.buyer, "The buyer");
-        plan = b.acceptOffer({ env, name: await this._liveName(op.name, m), offer: await this._liveOffer(op.offer, m) });
+        // The offer's script doesn't commit to its amount, so the amount the screen showed is only
+        // the indexer's word. The name doesn't go unless the coins really are there (KaPay 953b255).
+        {
+          const liveOffered = await this._liveOffer(op.offer, m);
+          if (BigInt(liveOffered.value) !== BigInt(op.offer.amount)) throw ActionError.offerAmountChanged();
+          plan = b.acceptOffer({ env, name: await this._liveName(op.name, m), offer: liveOffered });
+        }
         break;
       case "decline":
         plan = b.declineOffer({ env, offer: await this._liveOffer(op.offer, m) });

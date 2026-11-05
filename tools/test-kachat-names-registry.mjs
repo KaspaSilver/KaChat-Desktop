@@ -1188,6 +1188,24 @@ async function runRegistryIndexer(v, r) {
   r.eq(await reg.resolveHeld("alice"), owner, "registry (indexer): resolveHeld");
   r.eq(await reg.resolveHeld("old"), owner, "registry (indexer): a name in grace still resolves to its owner (iOS f7c371a)");
   r.eq(await reg.resolveHeld("gone"), null, "registry (indexer): a lapsed name does not resolve");
+  {
+    // KaPay 953b255: an indexer's answer only counts once the chain holds the record it describes.
+    const looked = [];
+    const chainHolds = { loadManifest: async () => reg.manifest ?? await reg.prepare(), liveRegistryUtxo: async (args) => { looked.push(args); return {}; } };
+    const chainDoesNot = { ...chainHolds, liveRegistryUtxo: async () => { throw new Error("not on chain"); } };
+    let noPeriod = false;
+    try { await reg.resolveHeldOnChain("alice", chainHolds); } catch { noPeriod = true; }
+    r.check(noPeriod && looked.length === 0, "registry (indexer): a record with no period start can't be checked, so it doesn't resolve");
+    const plainLookup = reg.lookup;
+    reg.lookup = async (raw) => { const found = await plainLookup.call(reg, raw); if (found.info) found.info.periodStart = 1n; return found; };
+    r.eq(await reg.resolveHeldOnChain("alice", chainHolds), owner, "registry (indexer): the chain backs the answer up");
+    r.check(looked.length === 1 && looked[0].outpoint != null, "registry (indexer): the record's own UTXO is what's asked for");
+    let refused = false;
+    try { await reg.resolveHeldOnChain("alice", chainDoesNot); } catch { refused = true; }
+    r.check(refused, "registry (indexer): an answer the chain doesn't hold doesn't resolve");
+    r.eq(await reg.resolveHeldOnChain("bob", chainDoesNot), null, "registry (indexer): a free name needs no check");
+    reg.lookup = plainLookup;
+  }
   r.eq((await reg.namesOf(ownerKey)).map((n) => n.name), ["zed", "alice"], "registry (indexer): namesOf oldest first");
   r.check(seen.some((u) => u.endsWith(`/names/by-owner/${owner}?includeInactive=false`)), "registry (indexer): by-owner URL");
   r.eq((await reg.listings()).map((n) => n.price), [700n], "registry (indexer): listings");

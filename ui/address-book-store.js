@@ -713,6 +713,8 @@ function parseSharedContactsFile(text) {
   if (!file || typeof file !== "object" || Array.isArray(file)
     || file.type !== ADDRESS_BOOK_EXPORT_TYPE
     || !Number.isInteger(file.version)
+    // Written by a newer version of the app: never merged, and so never written over (KaPay 953b255).
+    || file.version > 1
     || !Number.isFinite(sharedFileTime(file.exportedAt))
     || (file.walletAddress != null && typeof file.walletAddress !== "string")
     || !Array.isArray(file.entries)

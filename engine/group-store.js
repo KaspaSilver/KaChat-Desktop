@@ -418,6 +418,9 @@ export class GroupManager {
         // its own invite, so whoever got here first can't shut the real one out.
         const invite = invites[index];
         const latest = invite.roots[invite.roots.length - 1];
+        // A signed roster isn't replaced by an unsigned or older one for the same epoch.
+        const heldVersion = invite.roots.find((root) => Number(root.epoch) === Number(payload.epoch))?.roster_version;
+        if (heldVersion != null && Number(payload.roster_version || 0) < Number(heldVersion)) return null;
         if (Number(payload.epoch) >= Number(latest.epoch) && !includesMe) {
           invites.splice(index, 1);
         } else {
@@ -718,6 +721,18 @@ export class GroupManager {
     return this.getGroup(record.groupId) || record;
   }
 
+  // The version for the next signed roster: the time in ms, so the admin's devices agree without
+  // sharing a counter, and always above the last one this device saw, so a clock set back can't get
+  // the admin's own changes refused. Recorded on a fresh read of the record (iOS nextRosterVersion).
+  async _nextRosterVersion(groupId) {
+    let version = Date.now();
+    await this._mutateLocked(groupId, (fresh) => {
+      version = Math.max(version, Number(fresh.rosterVersion || 0) + 1);
+      fresh.rosterVersion = version;
+    });
+    return version;
+  }
+
   // Build + encrypt + broadcast a gctl_root to every non-self member at `epoch`.
   async _distributeRoot(record, epoch) {
     const groupSeed = G.hexToBytes(record.groupSeedHex);
@@ -729,6 +744,7 @@ export class GroupManager {
       groupId, epoch, groupRootEpoch, blindingKey,
       adminSigningPub: record.adminSigningPub, members: memberAddresses,
       name: record.name, adminPrivateKey: this.engine.privateKeyHex,
+      rosterVersion: await this._nextRosterVersion(record.groupId),
     });
     const json = JSON.stringify(payload);
     // Each member's invite is its own self-spend tx. Send them per-member and resiliently:
@@ -756,6 +772,7 @@ export class GroupManager {
         adminSigningPub: record.adminSigningPub, members: memberAddresses,
         name: record.name, adminPrivateKey: this.engine.privateKeyHex,
         groupSeed, // the extra field ONLY the self copy carries
+        rosterVersion: await this._nextRosterVersion(record.groupId),
       });
       await this._sendControlToMember(selfMember, JSON.stringify(selfPayload));
       // Mark this epoch's recovery invite as published - on a fresh read, after every send above
@@ -924,6 +941,7 @@ export class GroupManager {
       groupId: groupIdBytes, epoch: record.currentEpoch, groupRootEpoch, blindingKey,
       adminSigningPub: record.adminSigningPub, members: record.members.map((m) => m.address),
       name: record.name, adminPrivateKey: this.engine.privateKeyHex,
+      rosterVersion: await this._nextRosterVersion(record.groupId),
     });
     await this._sendControlToMember(member, JSON.stringify(payload));
     return record;
@@ -1086,11 +1104,30 @@ export class GroupManager {
     return incoming.length === held.length && incoming.every((a, i) => a === held[i]);
   }
 
+  // Who may deliver a root with no signed roster: blank, because the by-recipient endpoint returns no
+  // sender until the indexer has resolved one and refusing would lose a real root as the cursor moves
+  // past it, or the admin. This narrows the problem and doesn't close it (MESSAGING.md, "Limits").
+  async _rootSenderAllowed(senderAddress, adminSigningPub) {
+    const sender = String(senderAddress || "").trim();
+    if (!sender) return true;
+    let pub = null;
+    try { pub = await this.engine.xOnlyPubKeyForAddress(sender); } catch { pub = null; }
+    return Boolean(pub) && pub.toLowerCase() === String(adminSigningPub || "").toLowerCase();
+  }
+
   async _applyRoot(received, senderAddress, blockTime = 0) {
     // The signature covers bytes, while everything remembered about a group is keyed by this text:
     // another spelling of an id would read as one you never answered or deleted.
     const payload = { ...received, group_id: G.canonicalHex(received.group_id), admin_signing_pub: G.canonicalHex(received.admin_signing_pub) };
     if (!G.verifyRootPayload(payload)) return null;
+    // `sig` leaves out the members and name (iOS 26c4d76d, MESSAGING.md "Signed rosters"). If the
+    // admin signed them, who delivered them doesn't matter, and one that fails has been edited: it
+    // never falls back to the sender rule.
+    if (payload.roster_sig != null || payload.roster_version != null) {
+      if (!G.verifyRosterPayload(payload)) return null;
+    } else if (!(await this._rootSenderAllowed(senderAddress, payload.admin_signing_pub))) {
+      return null;
+    }
     const groupId = payload.group_id;
     // A tombstoned group must never be re-added — this is what makes a delete survive a
     // seedless re-import against the recovery invite.
@@ -1137,8 +1174,10 @@ export class GroupManager {
       if (!addr || roster.some((m) => m.address === addr)) continue;
       let xOnlyPubKeyHex = null;
       try { xOnlyPubKeyHex = await this.engine.xOnlyPubKeyForAddress(addr); } catch { xOnlyPubKeyHex = null; }
-      // For an admin record the admin is ourselves; otherwise the sender is admin.
-      const memberIsAdmin = isAdminRecord ? addr === this.walletAddress : addr === senderAddress;
+      // For an admin record the admin is ourselves; otherwise whoever holds the admin's key, since
+      // a signed root can come from any member.
+      const memberIsAdmin = isAdminRecord ? addr === this.walletAddress
+        : (xOnlyPubKeyHex ? xOnlyPubKeyHex.toLowerCase() === payload.admin_signing_pub : addr === senderAddress);
       roster.push({ address: addr, xOnlyPubKeyHex, isAdmin: memberIsAdmin });
     }
     const result = await this._withGroupLock(() => this._commitRoot(payload, senderAddress, roster, recoveredSeedHex));
@@ -1150,7 +1189,9 @@ export class GroupManager {
   // root applied while those awaited is carried into the new record instead of being dropped.
   // With `roster` null (the quick path) it only archives / skips, and returns NEEDS_ROSTER when
   // the root turns out to need applying.
-  _commitRoot(payload, senderAddress, roster, recoveredSeedHex) {
+  _commitRoot(received, senderAddress, heldRoster, recoveredSeedHex) {
+    let payload = received;
+    let roster = heldRoster;
     const groupId = payload.group_id;
     if (this.isGroupTombstoned(groupId, payload.admin_signing_pub)) return null;
     const existing = this.getGroup(groupId);
@@ -1166,7 +1207,23 @@ export class GroupManager {
       this._archivePreviousRoot(existing, payload.epoch, payload.group_root_epoch);
       return null;
     }
-    if (this._isSameRoot(existing, payload)) return null;
+    // After a signed roster, an unsigned or older one can't change the name or members. A newer
+    // epoch's keys still count, since only the admin can sign those: an admin device on an older app
+    // would otherwise cut every member off from the group's new messages.
+    if (existing?.rosterVersion != null && Number(payload.roster_version || 0) < Number(existing.rosterVersion)) {
+      if (!(payload.epoch > existing.currentEpoch)) return null;
+      const { roster_version: _version, roster_sig: _sig, ...keysOnly } = payload;
+      payload = { ...keysOnly, members: (existing.members || []).map((m) => m.address), name: existing.name };
+      roster = (existing.members || []).map((m) => ({ ...m }));
+    }
+    if (this._isSameRoot(existing, payload)) {
+      // Nothing to show, but a newer signature still moves the pin.
+      if (Number(payload.roster_version || 0) > Number(existing.rosterVersion || 0)) {
+        existing.rosterVersion = Number(payload.roster_version);
+        this._put(existing);
+      }
+      return null;
+    }
     if (!roster) return NEEDS_ROSTER;
     const isAdminRecord = recoveredSeedHex != null;
 
@@ -1175,7 +1232,7 @@ export class GroupManager {
       groupId,
       name: payload.name || existing?.name || "Group",
       isAdmin: isAdminRecord || existing?.isAdmin === true,
-      adminAddress: isAdminRecord ? this.walletAddress : (senderAddress || existing?.adminAddress || null),
+      adminAddress: isAdminRecord ? this.walletAddress : (roster.find((m) => m.isAdmin)?.address || existing?.adminAddress || senderAddress || null),
       adminSigningPub: payload.admin_signing_pub,
       // Keep any seed we already hold; adopt a validly-recovered one on a seedless rebuild.
       groupSeedHex: recoveredSeedHex || existing?.groupSeedHex || null,
@@ -1209,6 +1266,9 @@ export class GroupManager {
       members: roster,
       // A recovered admin group already has its recovery invite on chain for this epoch.
       selfInviteEpoch: isAdminRecord ? payload.epoch : existing?.selfInviteEpoch,
+      // The newest signed roster applied here: an unsigned or older root can't change the name or
+      // members after it. An admin also uses it so its next version is always higher.
+      rosterVersion: payload.roster_version != null ? Math.max(Number(payload.roster_version), Number(existing?.rosterVersion || 0)) : existing?.rosterVersion,
       // Group photo isn't carried in the root (separate gctl_photo control) — preserve it.
       photoHex: existing?.photoHex || null,
       photoUpdatedAt: existing?.photoUpdatedAt || 0,
@@ -1308,6 +1368,7 @@ export class GroupManager {
           blindingKey: G.hexToBytes(record.blindingKeyHex),
           adminSigningPub: record.adminSigningPub, members: record.members.map((m) => m.address),
           name: record.name, adminPrivateKey: this.engine.privateKeyHex, groupSeed,
+          rosterVersion: await this._nextRosterVersion(record.groupId),
         });
         await this._sendControlToMember({ address: this.walletAddress, xOnlyPubKeyHex: this.selfPubHex() }, JSON.stringify(selfPayload));
         // The send awaited: mark it on a fresh read, never by writing `record` back (DSK-053), and

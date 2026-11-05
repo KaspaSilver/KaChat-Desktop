@@ -660,6 +660,134 @@ await test("a backup can't bring back the offer you deleted, and one with no adm
   assert.equal(m.importGroupRecord(record), false);
 });
 
+// --- signed rosters (iOS 26c4d76d, MESSAGING.md "Signed rosters") ---
+function signedRoot(seed, { epoch = 0, members, name = "Team", rosterVersion, admin = ADMIN, unsigned = false }) {
+  const groupId = G.deriveGroupId(seed);
+  const payload = G.buildSignedRootPayload({
+    groupId, epoch, groupRootEpoch: G.deriveGroupRootEpoch(seed, groupId, epoch), blindingKey: G.deriveBlindingKey(seed, groupId),
+    adminSigningPub: PUB.get(admin.address), members, name, adminPrivateKey: admin.key, rosterVersion,
+  });
+  if (unsigned) { delete payload.roster_version; delete payload.roster_sig; }
+  return payload;
+}
+function joined(recipient = INVITEE) {
+  const m = useWallet(recipient);
+  const invite = pushInvite(recipient.address, { name: "Team", seed: G.generateGroupSeed() });
+  return { m, seed: invite.seed, groupId: invite.groupId, members: [ADMIN.address, recipient.address] };
+}
+
+await test("the roster signature covers the bytes the spec says, in any member order", () => {
+  const groupId = new Uint8Array(32).fill(7);
+  const bytes = G.buildRosterSigningPayload({ groupId, epoch: 2, rosterVersion: 1000, members: ["kaspa:B", "kaspa:a"], name: "Hi" });
+  const le = (n) => [n, 0, 0, 0, 0, 0, 0, 0];
+  const text = (t) => [...new TextEncoder().encode(t)];
+  const expected = [1, ...text("gctl_roster"), ...groupId, ...le(2), 232, 3, 0, 0, 0, 0, 0, 0, ...le(2),
+    ...le(7), ...text("kaspa:a"), ...le(7), ...text("kaspa:b"), ...le(2), ...text("Hi")];
+  assert.deepEqual([...bytes], expected);
+  const swapped = G.buildRosterSigningPayload({ groupId, epoch: 2, rosterVersion: 1000, members: ["KASPA:A", "kaspa:b"], name: "Hi" });
+  assert.deepEqual([...swapped], expected);
+});
+
+await test("every root carries a roster signature, and an edited name or member list fails it", () => {
+  const seed = G.generateGroupSeed();
+  const root = signedRoot(seed, { members: [ADMIN.address, INVITEE.address], rosterVersion: 5 });
+  assert.equal(root.roster_version, 5);
+  assert.ok(G.verifyRosterPayload(root));
+  assert.ok(!G.verifyRosterPayload({ ...root, name: "Renamed" }));
+  assert.ok(!G.verifyRosterPayload({ ...root, members: [ADMIN.address] }));
+  assert.ok(!G.verifyRosterPayload({ ...root, roster_sig: undefined }));
+  assert.ok(G.verifyRootPayload({ ...root, name: "Renamed" }), "the old signature can't tell, which is why this exists");
+});
+
+await test("an edited signed root is refused whoever sends it, even the admin", async () => {
+  const { m, seed, groupId, members } = joined();
+  await pass(m);
+  const edited = { ...signedRoot(seed, { members, name: "Team", rosterVersion: Date.now() + 1000 }), name: "Hacked" };
+  assert.equal(await m._applyRoot(edited, ADMIN.address, 1), null);
+  assert.equal(await m._applyRoot(edited, "", 1), null);
+  assert.equal(m.getGroup(groupId).name, "Team");
+});
+
+await test("a signed root counts from any sender, and the admin stays the admin", async () => {
+  const { m, seed, groupId, members } = joined();
+  await pass(m);
+  await m._applyRoot(signedRoot(seed, { members, name: "Renamed", rosterVersion: Date.now() + 1000 }), RIVAL.address, 1);
+  const group = m.getGroup(groupId);
+  assert.equal(group.name, "Renamed");
+  assert.equal(group.adminAddress, ADMIN.address);
+  assert.deepEqual(group.members.filter((member) => member.isAdmin).map((member) => member.address), [ADMIN.address]);
+});
+
+await test("an unsigned root needs its admin or a blank sender", async () => {
+  const seed = G.generateGroupSeed();
+  const m = useWallet(INVITEE);
+  const key = G.groupInviteKey(G.bytesToHex(G.deriveGroupId(seed)), PUB.get(ADMIN.address));
+  const root = (name) => signedRoot(seed, { members: [ADMIN.address, INVITEE.address], name, unsigned: true });
+  assert.equal(await m._applyRoot(root("From a member"), RIVAL.address, 1), null);
+  assert.ok(!m.pendingGroupInvites().some((entry) => entry.id === key), "no invite from someone who isn't the admin");
+  await m._applyRoot(root("Blank"), "", 1);
+  assert.ok(m.pendingGroupInvites().some((entry) => entry.name === "Blank"));
+  const unknownSender = await m._applyRoot(root("Unknown"), "kaspa:nobody", 1);
+  assert.equal(unknownSender, null);
+});
+
+await test("after a signed roster, an unsigned or older root changes nothing at the same epoch", async () => {
+  const { m, seed, groupId, members } = joined();
+  await pass(m);
+  const version = Date.now() + 1000;
+  await m._applyRoot(signedRoot(seed, { members, name: "Pinned", rosterVersion: version }), ADMIN.address, 1);
+  assert.equal(m.getGroup(groupId).rosterVersion, version);
+  assert.equal(await m._applyRoot(signedRoot(seed, { members: [ADMIN.address], name: "Old", unsigned: true }), ADMIN.address, 1), null);
+  assert.equal(await m._applyRoot(signedRoot(seed, { members: [ADMIN.address], name: "Older", rosterVersion: version - 1 }), ADMIN.address, 1), null);
+  assert.equal(m.getGroup(groupId).name, "Pinned");
+  assert.equal(m.getGroup(groupId).members.length, 2);
+});
+
+await test("a newer epoch from an unsigned root brings its keys and keeps the name and members", async () => {
+  const { m, seed, groupId, members } = joined();
+  await pass(m);
+  await m._applyRoot(signedRoot(seed, { members, name: "Pinned", rosterVersion: Date.now() + 1000 }), ADMIN.address, 1);
+  const pin = m.getGroup(groupId).rosterVersion;
+  const event = await m._applyRoot(signedRoot(seed, { epoch: 1, members: [ADMIN.address], name: "Changed", unsigned: true }), ADMIN.address, 2);
+  const group = m.getGroup(groupId);
+  assert.equal(group.currentEpoch, 1);
+  assert.equal(group.groupRootEpochHex, G.bytesToHex(G.deriveGroupRootEpoch(seed, G.deriveGroupId(seed), 1)));
+  assert.equal(group.name, "Pinned");
+  assert.equal(group.members.length, 2);
+  assert.equal(group.rosterVersion, pin);
+  assert.deepEqual(event.removed, []);
+});
+
+await test("a newer signature with nothing else changed moves the pin quietly", async () => {
+  const { m, seed, groupId, members } = joined();
+  await pass(m);
+  const base = m.getGroup(groupId).rosterVersion;
+  assert.equal(await m._applyRoot(signedRoot(seed, { members, name: "Team", rosterVersion: base + 5 }), ADMIN.address, 1), null);
+  assert.equal(m.getGroup(groupId).rosterVersion, base + 5);
+});
+
+await test("a held invite's signed roster isn't replaced by an unsigned or older one", async () => {
+  const seed = G.generateGroupSeed();
+  const m = useWallet(INVITEE);
+  const members = [ADMIN.address, INVITEE.address];
+  await m._applyRoot(signedRoot(seed, { members, name: "Signed", rosterVersion: 100 }), ADMIN.address, 1);
+  await m._applyRoot(signedRoot(seed, { members, name: "Unsigned", unsigned: true }), ADMIN.address, 2);
+  await m._applyRoot(signedRoot(seed, { members, name: "Older", rosterVersion: 99 }), ADMIN.address, 3);
+  assert.equal(m.pendingGroupInvites().find((entry) => entry.groupId === G.bytesToHex(G.deriveGroupId(seed))).name, "Signed");
+  await m._applyRoot(signedRoot(seed, { members, name: "Newer", rosterVersion: 101 }), ADMIN.address, 4);
+  assert.equal(m.pendingGroupInvites().find((entry) => entry.groupId === G.bytesToHex(G.deriveGroupId(seed))).name, "Newer");
+});
+
+await test("an admin's next version is above the last one, even with the clock set back", async () => {
+  const { m, groupId } = joined();
+  await pass(m);
+  const future = Date.now() + 10_000_000;
+  await m._mutateLocked(groupId, (fresh) => { fresh.rosterVersion = future; });
+  assert.equal(await m._nextRosterVersion(groupId), future + 1);
+  assert.equal(await m._nextRosterVersion(groupId), future + 2);
+  assert.equal(m.getGroup(groupId).rosterVersion, future + 2);
+});
+
 await test("the invite stores are wiped with the account", async () => {
   const appSource = readFileSync(join(here, "../ui/app.js"), "utf8");
   for (const key of [GROUP_INVITES_KEY, GROUP_INVITE_ANSWERS_KEY, GROUP_MEMBER_STATUS_KEY]) assert.ok(appSource.includes(`"${key}"`), key);

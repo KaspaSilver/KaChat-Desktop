@@ -36,12 +36,12 @@
 // up on the device from its social links). Here it lives in social-image-resolver.js and is
 // re-exported below; the app keeps one instance with its own fetch and storage.
 
-import { Failure, hex, normalize, validate, isValid, key as nameKey } from "./codec.js";
+import { Failure, hex, normalize, validate, isValid, key as nameKey, nameState } from "./codec.js";
 import {
   RegistryState, TxView, Lookup, GapInfo, IndexerAPI, Profile, Status, label as labelOf, makeIdentity, byRegistration,
   addressOf, keyOf, shortAddress, compactAddress, p2shAddress, step, decodeAddress, parseU64,
 } from "./registry-state.js";
-import { paramsRegisterCost, paramsRenewPrice } from "./manifest.js";
+import { paramsRegisterCost, paramsRenewPrice, templateScript } from "./manifest.js";
 
 /** A name's length in bytes, as the prices count it (Swift `name.utf8.count`). */
 function utf8Length(name) { return new TextEncoder().encode(String(name)).length; }
@@ -885,6 +885,31 @@ export class KachatNamesRegistry {
    *  as failed). */
   async resolveHeld(raw) {
     return this._resolve(raw, (s) => s !== Status.lapsed);
+  }
+
+  /** An indexer's answer is only a claim. Before a payment trusts it, the chain has to hold the name
+   *  record it describes: the script commits to the name and its owner, and carries the registry's
+   *  covenant id, so an indexer can't point a name at another address. Throws if it doesn't. A record
+   *  read from the chain itself needs no second look (KaPay 953b255 confirmOnChain). */
+  async confirmOnChain(n, service) {
+    if (this.source?.kind !== "indexer") return;
+    const fields = n?.fields;
+    if (fields == null) throw new Failure("the indexer's record can't be checked");
+    const m = await service.loadManifest();
+    await service.liveRegistryUtxo({ script: templateScript(m.name, nameState(fields)), outpoint: n.outpoint });
+  }
+
+  /** `resolveHeld` for a typed name that money may follow: from an indexer, only once the chain
+   *  backs its answer up. Throws when it can't (the caller shows the lookup as failed). */
+  async resolveHeldOnChain(raw, service) {
+    const address = await this.resolveHeld(raw);
+    if (address == null || this.source?.kind !== "indexer") return address;
+    const canonical = normalize(raw);
+    const found = await this.lookup(canonical);
+    const n = found?.info ?? null;
+    if (n?.name !== canonical) throw new Failure("the indexer answered for another name");
+    await this.confirmOnChain(n, service);
+    return address;
   }
 
   /** The `kaspatest:` address an ACTIVE name resolves to, or null (not registered, in grace,

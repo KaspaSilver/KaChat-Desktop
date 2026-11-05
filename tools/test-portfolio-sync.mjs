@@ -5,6 +5,7 @@ import {
   mergePortfolioSync, mergePortfolioArchives, mergePortfolioTombstones, stampPortfolioChanges,
   portfolioSyncFromArchive, portfolioSyncToArchive, portfolioSyncFromDesktop, portfolioSyncToDesktop,
   portfolioSyncForArchive, isPristinePortfolioSeed, newPortfolioUuid, PORTFOLIO_SEED_NAME, foldPortfolioEquivalents,
+  portfolioBackupFileJson, parsePortfolioBackupFile, isOwnPortfolioFile, isPortfolioFileCandidate, portfolioFileNames, portfolioSyncFor,
 } from "../ui/portfolio-sync.js";
 
 const P1 = "11111111-1111-4111-8111-111111111111";
@@ -288,6 +289,66 @@ test("fold: different names, or an edited portfolio, stay apart", () => {
   assert.deepEqual(edited.portfolios.map((p) => p.id), [P1, P3]);
   assert.equal(foldPortfolioEquivalents([side()]).length, 1);
 });
+
+// KaPay 953b255: one file per portfolio. tools/test-nextcloud-shared-contacts.mjs runs it end to end.
+const FILE_P1 = "AAAAAAAA-0000-4000-8000-000000000001";
+const FILE_P2 = "AAAAAAAA-0000-4000-8000-000000000002";
+const fileSync = {
+  portfolios: [{ id: FILE_P1, name: "Long Term", sortOrder: 0, createdAt: 1780000000123, updatedAt: null }],
+  transactions: [{ id: "t", type: "buy", amountSompi: 5, fiatValue: 1.5, timestamp: 1780000000456, notes: null, portfolioId: FILE_P1, sourceAddress: null, sourceTxId: "x", updatedAt: 1780000000789 }],
+  fees: [{ txId: "x", portfolioId: FILE_P1, sourceAddress: "a", amountSompi: 1, timestamp: 1780000000000, fiatValue: null }],
+  tombstones: [{ kind: "transaction", id: "gone", deletedAt: 1780000000000 }],
+};
+tests.push(["portfolio file: Swift's shape, sorted keys and seconds since 2001, unset fields left out", () => {
+  const json = portfolioBackupFileJson(fileSync, "kaspa:me", 1780000000000);
+  const file = JSON.parse(json);
+  assert.deepEqual(Object.keys(file), ["exportedAt", "fees", "portfolios", "tombstones", "transactions", "type", "version", "walletAddress"]);
+  assert.equal(file.exportedAt, 1780000000 - 978307200);
+  assert.ok(!("updatedAt" in file.portfolios[0]));
+  assert.ok(!("notes" in file.transactions[0]));
+  assert.ok(!("fiatValue" in file.fees[0]));
+  assert.equal(file.transactions[0].sourceTxId, "x");
+}]);
+tests.push(["portfolio file: every date comes back to the same ms, so an unchanged file reads as unchanged", () => {
+  const parsed = parsePortfolioBackupFile(portfolioBackupFileJson(fileSync, "kaspa:me"));
+  assert.deepEqual(parsed.sync, fileSync);
+}]);
+tests.push(["portfolio file: only this account's current file is its own", () => {
+  const own = parsePortfolioBackupFile(portfolioBackupFileJson(fileSync, "kaspa:me"));
+  assert.ok(isOwnPortfolioFile(own, "KASPA:ME"));
+  assert.ok(!isOwnPortfolioFile(own, "kaspa:you"));
+  assert.ok(!isOwnPortfolioFile({ ...own, version: 3 }, "kaspa:me"), "from a newer app");
+  assert.ok(!isOwnPortfolioFile({ ...own, type: null }, "kaspa:me"), "the old single file");
+  for (const text of ["", "[]", "{}", "not json", JSON.stringify({ version: 2, portfolios: [] })]) assert.equal(parsePortfolioBackupFile(text), null, text);
+}]);
+tests.push(["portfolio file: contacts and chat files are never candidates", () => {
+  for (const name of ["kachat-contacts.json", "KaChat-Backup.json", "KaPay Contacts.json", "kapay contacts 2.json", "a.csv"]) assert.ok(!isPortfolioFileCandidate(name), name);
+  assert.ok(isPortfolioFileCandidate("Long Term.json"));
+  assert.ok(!isPortfolioFileCandidate("Long Term.json", { size: 60_000_000 }));
+  assert.ok(!isPortfolioFileCandidate("Long Term.json", { isDirectory: true }));
+}]);
+tests.push(["portfolio file names: own name, numbered only on a clash, the same on every device", () => {
+  const rows = [
+    { id: FILE_P2, name: "Same", createdAt: 2 },
+    { id: FILE_P1, name: "same ", createdAt: 1 },
+    { id: "AAAAAAAA-0000-4000-8000-000000000003", name: "  ", createdAt: 3 },
+    { id: "AAAAAAAA-0000-4000-8000-000000000004", name: "KaPay Contacts", createdAt: 4 },
+    { id: "AAAAAAAA-0000-4000-8000-000000000005", name: "Taken", createdAt: 5 },
+  ];
+  const names = portfolioFileNames(rows, new Set(["taken.json"]));
+  assert.equal(names.get(FILE_P1), "same.json", "oldest first");
+  assert.equal(names.get(FILE_P2), "Same 2.json");
+  assert.equal(names.get("AAAAAAAA-0000-4000-8000-000000000003"), "Portfolio.json");
+  assert.equal(names.get("AAAAAAAA-0000-4000-8000-000000000004"), "Portfolio 2.json", "the contacts file's name, which no number can make allowed");
+  assert.equal(names.get("AAAAAAAA-0000-4000-8000-000000000005"), "Taken 2.json");
+  assert.deepEqual([...portfolioFileNames([...rows].reverse(), new Set(["taken.json"]))].sort(), [...names].sort());
+  assert.equal(Array.from(portfolioFileNames([{ id: FILE_P1, name: "x".repeat(90), createdAt: 1 }], new Set()).get(FILE_P1)).length, 65);
+}]);
+tests.push(["portfolio file: narrowed to one portfolio, with every deletion", () => {
+  const one = portfolioSyncFor({ ...fileSync, transactions: [...fileSync.transactions, { ...fileSync.transactions[0], id: "o", portfolioId: FILE_P2 }] }, FILE_P1);
+  assert.deepEqual(one.transactions.map((t) => t.id), ["t"]);
+  assert.equal(one.tombstones.length, 1);
+}]);
 
 let failed = 0;
 for (const [name, fn] of tests) {

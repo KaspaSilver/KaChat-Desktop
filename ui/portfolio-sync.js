@@ -54,7 +54,7 @@ function timeOf(value) {
     if (!Number.isFinite(value)) return NaN;
     if (value >= 1e12) return value;
     if (value >= 1e9) return value * 1000;
-    return (value + 978307200) * 1000;
+    return Math.round((value + 978307200) * 1000);
   }
   const parsed = Date.parse(String(value));
   return Number.isFinite(parsed) ? parsed : NaN;
@@ -200,6 +200,119 @@ export function portfolioSyncToArchive(sync) {
     ...(portfolioTransactions.length ? { portfolioTransactions } : {}),
     ...(portfolioFees.length ? { portfolioFees } : {}),
     ...(portfolioDeleted.length ? { portfolioDeleted } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// One portfolio's file on Nextcloud (KaPay 953b255 PortfolioBackupFile): plain JSON named after the
+// portfolio, holding it with its transactions and fees, every deletion the account knows of, and
+// the owning account. Dates are Swift's default encoding, seconds since 2001, which KaPay's decoder
+// requires. Version 1 was the one file holding every portfolio, with no `type` or owner.
+// ---------------------------------------------------------------------------------------------
+
+export const PORTFOLIO_FILE_TYPE = "kapay-portfolio";
+export const PORTFOLIO_FILE_VERSION = 2;
+const SWIFT_EPOCH_S = 978307200;
+const swiftDate = (ms) => Number(ms) / 1000 - SWIFT_EPOCH_S;
+
+function sortedKeys(value) {
+  if (Array.isArray(value)) return value.map(sortedKeys);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortedKeys(value[key])]));
+}
+
+/** `sync` as the file KaPay decodes. Optional fields are left out when unset, as Swift's encoder does. */
+export function portfolioBackupFileJson(sync, walletAddress, now = Date.now()) {
+  return JSON.stringify(sortedKeys({
+    version: PORTFOLIO_FILE_VERSION,
+    type: PORTFOLIO_FILE_TYPE,
+    walletAddress,
+    exportedAt: swiftDate(now),
+    portfolios: sync.portfolios.map((p) => ({
+      id: p.id, name: p.name, sortOrder: p.sortOrder, createdAt: swiftDate(p.createdAt),
+      ...(p.updatedAt !== null ? { updatedAt: swiftDate(p.updatedAt) } : {}),
+    })),
+    transactions: sync.transactions.map((t) => ({
+      id: t.id, type: t.type, amountSompi: t.amountSompi, fiatValue: t.fiatValue, timestamp: swiftDate(t.timestamp), portfolioId: t.portfolioId,
+      ...(t.notes !== null ? { notes: t.notes } : {}),
+      ...(t.sourceAddress !== null ? { sourceAddress: t.sourceAddress } : {}),
+      ...(t.sourceTxId !== null ? { sourceTxId: t.sourceTxId } : {}),
+      ...(t.updatedAt !== null ? { updatedAt: swiftDate(t.updatedAt) } : {}),
+    })),
+    fees: sync.fees.map((f) => ({
+      txId: f.txId, portfolioId: f.portfolioId, sourceAddress: f.sourceAddress, amountSompi: f.amountSompi, timestamp: swiftDate(f.timestamp),
+      ...(f.fiatValue !== null ? { fiatValue: f.fiatValue } : {}),
+    })),
+    tombstones: sync.tombstones.map((t) => ({ kind: t.kind, id: t.id, deletedAt: swiftDate(t.deletedAt) })),
+  }), null, 2);
+}
+
+/** A Portfolio file's `{ version, type, walletAddress, sync }`, or null for any other file. */
+export function parsePortfolioBackupFile(text) {
+  let file = null;
+  try { file = JSON.parse(String(text ?? "").replace(/^\uFEFF/, "")); } catch { return null; }
+  if (!file || typeof file !== "object" || !Number.isInteger(file.version)
+    || !Array.isArray(file.portfolios) || !Array.isArray(file.transactions) || !Array.isArray(file.fees) || !Array.isArray(file.tombstones)) return null;
+  return {
+    version: file.version,
+    type: file.type ?? null,
+    walletAddress: typeof file.walletAddress === "string" ? file.walletAddress : null,
+    sync: {
+      portfolios: cleanList(file.portfolios, cleanPortfolio),
+      transactions: cleanList(file.transactions, cleanTransaction),
+      fees: cleanList(file.fees, cleanFee),
+      tombstones: cleanList(file.tombstones, cleanTombstone),
+    },
+  };
+}
+
+/** Whether a parsed file is this account's. Another account's file is never read or written over. */
+export function isOwnPortfolioFile(parsed, walletAddress) {
+  return Boolean(parsed) && parsed.type === PORTFOLIO_FILE_TYPE && parsed.version <= PORTFOLIO_FILE_VERSION
+    && String(parsed.walletAddress || "").toLowerCase() === String(walletAddress || "").toLowerCase();
+}
+
+// Contacts and chat files, which can be large and are never portfolios.
+const NOT_PORTFOLIO_FILES = new Set([
+  "kachat-contacts.json", "kachat-backup.json", "kachat-backup-desktop.json",
+  "kapay contacts.json", "kapay address book.json", "kachat wallet address book.json",
+]);
+export const PORTFOLIO_FILE_MAX_BYTES = 50_000_000;
+export function isPortfolioFileCandidate(name, { size = 0, isDirectory = false } = {}) {
+  const lower = String(name || "").toLowerCase();
+  if (isDirectory || !lower.endsWith(".json") || Number(size || 0) > PORTFOLIO_FILE_MAX_BYTES) return false;
+  return !NOT_PORTFOLIO_FILES.has(lower) && !lower.startsWith("kapay contacts ");
+}
+
+/** Each portfolio's file name: its own name, with a number only where another file already has that
+ *  name. The same portfolios get the same names on every device. `taken`: lowercased names of
+ *  everything else in the folder. `sanitize`: how the upload stores a name. Returns id -> name. */
+export function portfolioFileNames(portfolios, taken, sanitize = (name) => name) {
+  const used = new Set(taken);
+  const names = new Map();
+  const ordered = [...portfolios].sort((a, b) => (a.createdAt - b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  for (const portfolio of ordered) {
+    const trimmed = String(portfolio.name ?? "").trim();
+    const named = trimmed ? sanitize(Array.from(trimmed).slice(0, 60).join("")) : "Portfolio";
+    // "KaPay Contacts" and anything after it is refused with every number, so no number would end this.
+    const base = isPortfolioFileCandidate(`${named} 2.json`) ? named : "Portfolio";
+    let candidate = `${base}.json`;
+    for (let number = 2; used.has(candidate.toLowerCase()) || !isPortfolioFileCandidate(candidate); number += 1) {
+      candidate = `${base} ${number}.json`;
+    }
+    used.add(candidate.toLowerCase());
+    names.set(portfolio.id, candidate);
+  }
+  return names;
+}
+
+/** `sync` narrowed to one portfolio: its transactions and fees, and every deletion. */
+export function portfolioSyncFor(sync, portfolioId) {
+  return {
+    portfolios: sync.portfolios.filter((p) => p.id === portfolioId),
+    transactions: sync.transactions.filter((t) => t.portfolioId === portfolioId),
+    fees: sync.fees.filter((f) => f.portfolioId === portfolioId),
+    tombstones: sync.tombstones,
   };
 }
 

@@ -8,6 +8,10 @@ import {
   addressBookHasBackupData, addressBookHoldsWallet, addressBookWalletAddress, mergeSharedContactsFile, sharedContactsFileJson,
 } from "./address-book-store.js";
 import { parseBackupEnvelope } from "./backup-crypto.js";
+import {
+  PORTFOLIO_FILE_MAX_BYTES, isOwnPortfolioFile, isPortfolioFileCandidate, mergePortfolioSync, parsePortfolioBackupFile,
+  portfolioBackupFileJson, portfolioFileNames, portfolioSyncFor,
+} from "./portfolio-sync.js";
 // Nextcloud integration — desktop port of the iOS stack:
 // connect a server with an app password, browse it over WebDAV, send photos/videos in chats as
 // public /s/TOKEN share links (rendered by the link-preview feature), and keep the account's
@@ -64,17 +68,12 @@ const SYNC_DEBOUNCE_MS = 15_000;
 // stays set), so nothing is lost.
 const AUTO_SYNC_MIN_MS = 90_000;
 
-// Contacts shared with KaPay (iOS 6c80aea3, NEXTCLOUD_SYNC.md §9). Always this folder at the root of
-// the user's files, whatever nc.backupFolder says: KaPay only looks here (its backupPath), and iOS
-// keeps it here even when the contacts backup's folder was moved. So an account whose backup was found
-// in "Apps/KaChat" or "kachat" (Build 259) gets its contacts in "KaChat" all the same.
-const SHARED_CONTACTS_FOLDER = "KaChat";
-const SHARED_CONTACTS_FILENAME = "KaPay Contacts.json";
-// KaPay's earlier names for it: read when there's no file under the current name yet.
-const LEGACY_SHARED_CONTACTS_FILENAMES = ["KaPay Address Book.json", "KaChat Wallet Address Book.json"];
-const SHARED_CONTACTS_MAX_BYTES = 50_000_000;
-// Going in and out of the app, and each change-watcher tick, check the server at most this often.
-const SHARED_CONTACTS_CHECK_MS = 60_000;
+// The Portfolio (KaPay 953b255): one plain JSON file per portfolio in the backup folder. Quiet time
+// after a change before the upload, and how often the server is asked for another device's changes.
+const PORTFOLIO_BACKUP_DEBOUNCE_MS = 5_000;
+const PORTFOLIO_SERVER_CHECK_MS = 60_000;
+// The one file the Portfolio used to be kept in, newest name first. Read once, never written.
+const SINGLE_PORTFOLIO_FILENAMES = ["KaPay Portfolio.json", "KaChat Wallet Portfolio.json"];
 
 let deps = null;
 let nc = null;              // null = not connected (or locked); else the account, app password opened
@@ -92,8 +91,11 @@ let syncDebounceTimer = null;
 let lastAutoSyncAt = 0;
 let watcherEpoch = 0;           // bumped to retire a running watcher loop
 let watcherRunning = false;
-let lastSharedContactsCheck = 0; // when the app last looked at the contacts file shared with KaPay
-let sharedContactsInFlight = false; // one at a time: two PUTs at once get 423 Locked
+let needsReconnect = false;     // Nextcloud refused this login: automatic work stops until it reconnects
+let portfolioChain = null;      // one Portfolio backup at a time: two PUTs at once get 423 Locked
+let portfolioDebounceTimer = null;
+let lastPortfolioCheck = 0;     // when the app last looked for another device's Portfolio changes
+let portfolioFileCache = new Map(); // path -> { modified, size, parsed }: an unchanged file isn't downloaded again
 
 // Picker state
 let pickerOpen = false;
@@ -462,7 +464,7 @@ async function ensureFolder(davRoot, parts) {
  *  name is replaced; exports carry a timestamp in their name, so each one is a new file.
  *  `keepSpaces` keeps a name the user gave (a portfolio's, "KaChat Contacts") readable in
  *  Nextcloud instead of turning its spaces into underscores (iOS 87b2a0b). `folder` puts it
- *  somewhere other than backupFolderPath (the contacts file shared with KaPay), and `stillCurrent`,
+ *  somewhere other than backupFolderPath, and `stillCurrent`,
  *  asked right before the write, stops a body built for an account that has since been switched
  *  away from. */
 export async function uploadToKaChatFolder(body, filename, contentType, { keepSpaces = false, folder: folderOverride = null, stillCurrent = null } = {}) {
@@ -511,73 +513,199 @@ export async function downloadNextcloudText(path, { maxBytes = 10_000_000 } = {}
   return blob.text();
 }
 
-// --- Contacts shared with KaPay (iOS 6c80aea3, NEXTCLOUD_SYNC.md §9) ---
-//
-// KaPay, KaChat's wallet app, never reads kachat-contacts.json: it keeps its contacts as a plain JSON
-// file. KaChat reads, merges and writes that same file, which is how a contact added or deleted in
-// either app reaches the other. It holds one account: a file naming another account is left out of
-// the merge and replaced (the store's mergeSharedContactsFile), so two accounts on one Nextcloud
-// login take turns replacing it, and neither ever gets the other's contacts.
+// --- Portfolio files (KaPay 953b255, its NextcloudService "Portfolio backup") ---
 
-/** With Automatic Sync on, brings in KaPay's changes when the app opens, on an account activation
- *  and while the change watcher runs. A change it brings is passed on to this account's other devices
- *  through the contacts file. */
-function syncSharedContactsIfDue() {
-  if (!nc?.autoBackup || sharedContactsInFlight || document.visibilityState === "hidden") return;
-  if (lastSharedContactsCheck && Date.now() - lastSharedContactsCheck < SHARED_CONTACTS_CHECK_MS) return;
-  lastSharedContactsCheck = Date.now();
+/** Reads the backup folder: this account's Portfolio files, and the lowercased names of everything
+ *  else there (another account's portfolio, or any other file), which a portfolio's file goes beside
+ *  and never over. Any file that can't be downloaded throws, so nothing is written or deleted on a
+ *  partial view of what's there. */
+async function readServerPortfolios(wallet) {
+  const result = { own: [], taken: new Set() };
+  let listing;
+  try {
+    listing = await listFolder(backupFolderPath());
+  } catch (error) {
+    if (error?.status === 404) return result;
+    throw error;
+  }
+  for (const file of listing) {
+    if (file.isDirectory) continue;
+    let parsed = null;
+    if (isPortfolioFileCandidate(file.name, { size: file.size })) {
+      const modified = file.modified ? file.modified.getTime() : null;
+      const cached = portfolioFileCache.get(file.path);
+      if (modified != null && cached?.modified === modified && cached.size === file.size) {
+        parsed = cached.parsed;
+      } else {
+        parsed = parsePortfolioBackupFile(await downloadNextcloudText(file.path, { maxBytes: PORTFOLIO_FILE_MAX_BYTES }));
+        portfolioFileCache.set(file.path, { modified, size: file.size, parsed });
+      }
+    }
+    if (isOwnPortfolioFile(parsed, wallet)) result.own.push({ file, parsed });
+    else result.taken.add(String(file.name).toLowerCase());
+  }
+  return result;
+}
+
+/** Once per account: merges the one file the Portfolio used to be kept in. It stays where it is and
+ *  isn't read again. A failure leaves this to run again with the next backup. */
+async function mergeSinglePortfolioFileIfNeeded(account, stillCurrent) {
+  if (account.singlePortfolioMerged) return false;
+  try {
+    let text = null;
+    for (const name of SINGLE_PORTFOLIO_FILENAMES) {
+      try {
+        text = await downloadNextcloudText(joinedBackupPath(name), { maxBytes: PORTFOLIO_FILE_MAX_BYTES });
+        break;
+      } catch (error) {
+        if (error?.status !== 404) throw error;
+      }
+    }
+    if (!stillCurrent()) return false;
+    const changed = text != null && deps.importPortfolioSync(parsePortfolioBackupFile(text)?.sync ?? { portfolios: [], transactions: [], fees: [], tombstones: [] });
+    account.singlePortfolioMerged = true;
+    saveState();
+    return changed;
+  } catch (error) {
+    deps.appendEngineLog?.(`[Nextcloud] Merging the earlier Portfolio file failed: ${error.message}`);
+    return false;
+  }
+}
+
+function joinedBackupPath(name) {
+  const folder = backupFolderPath();
+  return folder ? `${folder}/${name}` : name;
+}
+
+/** Merges every Portfolio file of this account into this device, without uploading. */
+async function mergePortfoliosFromServer(wallet, stillCurrent) {
+  await mergeSinglePortfolioFileIfNeeded(nc, stillCurrent);
+  const server = await readServerPortfolios(wallet);
+  if (!stillCurrent()) throw new Error("The account changed during the backup.");
+  if (server.own.length) deps.importPortfolioSync(mergePortfolioSync(server.own.map((found) => found.parsed.sync)));
+  return server;
+}
+
+/** Back Up Portfolio Now and the automatic backup both come here, one at a time. */
+export function runPortfolioBackup() {
+  const previous = portfolioChain;
+  const run = (async () => {
+    try { await previous; } catch { /* its own caller heard about it */ }
+    await performPortfolioBackup();
+  })();
+  portfolioChain = run;
+  return run.catch((error) => { noteRejectedLogin(error); throw error; }).finally(() => { if (portfolioChain === run) portfolioChain = null; });
+}
+
+/** Uploads each portfolio to its own file, skipping one already up to date. What's on the server is
+ *  merged in first, so another device's edits and deletions survive. Afterwards, this account's file
+ *  for a portfolio that was deleted or renamed goes: the other files carry the deletion. */
+async function performPortfolioBackup() {
   const account = nc;
+  const wallet = addressBookWalletAddress();
+  if (!account || !wallet) throw new Error("Open a wallet first.");
+  const stillCurrent = () => nc === account && addressBookHoldsWallet(wallet);
+  await ensureDavUser();
+  const server = await mergePortfoliosFromServer(wallet, stillCurrent);
+  const sync = deps.portfolioBackupSync();
+  const names = portfolioFileNames(sync.portfolios, server.taken, (name) => kaChatFolderFileName(name, { keepSpaces: true }));
+  for (const portfolio of sync.portfolios) {
+    const name = names.get(portfolio.id);
+    const one = portfolioSyncFor(sync, portfolio.id);
+    const upToDate = server.own.some((found) => String(found.file.name).toLowerCase() === name.toLowerCase()
+      && JSON.stringify(mergePortfolioSync([found.parsed.sync])) === JSON.stringify(mergePortfolioSync([one])));
+    if (upToDate) continue;
+    await uploadToKaChatFolder(portfolioBackupFileJson(one, wallet), name, "application/json", { keepSpaces: true, stillCurrent });
+  }
+  const deletedIds = new Set(sync.tombstones.filter((t) => t.kind === "portfolio").map((t) => t.id));
+  for (const found of server.own) {
+    const ids = found.parsed.sync.portfolios.map((p) => p.id);
+    if (ids.some((id) => names.get(id)?.toLowerCase() === String(found.file.name).toLowerCase())) continue;
+    // Only for what this device knows the fate of: never a portfolio it simply doesn't have.
+    if (!ids.every((id) => names.has(id) || deletedIds.has(id))) continue;
+    if (!stillCurrent()) return;
+    await deleteBackupFile(found.file.path);
+    portfolioFileCache.delete(found.file.path);
+  }
+  if (stillCurrent()) { account.portfolioBackupOwed = false; saveState(); }
+  deps.appendEngineLog?.("[Nextcloud] Portfolio backed up");
+}
+
+/** Deletes a file from the user's Nextcloud. 404: nothing there, which is the state asked for. */
+async function deleteBackupFile(path) {
+  const encoded = String(path).split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  const response = await ncFetch(`${apiBase()}/remote.php/dav/files/${davUser()}/${encoded}`, { method: "DELETE", headers: { Authorization: authHeader() } });
+  if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
+  if (!(response.ok || response.status === 404)) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
+}
+
+/** The Portfolio changed: with Automatic Sync on, it uploads a few seconds after the changes settle. */
+export function notePortfolioChanged() {
+  if (!nc?.autoBackup || needsReconnect) return;
+  if (!nc.portfolioBackupOwed) { nc.portfolioBackupOwed = true; saveState(); }
+  schedulePortfolioBackup();
+}
+
+function schedulePortfolioBackup(delay = PORTFOLIO_BACKUP_DEBOUNCE_MS) {
+  if (portfolioDebounceTimer) clearTimeout(portfolioDebounceTimer);
+  const account = nc;
+  portfolioDebounceTimer = window.setTimeout(() => {
+    portfolioDebounceTimer = null;
+    if (nc !== account || !nc?.autoBackup) return;
+    runPortfolioBackup().catch((error) => deps.appendEngineLog?.(`[Nextcloud] Automatic Portfolio backup failed: ${error.message}`));
+  }, delay);
+}
+
+/** With Automatic Sync on, brings in another device's Portfolio changes when the app opens, on an
+ *  account activation and while the change watcher runs, at most once a minute. A change still owed
+ *  is uploaded instead, which merges the server's copy in first. */
+function syncPortfoliosIfDue() {
+  if (!nc?.autoBackup || needsReconnect || document.visibilityState === "hidden") return;
+  if (lastPortfolioCheck && Date.now() - lastPortfolioCheck < PORTFOLIO_SERVER_CHECK_MS) return;
+  lastPortfolioCheck = Date.now();
+  if (nc.portfolioBackupOwed) { schedulePortfolioBackup(); return; }
+  const account = nc;
+  const wallet = addressBookWalletAddress();
+  if (!wallet) return;
   // After the other services have switched to this account.
   window.setTimeout(async () => {
     if (nc !== account) return;
+    const stillCurrent = () => nc === account && addressBookHoldsWallet(wallet);
     try {
-      if (await syncSharedContacts() && nc === account) noteContactActivity();
+      await ensureDavUser();
+      await mergePortfoliosFromServer(wallet, stillCurrent);
     } catch (error) {
-      deps.appendEngineLog?.(`[Nextcloud] Syncing contacts with KaPay failed: ${error.message}`);
+      noteRejectedLogin(error);
+      deps.appendEngineLog?.(`[Nextcloud] Checking the Portfolio on the server failed: ${error.message}`);
     }
   }, 1000);
 }
 
-/** One read, merge, write of the shared file; the write only when the file is missing something
- *  this book has. A file that can't be read as contacts throws before any write, so it is never
- *  overwritten, and so does any download failure other than the file not being there. No file is
- *  created for an account with no contacts or deletions. Returns whether the merge changed this
- *  book. Exported for tools/test-nextcloud-shared-contacts.mjs. */
-export async function syncSharedContacts() {
-  const account = nc;
-  const wallet = addressBookWalletAddress();
-  if (sharedContactsInFlight || !account || !wallet) return false;
-  // Both the connection and the book: an account switch replaces them one after the other.
-  const stillCurrent = () => nc === account && addressBookHoldsWallet(wallet);
-  sharedContactsInFlight = true;
-  try {
-    const remote = await downloadSharedContacts();
-    if (!stillCurrent()) return false;
-    const { changedHere, serverIsBehind } = remote == null
-      ? { changedHere: false, serverIsBehind: addressBookHasBackupData() }
-      : mergeSharedContactsFile(remote);
-    if (!serverIsBehind || !stillCurrent()) return changedHere;
-    await uploadToKaChatFolder(sharedContactsFileJson(), SHARED_CONTACTS_FILENAME, "application/json", {
-      keepSpaces: true,
-      folder: SHARED_CONTACTS_FOLDER,
-      stillCurrent,
-    });
-    return changedHere;
-  } finally {
-    sharedContactsInFlight = false;
-  }
+/** A 401 won't fix itself, and repeated failed logins can trip the server's brute-force protection:
+ *  automatic work stops and Settings asks for a new connection (KaPay 953b255 needsReconnect). */
+function noteRejectedLogin(error) {
+  if (needsReconnect || !/HTTP 401|rejected the (stored app password|username)/.test(String(error?.message || ""))) return;
+  needsReconnect = true;
+  if (syncDebounceTimer) { clearTimeout(syncDebounceTimer); syncDebounceTimer = null; }
+  if (portfolioDebounceTimer) { clearTimeout(portfolioDebounceTimer); portfolioDebounceTimer = null; }
+  stopChangeWatcher();
+  deps.appendEngineLog?.("[Nextcloud] The server refused this login; automatic sync stops until it reconnects");
+  renderSettings();
 }
 
-/** The shared file under its name, else under an earlier one; null when neither is there. */
-async function downloadSharedContacts() {
-  for (const name of [SHARED_CONTACTS_FILENAME, ...LEGACY_SHARED_CONTACTS_FILENAMES]) {
-    try {
-      return await downloadNextcloudText(`${SHARED_CONTACTS_FOLDER}/${name}`, { maxBytes: SHARED_CONTACTS_MAX_BYTES });
-    } catch (error) {
-      if (error?.status !== 404) throw error;
-    }
+/** Revokes the app password on the server, so disconnecting leaves nothing that can still log in.
+ *  Best effort: the local copy is gone whatever the server says (KaPay 953b255). */
+export async function revokeAppPassword(account) {
+  if (!account?.server || !account?.appPassword) return;
+  try {
+    const response = await ncFetch(`${apiBase(account.server)}/ocs/v2.php/core/apppassword`, {
+      method: "DELETE",
+      headers: { Authorization: authHeader(account), "OCS-APIRequest": "true" },
+    });
+    deps.appendEngineLog?.(`[Nextcloud] App password revoke answered HTTP ${response.status}`);
+  } catch (error) {
+    deps.appendEngineLog?.(`[Nextcloud] App password revoke failed: ${error.message}`);
   }
-  return null;
 }
 
 let pickerAllowedExtensions = null;
@@ -742,13 +870,6 @@ async function performBackup() {
   const wallet = addressBookWalletAddress();
   if (!account || !wallet) throw new Error("Open a wallet first.");
   const stillCurrent = () => nc === account && addressBookHoldsWallet(wallet);
-  // KaPay's contacts first, so this backup carries them to this account's other devices. A problem
-  // with that file never stops this one (iOS 6c80aea3).
-  try {
-    await syncSharedContacts();
-  } catch (error) {
-    deps.appendEngineLog?.(`[Nextcloud] Syncing contacts with KaPay failed: ${error.message}`);
-  }
   if (!stillCurrent()) throw new Error("The account changed during the backup.");
   const raw = await downloadBackupFile(BACKUP_FILENAME);
   let serverCopy = null;
@@ -930,7 +1051,7 @@ function armSyncDebounce(delayMs) {
  * "leaving" moment and may be the last chance to write.
  */
 async function performAutomaticSync({ bypassFloor = false } = {}) {
-  if (!nc?.autoBackup) return;
+  if (!nc?.autoBackup || needsReconnect) return;
   if (syncInFlight) {
     // Something else owns the contacts; the dirty flag stays set and a short re-arm retries.
     armSyncDebounce(30_000);
@@ -954,13 +1075,14 @@ async function performAutomaticSync({ bypassFloor = false } = {}) {
   } catch (error) {
     syncDirty = true;
     deps.appendEngineLog?.(`Nextcloud automatic sync upload failed (a later trigger retries): ${error.message}`);
+    noteRejectedLogin(error);
   } finally {
     syncInFlight = false;
   }
 }
 
 async function autoBackupIfDue(minMs = AUTO_BACKUP_MIN_MS) {
-  if (!nc?.autoBackup) return;
+  if (!nc?.autoBackup || needsReconnect) return;
   const last = Number(nc.lastAutoBackup || 0);
   const due = Date.now() - last >= minMs;
   if (!due && !syncDirty) return;
@@ -970,7 +1092,7 @@ async function autoBackupIfDue(minMs = AUTO_BACKUP_MIN_MS) {
 /** A contact changed (iOS noteContactActivity): marks the contacts dirty and restarts the quiet-time
  *  timer, so a run of edits becomes one merge upload. Cheap and safe to call at any rate. */
 export function noteContactActivity() {
-  if (!nc?.autoBackup) return;
+  if (!nc?.autoBackup || needsReconnect) return;
   syncDirty = true;
   armSyncDebounce(SYNC_DEBOUNCE_MS);
 }
@@ -1009,11 +1131,12 @@ async function runChangeWatcher(epoch) {
     if (!nc?.autoBackup || document.visibilityState === "hidden") break;
     try {
       await checkForRemoteChangeAndImport();
-      syncSharedContactsIfDue();
+      syncPortfoliosIfDue();
       backoffFactor = 1;
     } catch (error) {
       backoffFactor = Math.min(backoffFactor * 3, CHANGE_WATCH_BACKOFF_FACTOR_MAX);
       deps.appendEngineLog?.(`Nextcloud change watcher poll failed (backing off): ${error.message}`);
+      noteRejectedLogin(error);
     }
   }
 }
@@ -1079,7 +1202,7 @@ function armAutoBackup() {
   autoBackupTimer = window.setInterval(() => autoBackupIfDue(), AUTO_BACKUP_MIN_MS);
   autoBackupIfDue(AUTO_CATCHUP_MS);
   startChangeWatcherIfNeeded();
-  syncSharedContactsIfDue();
+  syncPortfoliosIfDue();
 }
 
 function ncConnectFormValid() {
@@ -1193,6 +1316,13 @@ function renderSettings() {
       <div class="settings-list-row settings-info-row" data-nc-backup-result-row hidden><span class="settings-row-copy"><small data-nc-backup-result></small></span></div>
     </div>
     <p class="settings-group-footer">Only your contacts are backed up here, encrypted. Your messages and group chats come back with your seed phrase.</p>
+    ${needsReconnect ? `<p class="settings-group-footer settings-footer-error" role="alert">Nextcloud refused this login. Disconnect, then connect again with a new app password.</p>` : ""}
+    <p class="settings-group-label">Portfolio Backup</p>
+    <div class="settings-list-card">
+      <button class="settings-list-row" type="button" data-nc-portfolio-backup><span class="settings-row-copy"><strong>Back Up Portfolio Now</strong></span></button>
+      <div class="settings-list-row settings-info-row" data-nc-portfolio-result-row hidden><span class="settings-row-copy"><small data-nc-portfolio-result></small></span></div>
+    </div>
+    <p class="settings-group-footer">Each portfolio has its own file, named after it. These files aren't encrypted.</p>
     <div class="settings-list-card danger-list-card">
       <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
     </div>`;
@@ -1546,17 +1676,42 @@ function wireSettings() {
     if (event.target.closest("[data-nc-disconnect]")) {
       const ok = await confirmDialog({ title: "Disconnect Nextcloud", message: "The app password is removed from this device. You can reconnect any time.", confirmLabel: "Disconnect", destructive: true });
       if (!ok) return;
+      const leaving = nc;
       nc = null;
       ncLocked = null;
       syncDirty = false;
+      needsReconnect = false;
       lastAutoSyncAt = 0;
       clearStoredState();
+      revokeAppPassword(leaving);
       armAutoBackup();  // stops the watcher, the heartbeat and the debounce
       renderSettings();
       return;
     }
     if (event.target.closest("[data-nc-pick-start]")) { openPicker("folder-start"); return; }
     if (event.target.closest("[data-nc-pick-backup]")) { openPicker("folder-backup"); return; }
+    if (event.target.closest("[data-nc-portfolio-backup]")) {
+      const button = event.target.closest("[data-nc-portfolio-backup]");
+      const result = settingsEl.querySelector("[data-nc-portfolio-result]");
+      const row = settingsEl.querySelector("[data-nc-portfolio-result-row]");
+      const say = (text, failed = false) => {
+        if (!result || !row) return;
+        result.textContent = text;
+        result.classList.toggle("error", failed);
+        row.hidden = !text;
+      };
+      if (button) button.disabled = true;
+      say("");
+      try {
+        await runPortfolioBackup();
+        say("Portfolio backed up.");
+      } catch (error) {
+        say(error?.message || "The backup failed.", true);
+      } finally {
+        if (button) button.disabled = false;
+      }
+      return;
+    }
     if (event.target.closest("[data-nc-backup-now]")) {
       // The manual button bypasses the debounce and the automatic-sync floor, but still waits
       // for whatever already owns the contacts rather than racing it.
@@ -1612,7 +1767,12 @@ export async function deleteRemoteNextcloudBackup() {
   if (!nc?.server || !nc?.username || !nc?.appPassword) return;
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folder = backupFolderPath().split("/").map(encodeURIComponent).join("/");
-  for (const name of [BACKUP_FILENAME, ...RETIRED_BACKUP_FILENAMES]) {
+  // The portfolios' files too. One that can't be read stays, as does anything of another account's.
+  const wallet = addressBookWalletAddress();
+  let portfolioNames = [];
+  try { portfolioNames = wallet ? (await readServerPortfolios(wallet)).own.map((found) => found.file.name) : []; }
+  catch (error) { deps.appendEngineLog?.(`[Nextcloud] Reading the Portfolio files to delete them failed: ${error.message}`); }
+  for (const name of [BACKUP_FILENAME, ...RETIRED_BACKUP_FILENAMES, ...SINGLE_PORTFOLIO_FILENAMES, ...portfolioNames]) {
     const response = await ncFetch(`${davRoot}/${folder}/${encodeURIComponent(name)}`, { method: "DELETE", headers: { Authorization: authHeader() } });
     if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
     if (!(response.ok || response.status === 404)) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
@@ -1673,7 +1833,10 @@ export function resetNextcloudForAccount() {
   if (syncDebounceTimer) { clearTimeout(syncDebounceTimer); syncDebounceTimer = null; }
   syncDirty = false;
   lastAutoSyncAt = 0;
-  lastSharedContactsCheck = 0;
+  lastPortfolioCheck = 0;
+  needsReconnect = false;
+  portfolioFileCache = new Map();
+  if (portfolioDebounceTimer) { clearTimeout(portfolioDebounceTimer); portfolioDebounceTimer = null; }
   for (const url of thumbCache.values()) { if (url) URL.revokeObjectURL(url); }
   thumbCache = new Map();
   loadState();
@@ -1709,11 +1872,14 @@ export function initNextcloud(dependencies) {
       // floor so a change that was still waiting out its debounce is not left unwritten.
       if (syncDirty) performAutomaticSync({ bypassFloor: true });
       else autoBackupIfDue();
+      // A Portfolio change still owed goes now: this may be the last chance to write.
+      if (portfolioDebounceTimer) { clearTimeout(portfolioDebounceTimer); portfolioDebounceTimer = null; }
+      if (nc?.autoBackup && nc.portfolioBackupOwed && !needsReconnect) runPortfolioBackup().catch(() => {});
       return;
     }
     startChangeWatcherIfNeeded();
     autoBackupIfDue(AUTO_CATCHUP_MS);
-    syncSharedContactsIfDue();
+    syncPortfoliosIfDue();
   });
 
   renderSettings();

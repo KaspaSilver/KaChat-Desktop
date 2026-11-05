@@ -36,7 +36,7 @@ import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
 import { otherDomainsHtml, pickOtherDomain } from "./send-kaspa-components.js";
 import { saveFile } from "./save-file.js";
 import { transactionBelongsInHistory } from "../engine/sync.js";
-import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
+import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker, notePortfolioChanged } from "./nextcloud.js";
 import {
   PORTFOLIO_SEED_NAME, isPortfolioUuid, newPortfolioUuid, stampPortfolioChanges, mergePortfolioTombstones,
   mergePortfolioSync, portfolioSyncFromDesktop, portfolioSyncToDesktop, portfolioSyncFromArchive,
@@ -321,6 +321,7 @@ function saveState() {
   }
   writeState();
   savedPortfolios = snapshotPortfolios();
+  notePortfolioChanged();
 }
 
 function loadTombstones() {
@@ -343,6 +344,7 @@ function loadFees() {
 
 function saveFees() {
   try { localStorage.setItem(deps.accountScopedKey(FEES_KEY), JSON.stringify(fees)); } catch { /* quota */ }
+  notePortfolioChanged();
 }
 
 /// A deleted portfolio's fees go with it (iOS forgetPortfolio). Its rows already do: they live
@@ -2134,18 +2136,16 @@ function saveTxEditor() {
 function buildCsvExport() {
   const portfolio = activePortfolio();
   if (!(portfolio.transactions || []).length) { deps.showToast?.("Nothing to export yet. Add a transaction first"); return null; }
-  // iOS's file-name time: ISO 8601 in UTC, whole seconds, "Z", with ":" made "-".
-  const stamp = `${new Date().toISOString().slice(0, 19)}Z`.replace(/:/g, "-");
-  return { filename: `${portfolioExportBaseName(portfolio)} ${stamp}.csv`, csv: portfolioCsvText(portfolio) };
+  return { filename: `${portfolioExportBaseName(portfolio)}.csv`, csv: portfolioCsvText(portfolio) };
 }
 
-/** The export's file name: the name the portfolio has in the app ("Long Term 2026-10-08T...Z.csv"),
- *  so it is recognizable in Downloads and Nextcloud; "KaChat Portfolio" when it has none.
- *  Characters a file name can't hold are dropped, and it stops at 60 characters (iOS 87b2a0b). */
+/** The export's file name: the name the portfolio has in the app ("Long Term.csv"), so each portfolio
+ *  has its own file, recognizable in Downloads and Nextcloud; "Portfolio" when it has none (KaPay
+ *  953b255). Characters a file name can't hold are dropped, and it stops at 60 characters. */
 function portfolioExportBaseName(portfolio) {
   // eslint-disable-next-line no-control-regex
   const cleaned = String(portfolio?.name ?? "").replace(/[/\\:?*"<>|\u0000-\u001f\u007f-\u009f]/g, "").trim();
-  return cleaned ? Array.from(cleaned).slice(0, 60).join("") : "KaChat Portfolio";
+  return cleaned ? Array.from(cleaned).slice(0, 60).join("") : "Portfolio";
 }
 
 async function exportCsv() {
@@ -3174,8 +3174,19 @@ export function portfolioArchive() {
  *  active portfolio is this device's own and stays put when it survives. True when applied. */
 export function importPortfolioArchive(archive) {
   if (!deps) return false;
-  const incoming = portfolioSyncFromArchive(archive);
-  if (isPortfolioSyncEmpty(incoming)) return false;
+  return importPortfolioSync(portfolioSyncFromArchive(archive));
+}
+
+/** What this account keeps on Nextcloud: everything but an untouched "Portfolio 1" seed. */
+export function portfolioBackupSync() {
+  if (!deps) return null;
+  return mergePortfolioSync([portfolioSyncForArchive(currentPortfolioSync())]);
+}
+
+/** Merges `incoming` in (per item the newest edit or deletion wins) and reloads. True when anything
+ *  changed. */
+export function importPortfolioSync(incoming) {
+  if (!deps || isPortfolioSyncEmpty(incoming)) return false;
   const local = currentPortfolioSync();
   const merged = mergePortfolioSync([local, incoming]);
   // Compared in the merge's own order, so an archive that adds nothing writes nothing.

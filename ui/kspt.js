@@ -17,6 +17,7 @@
 import { getEndpoint } from "../engine/endpoints.js";
 import { isNetworkAddress, otherNetworkReason } from "../engine/network.js";
 import { submitConfirmingAcceptance } from "../engine/transactions.js";
+import { maxFeerate } from "../engine/kachat-names/codec.js";
 
 // Matches firmware MAX_INPUTS=32 as of KasSigner v1.0.5 (was 8; devices on older
 // firmware reject >8-input — and pre-1.0.5, even >5-input — transactions).
@@ -385,7 +386,8 @@ export async function fetchQuotedFeeRateSompiPerGram() {
     if (!response.ok) return MIN_RELAY_FEE_PER_GRAM;
     const decoded = await response.json();
     const quoted = decoded?.normalBuckets?.[0]?.feerate;
-    if (!Number.isFinite(quoted)) return MIN_RELAY_FEE_PER_GRAM;
+    // One server answering NaN, infinity or 1e30 is ignored rather than paid (KaPay 953b255).
+    if (!Number.isFinite(quoted) || quoted < 0 || quoted > maxFeerate) return MIN_RELAY_FEE_PER_GRAM;
     const rate = BigInt(Math.ceil(quoted));
     return rate > MIN_RELAY_FEE_PER_GRAM ? rate : MIN_RELAY_FEE_PER_GRAM;
   } catch {

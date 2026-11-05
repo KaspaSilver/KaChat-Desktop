@@ -2,6 +2,7 @@ import { NETWORK_ID, validateMainnetAddress, sompiToKaspaDisplay } from "./utils
 import { kasToSompi, utxoAmountSompi, MAX_U64, checkedUtxoAnswer } from "./amounts.js";
 import { getEndpoint } from "./endpoints.js";
 import { hex } from "./kachat-names/codec.js";
+import { isRpcConnectionError } from "./rpc.js";
 import { isP2shScript, quantumScriptPublicKey, kip22SignatureScript, sdkTransactionKip22ExtraMass, signedSdkTransactionComputeMass, verifyKip22Spend } from "./quantum.js";
 
 // Every real send (messages, handshakes, self-stash, KAS payments, KNS
@@ -86,29 +87,82 @@ async function fetchUtxoEntries({ rpc, withRpc, sourceAddress, label }) {
 // id (known before the submit) is looked up: in the node's mempool, else accepted per the REST
 // API, twice a moment apart. Found means the send went out.
 const ACCEPTANCE_RECHECK_MS = 1500;
+/** One look for `id`: in a mempool, or accepted (REST API). */
+async function lookUpTransaction({ rpc, withRpc, id }) {
+  try {
+    const lookup = async (activeRpc) => {
+      if (typeof activeRpc?.getMempoolEntry !== "function") return null;
+      return activeRpc.getMempoolEntry({ transactionId: id, includeOrphanPool: true, filterTransactionPool: false });
+    };
+    const entry = withRpc ? await withRpc(lookup, { retries: 0, label: "Mempool lookup" }) : await lookup(rpc);
+    if (entry?.mempoolEntry || entry?.entry) return true;
+  } catch { /* not in this node's mempool (or no answer): ask the REST API */ }
+  try {
+    const base = String(getEndpoint("kaspaApi") || "").replace(/\/+$/, "");
+    if (base && typeof fetch === "function") {
+      const response = await fetch(`${base}/transactions/${id}?inputs=false&outputs=false&resolve_previous_outpoints=no`, { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (response.ok && (await response.json())?.is_accepted === true) return true;
+    }
+  } catch { /* unknown: treated as not found */ }
+  return false;
+}
 /** Whether the network already has `txid`: in a mempool, or accepted (REST API). */
 export async function isTransactionKnown({ rpc = null, withRpc = null, txid } = {}) {
   const id = String(txid || "").trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(id)) return false;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) await sleep(ACCEPTANCE_RECHECK_MS);
-    try {
-      const lookup = async (activeRpc) => {
-        if (typeof activeRpc?.getMempoolEntry !== "function") return null;
-        return activeRpc.getMempoolEntry({ transactionId: id, includeOrphanPool: true, filterTransactionPool: false });
-      };
-      const entry = withRpc ? await withRpc(lookup, { retries: 0, label: "Mempool lookup" }) : await lookup(rpc);
-      if (entry?.mempoolEntry || entry?.entry) return true;
-    } catch { /* not in this node's mempool (or no answer): ask the REST API */ }
-    try {
-      const base = String(getEndpoint("kaspaApi") || "").replace(/\/+$/, "");
-      if (base && typeof fetch === "function") {
-        const response = await fetch(`${base}/transactions/${id}?inputs=false&outputs=false&resolve_previous_outpoints=no`, { headers: { Accept: "application/json" }, cache: "no-store" });
-        if (response.ok && (await response.json())?.is_accepted === true) return true;
-      }
-    } catch { /* unknown: treated as not found */ }
+    if (await lookUpTransaction({ rpc, withRpc, id })) return true;
   }
   return false;
+}
+
+// A send a node may have received without ever answering, which the network doesn't have yet (iOS
+// fdb32549, MESSAGING.md "When a send's outcome isn't known"). It may still land, so nothing should
+// offer to send it again: the swipe-up screen shows "Not confirmed" with this message and only Done.
+export const SEND_OUTCOME_UNKNOWN = "SEND_OUTCOME_UNKNOWN";
+export const SEND_OUTCOME_UNKNOWN_MESSAGE = "This may have gone through, but the network didn't confirm it. Check your balance before sending again.";
+export function sendOutcomeUnknownError(txid) {
+  const error = new Error(SEND_OUTCOME_UNKNOWN_MESSAGE);
+  error.code = SEND_OUTCOME_UNKNOWN;
+  error.txid = txid;
+  return error;
+}
+/** A submit that reached a node and got no answer: a timeout or a dropped stream. A connection that
+ *  was never open means no node saw it, and an error the node sent is its answer. */
+export function isLostSubmitAnswer(error) {
+  return isRpcConnectionError(error) && !/not connected/i.test(String(error?.message || error || ""));
+}
+const LOST_ANSWER_LOOKUPS = 6;
+export const LOST_ANSWER_WAIT_MS = 3000;
+/** Asks the network for longer than isTransactionKnown does, for one that's still on its way. */
+async function confirmAfterLostAnswer({ rpc, withRpc, txid, log, waitMs = LOST_ANSWER_WAIT_MS }) {
+  const id = String(txid).trim().toLowerCase();
+  for (let attempt = 0; attempt < LOST_ANSWER_LOOKUPS; attempt++) {
+    await sleep(waitMs);
+    if (await lookUpTransaction({ rpc, withRpc, id })) return String(txid);
+  }
+  log(`Submit of ${txid} got no answer and the network doesn't have it yet: outcome unknown.`);
+  throw sendOutcomeUnknownError(String(txid));
+}
+// Nodes are unauthenticated, so a "sent" answer is only a claim (KaPay 953b255). A transaction the
+// network can't see a moment later goes out again in the background, in case the node that answered
+// kept it to itself. It's the same transaction, so sending it again can't pay twice.
+export const SUBMIT_RECHECK_MS = 5000;
+const SUBMIT_RECHECKS = 2;
+function resendIfUnseen({ rpc, withRpc, txid, resend, log, waitMs }) {
+  let round = 0;
+  const check = async () => {
+    round += 1;
+    try {
+      if (await isTransactionKnown({ rpc, withRpc, txid })) return;
+      log(`The network can't see ${txid} yet: sending it again.`);
+      await resend();
+    } catch { /* the first answer stands */ }
+    if (round < SUBMIT_RECHECKS) schedule();
+  };
+  const schedule = () => { setTimeout(check, waitMs)?.unref?.(); };
+  schedule();
 }
 // "Orphan where orphan is disallowed" (iOS 4eb492f, NodePoolService.submitTransaction): the
 // inputs came from a node that already has their parent transaction (the UTXO query), but the
@@ -126,34 +180,53 @@ export function isOrphanRejection(error) {
  * transaction id. `submit` should pass `allowOrphan` on to `submitTransaction` (default false).
  * An orphan rejection waits `orphanWaitMs`, resubmits once, then submits allowing an orphan (see
  * above). On any other error, a transaction the network already has (`txid`, computed locally)
- * counts as sent; anything else is rethrown. Every submit in this file goes through here.
+ * counts as sent, one a node may have received without answering ends in SEND_OUTCOME_UNKNOWN unless
+ * a longer look finds it, and anything else is rethrown. A node's answer only counts if its id is
+ * `txid`. Every submit in this file goes through here.
  */
-export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, label = "Transaction broadcast", log = () => {}, orphanWaitMs = ORPHAN_WAIT_MS }) {
+export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, label = "Transaction broadcast", log = () => {}, orphanWaitMs = ORPHAN_WAIT_MS, lostAnswerWaitMs = LOST_ANSWER_WAIT_MS, recheckMs = SUBMIT_RECHECK_MS }) {
+  let answerLost = false;
   const submitOnce = async (allowOrphan) => {
-    const run = (activeRpc) => submit(activeRpc, { allowOrphan });
+    const run = async (activeRpc) => {
+      try { return await submit(activeRpc, { allowOrphan }); }
+      catch (error) { answerLost = answerLost || isLostSubmitAnswer(error); throw error; }
+    };
     const response = withRpc ? await withRpc(run, { retries: 1, label }) : await run(rpc);
     const returned = typeof response === "string" ? response : response?.transactionId;
     return String(returned || txid || "");
   };
+  const checked = async (sent) => {
+    if (!txid) return sent;
+    if (sent.toLowerCase() !== String(txid).toLowerCase()) {
+      log(`${label}: a node answered with ${sent} instead of ${txid}.`);
+      if (await isTransactionKnown({ rpc, withRpc, txid })) return String(txid);
+      return confirmAfterLostAnswer({ rpc, withRpc, txid, log, waitMs: lostAnswerWaitMs });
+    }
+    resendIfUnseen({ rpc, withRpc, txid, resend: () => submitOnce(false), log, waitMs: recheckMs });
+    return sent;
+  };
+  let sent;
   try {
-    return await submitOnce(false);
+    sent = await submitOnce(false);
   } catch (error) {
     if (isOrphanRejection(error)) {
       log(`${label}: the node called ${txid || "the transaction"} an orphan (its parent hasn't reached it yet); waiting ${orphanWaitMs}ms and submitting the same transaction again.`);
       await sleep(orphanWaitMs);
-      try { return await submitOnce(false); } catch { /* still not there: let the node hold it */ }
+      try { return await checked(await submitOnce(false)); } catch (retryError) { if (retryError?.code === SEND_OUTCOME_UNKNOWN) throw retryError; /* still not there: let the node hold it */ }
       try {
-        const sent = await submitOnce(true);
-        log(`${label}: ${String(sent).slice(0, 12)} submitted as an orphan: its parent hadn't reached that node yet.`);
-        return sent;
-      } catch { /* fall through to the acceptance check with the original error */ }
+        const orphaned = await submitOnce(true);
+        log(`${label}: ${String(orphaned).slice(0, 12)} submitted as an orphan: its parent hadn't reached that node yet.`);
+        return await checked(orphaned);
+      } catch (retryError) { if (retryError?.code === SEND_OUTCOME_UNKNOWN) throw retryError; /* fall through to the acceptance check with the original error */ }
     }
     if (txid && await isTransactionKnown({ rpc, withRpc, txid })) {
       log(`${label}: the submit reported "${error?.message || error}" but the network has ${txid}; treated as sent.`);
       return String(txid);
     }
+    if (txid && answerLost) return confirmAfterLostAnswer({ rpc, withRpc, txid, log, waitMs: lostAnswerWaitMs });
     throw error;
   }
+  return checked(sent);
 }
 
 // Coins reserved by scheduled KaPosts (KAPOSTS_INDEXER.md §5.10): a signed transaction waiting

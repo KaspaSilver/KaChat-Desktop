@@ -78,7 +78,7 @@ export function initKachatNamesRuntime(engine, { wallet = null, onSubmitted = nu
   engine.setKachatNameHooks?.({
     resolve: async (canonical) => {
       await registry.refreshIfStale();
-      return registry.resolveHeld(canonical);
+      return registry.resolveHeldOnChain(canonical, service);
     },
     ownsAny: async (address) => {
       const key = KachatNamesRegistry.keyOf(address);

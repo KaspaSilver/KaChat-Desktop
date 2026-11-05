@@ -14491,6 +14491,7 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 /* Separate iOS Form sections sit apart, not stacked card on card. */
 .settings-screen .settings-list-card + .settings-list-card { margin-top: 32px; }
 .settings-screen .settings-group-footer { font-size: 14px; }
+.settings-group-footer.settings-footer-error { color: var(--ios-red); }
 .settings-screen .settings-group-footer + .settings-group-label { margin-top: 22px; }
 [data-quick-reactions-preview] { font-size: 16px; letter-spacing: 0; }
 /* A plain trailing value (iOS secondary Text in a row), at body size. */
@@ -15221,13 +15222,15 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
 .sk-swipe-dag canvas { position: absolute; inset: 0; width: 100%; height: 100%; color: var(--text); transition: opacity .35s ease; }
 .sk-swipe-dag canvas.dimmed { opacity: .35; }
 .sk-swipe-mark { position: relative; z-index: 1; width: 72px; height: 72px; display: none; }
-.sk-swipe-mark.done, .sk-swipe-mark.failed { display: block; animation: sk-swipe-pop .35s ease; }
+.sk-swipe-mark.done, .sk-swipe-mark.failed, .sk-swipe-mark.unknown { display: block; animation: sk-swipe-pop .35s ease; }
 .sk-swipe-mark svg { width: 72px; height: 72px; }
 .sk-swipe-mark-ink { fill: none; stroke-width: 6; stroke-linecap: round; stroke-linejoin: round; }
 .sk-swipe-mark.done .sk-swipe-mark-fill { fill: var(--kaspa); }
 .sk-swipe-mark.done .sk-swipe-mark-ink { stroke: #000; }
 .sk-swipe-mark.failed .sk-swipe-mark-fill { fill: var(--ios-red); }
 .sk-swipe-mark.failed .sk-swipe-mark-ink { stroke: #fff; }
+.sk-swipe-mark.unknown .sk-swipe-mark-fill { fill: var(--ios-orange); }
+.sk-swipe-mark.unknown .sk-swipe-mark-ink { stroke: #000; }
 @keyframes sk-swipe-pop { from { transform: scale(.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .sk-swipe-lines { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 24px 0 0; text-align: center; }
 .sk-swipe-big { margin: 0; font-size: 34px; font-weight: 700; line-height: 1.15; }
@@ -15239,6 +15242,7 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
   background: var(--glass-fill, var(--fill-tertiary)); border: .8px solid var(--glass-stroke, transparent);
   color: var(--ios-red); font-size: 15px; line-height: 1.35; animation: sk-swipe-fade .35s ease;
 }
+.sk-swipe-failure.unknown { color: var(--ios-orange); }
 .sk-swipe-failure svg { flex: 0 0 18px; width: 18px; height: 18px; margin-top: 1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .sk-swipe-tx { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px 24px 0; animation: sk-swipe-fade .35s ease; }
 .sk-swipe-tx .sk-sent-txid { margin: 0; }
@@ -15374,6 +15378,9 @@ body.settings-tab [data-account-overlay] .settings-done-button { visibility: hid
 .wallet-squares { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .wallet-square { aspect-ratio: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 10px; color: var(--text); font: inherit; text-align: center; cursor: pointer; }
 .wallet-square strong { font-size: 15px; font-weight: 600; }
+/* As wide as half a large window a square would fill most of the screen with nothing, so there it
+   keeps the width and a set height (KaPay 652c8af). */
+@media (min-width: 768px) { .wallet-square { aspect-ratio: auto; height: 170px; } }
 .wallet-square-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%; background: var(--fill-tertiary); color: var(--kaspa-ink); }
 .wallet-square-icon svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .wallet-square-icon svg.qr-glyph { fill: currentColor; stroke: none; }

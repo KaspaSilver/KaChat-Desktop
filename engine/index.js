@@ -1,8 +1,9 @@
 import { ADDRESS_PREFIX, NETWORK, IS_TESTNET } from "./network.js";
 import { loadKaspaModule } from "./wasm-loader.js";
+import { maxFeerate } from "./kachat-names/codec.js";
 import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, markBadNode, probeRpc, recordFailover } from "./rpc.js";
 import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, deriveSpendingAddressRange, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
-import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance } from "./transactions.js";
+import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance, SEND_OUTCOME_UNKNOWN } from "./transactions.js";
 import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain, SELF_STASH_ACCOUNT_CHANGED } from "./messages.js";
@@ -1133,7 +1134,7 @@ export class KaspaEngine {
     const bucket = (b) => {
       const feerate = Number(b?.feerate);
       const seconds = Number(b?.estimatedSeconds ?? b?.estimated_seconds ?? 0);
-      return Number.isFinite(feerate) && feerate > 0 ? { feerate, seconds: Number.isFinite(seconds) ? seconds : 0 } : null;
+      return Number.isFinite(feerate) && feerate > 0 && feerate <= maxFeerate ? { feerate, seconds: Number.isFinite(seconds) ? seconds : 0 } : null;
     };
     const priority = bucket(estimate?.priorityBucket ?? estimate?.priority_bucket);
     if (!priority) throw new Error("The node sent no fee estimate.");
@@ -1264,7 +1265,7 @@ export class KaspaEngine {
       ...maxSendOptions(options),
       redeemScript: spending.redeemScript || null,
       log: this.log,
-    });
+    }).catch((error) => this.noteSpendingOutcomeUnknown(error, spending, owner));
     this.noteSpendingSpent(spending, owner);
     return result;
   }
@@ -1320,6 +1321,12 @@ export class KaspaEngine {
     try { this.onQuantumAddressSpent?.(spending.address, spending.index, owner || null); } catch (error) { this.log?.(`Quantum spent mark failed: ${error?.message || error}`); }
   }
 
+  // A send that may have landed (iOS fdb32549): its key may be on chain, so it counts as spent.
+  noteSpendingOutcomeUnknown(error, spending, owner) {
+    if (error?.code === SEND_OUTCOME_UNKNOWN) this.noteSpendingSpent(spending, owner);
+    throw error;
+  }
+
   // --- Spending-address chain (m/44'/111111'/1'/0/<index>; quantum-safe m/22'/111111'/0'/0/<n> at
   // public index 1,000,000 + n, engine/quantum.js) ---
   // Derive a spending address/key from the account's recovery phrase. Does NOT
@@ -1367,7 +1374,7 @@ export class KaspaEngine {
       exactAmount: Boolean(exactAmount),
       redeemScript: spending.redeemScript || null,
       log: this.log,
-    });
+    }).catch((error) => this.noteSpendingOutcomeUnknown(error, spending, owner));
     this.noteSpendingSpent(spending, owner);
     return result;
   }
@@ -1407,8 +1414,9 @@ export class KaspaEngine {
         log: this.log,
       });
     } catch (error) {
-      // A chunked compound whose earlier transactions went out has spent already.
-      if (error?.submittedTxids?.length) this.noteSpendingSpent(spending, owner);
+      // A chunked compound whose earlier transactions went out has spent already, and one that
+      // never got an answer may have.
+      if (error?.submittedTxids?.length || error?.code === SEND_OUTCOME_UNKNOWN) this.noteSpendingSpent(spending, owner);
       throw error;
     }
     this.noteSpendingSpent(spending, owner);

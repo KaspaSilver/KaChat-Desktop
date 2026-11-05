@@ -22,6 +22,7 @@
 // interpolated here is escaped.
 
 import { otherNetworkReason } from "../engine/network.js";
+import { SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
 
 import { sanitizeAmountInput, groupedAmountText } from "../engine/amounts.js";
 import { splitTypedName, notFoundMessage } from "../engine/name-services.js";
@@ -1099,8 +1100,8 @@ export function closeSentConfirmation() {
 
 // --- Swipe up to send (iOS 59593af / 7abc06e8 SwipeUpToSendScrollView) --------------------------
 // The send screens' bottom bar: press "Swipe up to Send" and drag it up. The whole screen rises
-// with the finger and the sending screen comes up from below in its place. Let go past halfway and
-// it sends: the sending screen takes the whole sheet, a BlockDAG runs across it while the
+// with the finger and the sending screen comes up from below in its place. Let go about a third of
+// the way up and it sends (iOS fdb32549): the sending screen takes the whole sheet, a BlockDAG runs across it while the
 // transaction goes out, then it shows Sent (or the screen's own outcome) with Done, or Failed with
 // the screen's error and Try Again, which brings the form back as it was. Let go sooner and it
 // springs back. Only the bar answers, so scrolling the form never sends. A keyboard press or a
@@ -1110,15 +1111,15 @@ export function closeSentConfirmation() {
 export const SWIPE_UP_LABELS = {
   send: {
     release: "Release to Send", working: "Sending", workingDetail: "Broadcasting to the Kaspa BlockDAG...",
-    done: "Sent", hint: "Let go past halfway to send.", recipientWord: "to", failedFallback: "The send didn't go out.",
+    done: "Sent", hint: "Swipe up, then let go to send.", recipientWord: "to", failedFallback: "The send didn't go out.",
   },
   buy: {
     release: "Release to Buy", working: "Buying", workingDetail: "Sending the purchase to the Kaspa BlockDAG...",
-    done: "Name Bought", hint: "Let go past halfway to buy.", recipientWord: "for", failedFallback: "The purchase didn't go out.",
+    done: "Name Bought", hint: "Swipe up, then let go to buy.", recipientWord: "for", failedFallback: "The purchase didn't go out.",
   },
   claim: {
     release: "Release to Claim", working: "Claiming", workingDetail: "Committing to the Kaspa BlockDAG...",
-    done: "Claim Started", hint: "Let go past halfway to claim.", recipientWord: "for", failedFallback: "The claim didn't start.",
+    done: "Claim Started", hint: "Swipe up, then let go to claim.", recipientWord: "for", failedFallback: "The claim didn't start.",
   },
 };
 /** A send whose device check (Face ID / the password) was turned down (iOS KachatNamesLiveViews). */
@@ -1131,6 +1132,7 @@ const SWIPE_BAR_ICONS = {
 const SWIPE_MARKS = {
   done: '<svg viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="34" class="sk-swipe-mark-fill"/><path d="m22 37 9.5 9.5L51 27" class="sk-swipe-mark-ink"/></svg>',
   failed: '<svg viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="34" class="sk-swipe-mark-fill"/><path d="M25 25l22 22M47 25 25 47" class="sk-swipe-mark-ink"/></svg>',
+  unknown: '<svg viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="34" class="sk-swipe-mark-fill"/><path d="M27 28.5a9.2 9.2 0 1 1 13.7 8c-3 1.8-4.7 3.4-4.7 6.8M36 52.5v.1" class="sk-swipe-mark-ink"/></svg>',
 };
 const SWIPE_OPEN_ICON = '<svg class="sk-sent-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4.5A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"/></svg>';
 const SWIPE_FAIL_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19L12 3.5Z"/><path d="M12 10v4.5M12 17.2v.1"/></svg>';
@@ -1213,7 +1215,7 @@ export function createSwipeUpScreen(card, {
   let unit = kasUnit;
   let enabled = false;
   let busy = false;
-  // iOS state: how far the screen is pushed up, past halfway (armed), form / sending, the DAG's
+  // iOS state: how far the screen is pushed up, past the threshold (armed), form / sending, the DAG's
   // moment on screen, whether the send really started, and how it ended.
   let lift = 0;
   let armed = false;
@@ -1234,9 +1236,11 @@ export function createSwipeUpScreen(card, {
   const clearTimers = () => { for (const t of timers) clearTimeout(t); timers.clear(); };
   const active = () => enabled && !busy;
   const height = () => card.clientHeight || window.innerHeight;
-  const threshold = () => Math.max(160, height() * 0.5);
+  const threshold = () => Math.max(120, height() * 0.3);
   const finished = () => (dagShown && (sent || succeeded)) || (failed && dagShown);
   const failureText = () => (failed && dagShown ? (String(getFailureMessage?.() || "").trim() || words.failedFallback) : null);
+  // It may have gone through, so there's nothing to try again (iOS fdb32549 outcomeUnknown).
+  const outcomeUnknown = () => failureText() === SEND_OUTCOME_UNKNOWN_MESSAGE;
   const dag = blockDagAnimation(canvas);
 
   function paintBar() {
@@ -1264,9 +1268,10 @@ export function createSwipeUpScreen(card, {
     const sending = phase === "sending";
     dag.setHighlight(sending && !failure);
     dag.setDimmed(Boolean(done || failure));
-    els.mark.innerHTML = done ? SWIPE_MARKS.done : (failure ? SWIPE_MARKS.failed : "");
-    els.mark.className = `sk-swipe-mark${done ? " done" : failure ? " failed" : ""}`;
-    els.big.textContent = done ? words.done : failure ? "Failed" : (sending ? words.working : (armed ? words.release : "Keep Swiping"));
+    const unknown = !done && outcomeUnknown();
+    els.mark.innerHTML = done ? SWIPE_MARKS.done : (unknown ? SWIPE_MARKS.unknown : (failure ? SWIPE_MARKS.failed : ""));
+    els.mark.className = `sk-swipe-mark${done ? " done" : unknown ? " unknown" : failure ? " failed" : ""}`;
+    els.big.textContent = done ? words.done : unknown ? "Not confirmed" : failure ? "Failed" : (sending ? words.working : (armed ? words.release : "Keep Swiping"));
     const amount = sent?.amountSompi ?? preview.amountSompi;
     els.amount.hidden = amount == null;
     if (amount != null) els.amount.textContent = `${formatSompiPlain(amount)} ${unit}`;
@@ -1277,6 +1282,7 @@ export function createSwipeUpScreen(card, {
     els.detail.hidden = !showDetail;
     if (showDetail) els.detail.textContent = sending ? words.workingDetail : words.hint;
     els.failure.hidden = !failure;
+    els.failure.classList.toggle("unknown", unknown);
     if (failure) els.failureText.textContent = failure;
     const id = done && sent ? String(sent.txid || "").trim() : "";
     els.tx.hidden = !id;
@@ -1291,8 +1297,8 @@ export function createSwipeUpScreen(card, {
     els.outcome.hidden = !showOutcome;
     if (showOutcome && els.outcome.dataset.html !== outcomeHtml) { els.outcome.innerHTML = outcomeHtml; els.outcome.dataset.html = outcomeHtml; }
     els.final.hidden = !(done || failure);
-    els.final.textContent = done ? "Done" : "Try Again";
-    els.final.dataset.kind = done ? "done" : "retry";
+    els.final.textContent = done || unknown ? "Done" : "Try Again";
+    els.final.dataset.kind = done || unknown ? "done" : "retry";
     progress.classList.toggle("finished", Boolean(finished()));
   }
   function paint(animate = false) { paintBar(); place(animate); paintProgress(); }

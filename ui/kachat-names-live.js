@@ -1693,7 +1693,7 @@ function warningCardHtml(text) {
 function transactionSwipeLabels(done) {
   return {
     release: "Release to Confirm", working: "Sending", workingDetail: "Broadcasting to the Kaspa BlockDAG...",
-    done, hint: "Let go past halfway to confirm.", recipientWord: "for", failedFallback: "The transaction didn't go out.",
+    done, hint: "Swipe up, then let go to confirm.", recipientWord: "for", failedFallback: "The transaction didn't go out.",
   };
 }
 

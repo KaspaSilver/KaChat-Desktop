@@ -371,8 +371,13 @@ export function parseControlPayload(payloadString) {
 // the recipient verifies it by re-deriving group_id/blinding_key from it (see the consistency
 // check in group-store._applyRoot), which cryptographically binds it to the signed fields.
 // Members' copies omit it, and it is encrypted to the admin's own key, so members never see it.
-export function buildSignedRootPayload({ groupId, epoch, groupRootEpoch, blindingKey, adminSigningPub, members, name, adminPrivateKey, groupSeed = null }) {
+// `rosterVersion` orders the signature over `members` and `name`, which `sig` leaves out (iOS
+// 26c4d76d, MESSAGING.md "Signed rosters"). Every root written here carries both.
+export function buildSignedRootPayload({ groupId, epoch, groupRootEpoch, blindingKey, adminSigningPub, members, name, adminPrivateKey, groupSeed = null, rosterVersion = Date.now() }) {
   const sig = signBytes(buildRootSigningPayload({ v: 1, groupId, epoch, groupRootEpoch, blindingKey, adminSigningPub }), adminPrivateKey);
+  const memberList = Array.isArray(members) ? members.slice() : [];
+  const groupName = String(name || "");
+  const rosterSig = signBytes(buildRosterSigningPayload({ groupId, epoch, rosterVersion, members: memberList, name: groupName }), adminPrivateKey);
   const payload = {
     type: "gctl_root",
     v: 1,
@@ -381,9 +386,11 @@ export function buildSignedRootPayload({ groupId, epoch, groupRootEpoch, blindin
     group_root_epoch: bytesToHex(asBytes(groupRootEpoch)),
     blinding_key: bytesToHex(asBytes(blindingKey)),
     admin_signing_pub: bytesToHex(asBytes(adminSigningPub)),
-    members: Array.isArray(members) ? members.slice() : [],
-    name: String(name || ""),
+    members: memberList,
+    name: groupName,
     sig: bytesToHex(sig),
+    roster_version: Number(rosterVersion),
+    roster_sig: bytesToHex(rosterSig),
   };
   if (groupSeed) payload.group_seed = bytesToHex(asBytes(groupSeed));
   return payload;
@@ -400,6 +407,36 @@ export function verifyRootPayload(payload) {
       adminSigningPub: payload.admin_signing_pub,
     });
     return verifyBytes(payload.sig, signingPayload, payload.admin_signing_pub);
+  } catch { return false; }
+}
+
+// 0x01 || "gctl_roster" || group_id || epoch_le || roster_version_le || member count, then each
+// member's byte length and bytes || name byte length, name bytes. Members are lowercased and sorted
+// by their UTF-8 bytes, so every client signs the same bytes for the same list; the name is as sent.
+export function buildRosterSigningPayload({ groupId, epoch, rosterVersion, members, name }) {
+  const compareBytes = (a, b) => {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+    return a.length - b.length;
+  };
+  const sorted = (members || []).map((member) => utf8Bytes(String(member).toLowerCase())).sort(compareBytes);
+  const nameBytes = utf8Bytes(name);
+  return concatBytes(
+    new Uint8Array([1]), utf8Bytes("gctl_roster"), asBytes(groupId), leBytes8(epoch), leBytes8(rosterVersion), leBytes8(sorted.length),
+    ...sorted.flatMap((member) => [leBytes8(member.length), member]),
+    leBytes8(nameBytes.length), nameBytes,
+  );
+}
+
+// The root's roster_sig checks out against its own admin_signing_pub. Whether that's the group's
+// real admin is the same separate question as verifyRootPayload.
+export function verifyRosterPayload(payload) {
+  try {
+    if (payload.roster_version == null || !payload.roster_sig) return false;
+    const signingPayload = buildRosterSigningPayload({
+      groupId: payload.group_id, epoch: payload.epoch, rosterVersion: payload.roster_version,
+      members: Array.isArray(payload.members) ? payload.members : [], name: payload.name ?? "",
+    });
+    return verifyBytes(payload.roster_sig, signingPayload, payload.admin_signing_pub);
   } catch { return false; }
 }
 

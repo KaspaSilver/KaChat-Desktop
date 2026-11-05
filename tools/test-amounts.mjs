@@ -8,7 +8,7 @@ import {
 } from "../engine/amounts.js";
 
 globalThis.fetch = async () => new Response("", { status: 404 });
-const { sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, isTransactionKnown, sendKaspa } = await import("../engine/transactions.js");
+const { sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, isTransactionKnown, sendKaspa, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE, isLostSubmitAnswer } = await import("../engine/transactions.js");
 
 let pass = 0;
 const tests = [];
@@ -122,9 +122,69 @@ test("totalUtxoSompi refuses a set past u64", () => {
 // MARK: IOS-014 - a submit the network accepted is never a failure
 const TXID = "ab".repeat(32);
 test("submit success returns the node's id", async () => {
-  const txid = await submitConfirmingAcceptance({ rpc: {}, submit: async () => ({ transactionId: TXID }), txid: "cd".repeat(32) });
+  const txid = await submitConfirmingAcceptance({ rpc: { getMempoolEntry: async () => ({ mempoolEntry: {} }) }, submit: async () => ({ transactionId: TXID }), txid: TXID, recheckMs: 1 });
   assert.equal(txid, TXID);
 });
+// MARK: iOS fdb32549 / KaPay 953b255 - a send with no answer, and an answer that can't be believed
+const NOT_FOUND = { getMempoolEntry: async () => { throw new Error("not found"); } };
+const withNoRest = async (fn) => {
+  const saved = globalThis.fetch;
+  globalThis.fetch = async () => new Response("", { status: 404 });
+  try { return await fn(); } finally { globalThis.fetch = saved; }
+};
+test("a timed out submit the network never shows is unknown, not failed", () => withNoRest(async () => {
+  await assert.rejects(
+    submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => { throw new Error("Transaction broadcast timed out after 15 seconds."); }, txid: TXID, lostAnswerWaitMs: 1 }),
+    (error) => error.code === SEND_OUTCOME_UNKNOWN && error.txid === TXID && error.message === SEND_OUTCOME_UNKNOWN_MESSAGE,
+  );
+}));
+test("a timed out submit that turns up during the longer look counts as sent", () => withNoRest(async () => {
+  let looks = 0;
+  const rpc = { getMempoolEntry: async () => { looks += 1; return looks > 4 ? { mempoolEntry: {} } : null; } };
+  const txid = await submitConfirmingAcceptance({ rpc, submit: async () => { throw new Error("websocket closed"); }, txid: TXID, lostAnswerWaitMs: 1, recheckMs: 1 });
+  assert.equal(txid, TXID);
+  assert.ok(looks > 2, "past the ordinary look");
+}));
+test("no connection and a node's rejection stay plain failures", () => withNoRest(async () => {
+  for (const message of ["websocket is not connected", "fee too low"]) {
+    await assert.rejects(
+      submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => { throw new Error(message); }, txid: TXID, lostAnswerWaitMs: 1 }),
+      new RegExp(message),
+    );
+  }
+  assert.equal(isLostSubmitAnswer(new Error("connection lost")), true);
+  assert.equal(isLostSubmitAnswer(new Error("not connected")), false);
+}));
+test("a lost answer on the first node stays lost when the next one rejects it", () => withNoRest(async () => {
+  let calls = 0;
+  const withRpc = async (run) => run({ ...NOT_FOUND });
+  await assert.rejects(
+    submitConfirmingAcceptance({ withRpc, submit: async () => { calls += 1; throw new Error(calls === 1 ? "timed out" : "orphan"); }, txid: TXID, orphanWaitMs: 0, lostAnswerWaitMs: 1 }),
+    (error) => error.code === SEND_OUTCOME_UNKNOWN,
+  );
+}));
+test("an answer with another id doesn't count: the network has to have ours", () => withNoRest(async () => {
+  await assert.rejects(
+    submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => ({ transactionId: "cd".repeat(32) }), txid: TXID, lostAnswerWaitMs: 1 }),
+    (error) => error.code === SEND_OUTCOME_UNKNOWN && error.txid === TXID,
+  );
+  const known = { getMempoolEntry: async ({ transactionId }) => (transactionId === TXID ? { mempoolEntry: {} } : null) };
+  assert.equal(await submitConfirmingAcceptance({ rpc: known, submit: async () => ({ transactionId: "cd".repeat(32) }), txid: TXID, lostAnswerWaitMs: 1 }), TXID);
+}));
+test("a sent transaction the network can't see goes out again, at most twice", () => withNoRest(async () => {
+  let submits = 0;
+  const txid = await submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => { submits += 1; return TXID; }, txid: TXID, recheckMs: 1 });
+  assert.equal(txid, TXID);
+  assert.equal(submits, 1, "the send doesn't wait for this");
+  await new Promise((resolve) => setTimeout(resolve, 3600));
+  assert.equal(submits, 3);
+}));
+test("one the network can see isn't sent again", () => withNoRest(async () => {
+  let submits = 0;
+  await submitConfirmingAcceptance({ rpc: { getMempoolEntry: async () => ({ mempoolEntry: {} }) }, submit: async () => { submits += 1; return TXID; }, txid: TXID, recheckMs: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(submits, 1);
+}));
 test("a refused submit whose transaction is in the mempool counts as sent", async () => {
   const rpc = { getMempoolEntry: async ({ transactionId }) => (transactionId === TXID ? { mempoolEntry: { fee: 1n } } : null) };
   const txid = await submitConfirmingAcceptance({ rpc, submit: async () => { throw new Error("transaction already in the mempool"); }, txid: TXID });

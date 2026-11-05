@@ -16,7 +16,8 @@ import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHA
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
-import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE } from "../engine/transactions.js";
+import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, SEND_OUTCOME_UNKNOWN } from "../engine/transactions.js";
+import { isLeftoverSend, undeliveredRowFor, settleLeftoverGroupRows } from "./leftover-sends.js";
 import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody } from "../engine/payment-notice.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory, restPaymentSompiTo, restPaymentSender, fetchHeldPaymentRows, strangerPaymentStep } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
@@ -58,7 +59,7 @@ import {
   pickFromAddressBook, pickManyFromAddressBook, refreshAddressBookStorageRow, ADDRESS_BOOK_ICONS,
 } from "./address-book.js";
 import { NAME_SERVICES } from "../engine/name-services.js";
-import { initPortfolio, refreshPortfolio, resetPortfolioForAccount, portfolioArchive, importPortfolioArchive, portfolioAmountsHidden } from "./portfolio.js";
+import { initPortfolio, refreshPortfolio, resetPortfolioForAccount, portfolioBackupSync, importPortfolioSync, portfolioArchive, importPortfolioArchive, portfolioAmountsHidden } from "./portfolio.js";
 import { initColdStorage, refreshColdStorage, refreshColdStorageOnActivity, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openColdAddressHistory, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
 import {
@@ -6535,6 +6536,22 @@ async function syncOneConversation(conversationEntry, { quiet = true, catchUp = 
   }
 }
 
+// The chats whose leftover sends have been settled this run (ui/leftover-sends.js).
+const leftoverSendsSettled = new Set();
+function settleLeftoverSends(conversationEntry) {
+  if (leftoverSendsSettled.has(conversationEntry.id)) return false;
+  leftoverSendsSettled.add(conversationEntry.id);
+  let settled = false;
+  for (const message of conversationEntry.messages || []) {
+    if (message.direction === "outgoing" && isLeftoverSend(message)) {
+      applyMessagePatch(message, { status: MESSAGE_STATUSES.FAILED });
+      settled = true;
+    }
+  }
+  if (settled) appendEngineLog("A send left over from the last run was marked failed, so Retry appears.");
+  return settled;
+}
+
 async function syncOneConversationWork(conversationEntry, { quiet, catchUp, contact }) {
   // A record holding only a placeholder is not "known": its real text, once this account can read
   // it, replaces the body below (iOS c130dc1, preferMessage).
@@ -6605,7 +6622,12 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
   }
   // What this wallet sent from another device, read back with the seed (iOS bfe9f022): never news.
   // Not while a send of ours is on its way: it may be in this answer before it has its txid here.
-  if (indexerUrl && contact.address !== engine.address && !(conversationEntry.messages || []).some((m) => m.direction === "outgoing" && !m.txid && m.status !== MESSAGE_STATUSES.FAILED)) {
+  // A send left by a run that ended isn't on its way (iOS fdb32549): it's settled below, once.
+  const leftover = (m) => !leftoverSendsSettled.has(conversationEntry.id) && isLeftoverSend(m);
+  const sendsInFlight = (conversationEntry.messages || []).some((m) => m.direction === "outgoing" && !m.txid && m.status !== MESSAGE_STATUSES.FAILED && !leftover(m));
+  let sentCopiesRead = !indexerUrl || contact.address === engine.address;
+  let sentReplaced = false;
+  if (indexerUrl && contact.address !== engine.address && !sendsInFlight) {
     try {
       const sent = await engine.syncSentMessages({
         conversationId: conversationEntry.id, contact, indexerUrl,
@@ -6623,13 +6645,24 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
         const message = createMessage({ ...outgoing, conversationId: conversationEntry.id, contactId: contact.id });
         applyMessagePatch(message, outgoing);
         if (placeholder) message.id = placeholder.id;
-        if (appendIncomingOrReactionMessage(conversationEntry, message)) sentAdded += 1;
+        // A send marked failed or left by an ended run did go out after all: this is that row.
+        const undelivered = placeholder ? null : undeliveredRowFor(conversationEntry.messages, message);
+        if (undelivered) {
+          conversationEntry.messages = conversationEntry.messages.filter((m) => m !== undelivered);
+          message.id = undelivered.id;
+        }
+        if (appendIncomingOrReactionMessage(conversationEntry, message)) {
+          if (undelivered) sentReplaced = true;
+          else sentAdded += 1;
+        }
       }
       sentCursor = Number(sent.nextCursor || sentCursor);
+      sentCopiesRead = true;
     } catch (error) {
       appendEngineLog(`Sent message sync failed for ${contact.name}: ${error.message}`);
     }
   }
+  const sendsSettled = (sentCopiesRead && !sendsInFlight && settleLeftoverSends(conversationEntry)) || sentReplaced;
   // The self-chat does NOT run the incoming-payment sync: payments to your own chatting address
   // are already collected (with a self-send filter) by syncStrangerPaymentsIntoSelfChat. Running
   // it here surfaced every received payment/consolidation as a "Received X KAS" bubble.
@@ -6671,7 +6704,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
 
   const paymentStatusChanged = await refreshPendingPaymentStatuses(conversationEntry, contact);
   if (!account.still()) return added;
-  if (paymentStatusChanged) persistState();
+  if (paymentStatusChanged || sendsSettled) persistState();
   if (added) promoteRelationshipFromIncomingEvidence(contact, conversationEntry, { persist: false });
   conversationEntry.sync = {
     ...(conversationEntry.sync || {}), lastSyncAt: Date.now(), lastFound: added,
@@ -6683,7 +6716,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
   };
   // Backfill (restore / first sweep) is added as read; only live messages bump unread.
   if (liveAdded && activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + liveAdded;
-  if ((added || sentAdded || paymentStatusChanged) && activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+  if ((added || sentAdded || paymentStatusChanged || sendsSettled) && activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   if (!quiet && added) setStatus(`${added} new message${added === 1 ? "" : "s"}`);
   if (added || sentAdded) scheduleReplyGapRefetch(conversationEntry);
   // Returned for the caller's persist and repaint; a read-back was never "new".
@@ -8592,6 +8625,14 @@ function revealSpendingChangeAddress(fresh, owner = engine.address) {
     try { refreshSpendingSummary?.(); } catch {}
   });
   appendEngineLog(`Payment change went to ${spendingIndexTitle(fresh.index)}${isQuantumIndex(fresh.index) ? " (quantum-safe)" : ""} (${shortAddress(fresh.address)}); primary unchanged.${spendingChangeLogTail(target)}`);
+}
+/// A `.catch` for a spending send with fresh change: one whose outcome isn't known may have landed, so
+/// its change has to stay visible (iOS fdb32549). Rethrows either way.
+function keepChangeVisibleIfOutcomeUnknown(fresh, owner, note = revealSpendingChangeAddress) {
+  return (error) => {
+    if (fresh && error?.code === SEND_OUTCOME_UNKNOWN) runPostSubmitStep("Change-address reveal", () => note(fresh, owner));
+    throw error;
+  };
 }
 function rotatePrimarySpendingTo(fresh, owner = engine.address) {
   if (!fresh || !Number.isInteger(fresh.index)) return;
@@ -12659,7 +12700,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 266;
+const APP_BUILD = 267;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -14042,7 +14083,8 @@ const sendKaspaController = makeSendController({
         destinationAddress: destination, amountKas, feeKas,
         selectedOutpoints: outpoints,
         changeAddress: fresh?.address || null,
-      }).then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh, account.owner)); return result; }));
+      }).catch(keepChangeVisibleIfOutcomeUnknown(fresh, account.owner, rotatePrimarySpendingTo))
+        .then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh, account.owner)); return result; }));
     }
     return engine.send(destination, amountKas, feeKas, outpoints ? { selectedOutpoints: outpoints } : {});
   },
@@ -20373,7 +20415,7 @@ async function sendTipNow(tipSompi) {
           extraFeeSompi,
           manualUtxos: manualKeys,
           changeAddress: tipFresh?.address || null,
-        })
+        }).catch(keepChangeVisibleIfOutcomeUnknown(tipFresh, tipAccount.owner))
       : await engine.send(destinationAddress, amountKas, "0", payload
         ? { payload, exactAmount: true, extraFeeSompi, manualUtxos: manualKeys }
         : { extraFeeSompi, manualUtxos: manualKeys });
@@ -23993,7 +24035,7 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
             changeAddress: payFresh?.address || null,
             payload,
             exactAmount: true,
-          })
+          }).catch(keepChangeVisibleIfOutcomeUnknown(payFresh, spendingAccount.owner))
         : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true, extraFeeSompi: extraSompi, manualUtxos: manualKeys });
       if (payFresh) {
         // The node has the payment by now: a bookkeeping slip here must not mark it failed.
@@ -30400,6 +30442,9 @@ queueMicrotask(async () => {
       // The contacts file's envelope (NEXTCLOUD_SYNC.md §3). Writers always encrypt; the reader throws
       // on another wallet's file or a failed decrypt, so a sync aborts before it writes anything.
       sealBackupPayload: sealSharedBackupJson,
+      // The Portfolio's plain files beside it (KaPay 953b255).
+      portfolioBackupSync,
+      importPortfolioSync,
       openBackupPayload: openSharedBackupJson,
     });
   } catch (error) { appendEngineLog(`initNextcloud did not start: ${error?.message || error}`); }
@@ -31096,6 +31141,15 @@ function appendGroupMessage(groupId, message) {
     if (!existing.txId && message.txId) { existing.txId = message.txId; changed = true; }
     if (changed) saveGroupMessages(groupId, list);
     return false;
+  }
+  // A send marked failed did go out after all: its delivered copy takes the row's place (iOS fdb32549).
+  const mine = (m) => m.senderAddress === engine.address;
+  if (message.txId && mine(message)) {
+    const failedRow = undeliveredRowFor(list, message, { idOf: (m) => m.txId, mine });
+    if (failedRow?.status === MESSAGE_STATUSES.FAILED) {
+      list.splice(list.indexOf(failedRow), 1);
+      message.id = failedRow.id;
+    }
   }
   list.push(message);
   list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
@@ -33394,7 +33448,27 @@ async function syncGroupsNow({ catchUp = false } = {}) {
   if (!mgr || !engine.isKasiaCipherLoaded?.() || !currentIndexerUrl()) return 0;
   let result;
   try { result = await mgr.syncGroups(); } catch { return 0; }
-  return applyGroupSyncResult(result, { catchUp });
+  const changed = applyGroupSyncResult(result, { catchUp });
+  settleLeftoverGroupSends();
+  return changed;
+}
+
+/// Once per account per run, after its first catch-up has brought in any copy that did get delivered:
+/// that copy replaces a send left by an ended run, and anything else is marked failed (iOS fdb32549).
+const leftoverGroupSendsSettled = new Set();
+function settleLeftoverGroupSends() {
+  const wallet = engine.address || "";
+  if (leftoverGroupSendsSettled.has(wallet)) return;
+  leftoverGroupSendsSettled.add(wallet);
+  const all = loadGroupMsgAll();
+  let changed = false;
+  for (const list of Object.values(all[wallet] || {})) {
+    if (Array.isArray(list) && settleLeftoverGroupRows(list, { mine: (m) => m.senderAddress === wallet })) changed = true;
+  }
+  if (!changed) return;
+  saveGroupMsgAll(all);
+  if (activeGroupId) renderGroupMessages();
+  renderGroupList();
 }
 
 /// Stores what a group sync (or a group's Refresh Messages) brought back: messages, reactions and
