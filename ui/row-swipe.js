@@ -19,7 +19,7 @@ const SETTLE_MS = 220;
 /** What a chat row's swipes offer. `left` is in iOS's order, first nearest the screen's edge, so
  *  Delete sits at the far right; your own chat has only Silence (it can't be deleted, and it is
  *  already first in the list). `right` follows the unread state. */
-export function chatRowSwipeActions({ isSelf = false, unread = 0, isSilent = false, isPinned = false } = {}) {
+export function chatRowSwipeActions({ isSelf = false, unread = 0, isSilent = false, isPinned = false, canPin = true } = {}) {
   const silence = isSilent
     ? { id: "silence", title: "Unsilence", icon: "bell", tint: "orange" }
     : { id: "silence", title: "Silence", icon: "bellSlash", tint: "orange" };
@@ -27,7 +27,7 @@ export function chatRowSwipeActions({ isSelf = false, unread = 0, isSilent = fal
     ? { id: "pin", title: "Unpin", icon: "unpin", tint: "accent" }
     : { id: "pin", title: "Pin", icon: "pin", tint: "accent" };
   return {
-    left: isSelf ? [silence] : [{ id: "delete", title: "Delete", icon: "trash", tint: "red" }, silence, pin],
+    left: isSelf ? [silence] : [{ id: "delete", title: "Delete", icon: "trash", tint: "red" }, silence, ...(canPin ? [pin] : [])],
     right: [unread > 0
       ? { id: "read", title: "Mark as Read", icon: "envelopeOpen", tint: "accent" }
       : { id: "unread", title: "Mark as Unread", icon: "envelopeBadge", tint: "accent" }],

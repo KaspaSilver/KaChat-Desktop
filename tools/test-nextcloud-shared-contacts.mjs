@@ -1,5 +1,6 @@
 // node tools/test-nextcloud-shared-contacts.mjs - the contacts file shared with KaPay (iOS 6c80aea3,
-// KaPay 99ab88a, NEXTCLOUD_SYNC.md §9). The first half drives the store's merge directly; the second
+// KaPay 99ab88a, NEXTCLOUD_SYNC.md §9) and the encrypted contacts backup (iOS 4314e17e,
+// NEXTCLOUD_SYNC.md "Contacts only"). The first half drives the store's merge directly; the second
 // runs the real ui/nextcloud.js (through Vite, for import.meta.env) against an in-memory WebDAV
 // server. No real Nextcloud is involved: the fake answers only what these paths need.
 import assert from "node:assert/strict";
@@ -173,8 +174,8 @@ globalThis.fetch = async (url, init = {}) => {
 function storeAccount(address, fields = {}) {
   local.setItem(`${PREFIX}:${address}:kachat-nextcloud-v1`, JSON.stringify({
     server: "https://cloud.example.test", username: "sam", userId: "sam", appPassword: "app-pass",
-    startFolder: null, backupFolder: null, autoBackup: true, autoRestoreDone: true,
-    lastAutoBackup: Date.now(), backupFolderScanned: 2, ...fields,
+    startFolder: null, backupFolder: null, autoBackup: true,
+    lastAutoBackup: Date.now(), backupFolderScanned: 3, ...fields,
   }));
 }
 
@@ -186,12 +187,13 @@ const vite = await createServer({
 });
 const store = await vite.ssrLoadModule("/ui/address-book-store.js");
 const nextcloud = await vite.ssrLoadModule("/ui/nextcloud.js");
+const { sealBackupEnvelope, openBackupEnvelope } = await vite.ssrLoadModule("/ui/backup-crypto.js");
 const {
   configureAddressBook, addressBookEntries, addressBookEntry, addressBookPhoto, saveAddressBookEntry, removeAddressBookEntry,
   mergeSharedContactsFile, sharedContactsFileJson, addressBookHoldsWallet, addressBookHasBackupData, archiveAddressBook,
   importAddressBookArchive, importAddressBookExport, addressBookExportJson, onAddressBookChange,
 } = store;
-const { initNextcloud, syncSharedContacts, resetNextcloudForAccount } = nextcloud;
+const { initNextcloud, syncSharedContacts, resetNextcloudForAccount, runBackup, checkForRemoteChangeAndImport, deleteRemoteNextcloudBackup } = nextcloud;
 
 const scopedKey = (base, w = wallet) => (String(w || "").trim() ? `${PREFIX}:${String(w).trim()}:${base}` : base);
 function fresh({ activeWallet = WALLET_A } = {}) {
@@ -476,7 +478,10 @@ test("the encrypted backup's contacts keep working: same book, no duplicates, to
 
 const logs = [];
 let backupsSealed = 0;
-let activeConversation = null;
+const BACKUP_KEY_HEX = "11".repeat(32);
+const BACKUP_PATH = "KaChat/kachat-contacts.json";
+const sealFor = (address, json) => sealBackupEnvelope(json, BACKUP_KEY_HEX, address);
+const openFor = (address, raw) => openBackupEnvelope(raw, BACKUP_KEY_HEX, address);
 const toFake = (activeWallet, fields) => {
   fresh({ activeWallet });
   dav.reset();
@@ -490,11 +495,8 @@ function startModule() {
   initNextcloud({
     accountScopedKey: (base, address = wallet) => scopedKey(base, address),
     escapeHtml: (s) => String(s), appendEngineLog: (line) => logs.push(line), showToast() {},
-    getActiveConversationId: () => activeConversation,
-    hasMessageActivitySignal: true,
-    exportBackupPayload: async () => { backupsSealed += 1; return "{\"sealed\":true}"; },
-    openBackupPayload: async (raw) => raw,
-    importPhoneArchive: () => ({ messages: 0, conversations: 0 }),
+    sealBackupPayload: async (json) => { backupsSealed += 1; return sealFor(wallet, json); },
+    openBackupPayload: async (raw) => openFor(wallet, raw),
   });
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -527,11 +529,11 @@ test("Build 259: a custom backup folder doesn't move the file; it stays where Ka
     await syncSharedContacts();
     assert.deepEqual(dav.writes(FILE_PATH).length, 1, backupFolder);
     assert.equal([...dav.files.keys()].some((k) => k.includes("/kachat/") || k.includes("Apps/")), false);
-    // The chat backup still goes where the setting says.
+    // The contacts backup still goes where the setting says.
     dav.folders.add("sam/Apps");
     await backUpNow();
-    const key = [...dav.files.keys()].find((k) => k.endsWith("/kachat-backup.json"));
-    assert.equal(key, `sam/${backupFolder}/kachat-backup.json`);
+    const key = [...dav.files.keys()].find((k) => k.endsWith("/kachat-contacts.json"));
+    assert.equal(key, `sam/${backupFolder}/kachat-contacts.json`);
   }
 });
 
@@ -700,31 +702,31 @@ test("one at a time: a second sync during the first does nothing", async () => {
   assert.equal(dav.writes(FILE_PATH).length, 1);
 });
 
-test("Back Up Now merges first, so the chat backup carries KaPay's contacts", async () => {
+test("Back Up Now merges first, so the contacts backup carries KaPay's contacts", async () => {
   toFake(WALLET_A, { autoBackup: false });
   dav.put("sam", FILE_PATH, SWIFT_FILE);
   startModule();
   let bookAtSeal = null;
   const sealsBefore = backupsSealed;
   const realHook = async ({ method, path }) => {
-    if (method === "GET" && path === "KaChat/kachat-backup.json") bookAtSeal = addressBookEntries().map((e) => e.address).sort();
+    if (method === "GET" && path === BACKUP_PATH) bookAtSeal = addressBookEntries().map((e) => e.address).sort();
   };
   dav.hook = realHook;
   await backUpNow();
   assert.deepEqual(bookAtSeal, [ALICE, BOB].sort());
   assert.equal(backupsSealed, sealsBefore + 1);
-  assert.ok(dav.get("sam", "KaChat/kachat-backup.json"));
+  assert.ok(dav.get("sam", BACKUP_PATH));
   const order = dav.log.map((r) => `${r.method} ${r.path}`);
-  assert.ok(order.indexOf(`GET ${FILE_PATH}`) < order.indexOf("GET KaChat/kachat-backup.json"));
+  assert.ok(order.indexOf(`GET ${FILE_PATH}`) < order.indexOf(`GET ${BACKUP_PATH}`));
 });
 
-test("a problem with the contacts file never stops the chat backup", async () => {
+test("a problem with KaPay's file never stops the contacts backup", async () => {
   toFake(WALLET_A, { autoBackup: false });
   dav.put("sam", FILE_PATH, "<html>not contacts</html>");
   saveAddressBookEntry({ address: ALICE, name: "Alice" });
   startModule();
   await backUpNow();
-  assert.ok(dav.get("sam", "KaChat/kachat-backup.json"), "the chat backup went up");
+  assert.ok(dav.get("sam", BACKUP_PATH), "the contacts backup went up");
   assert.equal(dav.get("sam", FILE_PATH), "<html>not contacts</html>", "the unreadable file is untouched");
   assert.ok(logs.some((line) => line.includes("Syncing contacts with KaPay failed")));
 });
@@ -747,7 +749,7 @@ test("the app pulls changes on open, at most once a minute, only with Automatic 
   const reads = () => dav.log.filter((r) => r.method === "GET" && r.path === FILE_PATH).length;
   assert.equal(reads(), 1);
 
-  // What it brought is owed to the chat backup: leaving the app flushes it, which merges first.
+  // What it brought is owed to the contacts backup: leaving the app flushes it, which merges first.
   const sealsBefore = backupsSealed;
   document.visibilityState = "hidden";
   documentListeners.get("visibilitychange")();
@@ -775,11 +777,9 @@ test("the app pulls changes on open, at most once a minute, only with Automatic 
   assert.equal(reads(), 3);
   assert.ok(addressBookEntry(DAVE));
 
-  // So does a change-watcher tick (opening a chat wakes the watcher), a minute on.
+  // So does a change-watcher tick, a minute on.
   nowOffset += 61_000;
-  activeConversation = "chat";
   await sleep(1500);
-  activeConversation = null;
   assert.equal(reads(), 4);
 
   // An account switch looks straight away, for the new account.
@@ -793,6 +793,168 @@ test("the app pulls changes on open, at most once a minute, only with Automatic 
   // Quiet again before the next test: nothing automatic outlives it.
   storeAccount(WALLET_B, { autoBackup: false });
   resetNextcloudForAccount();
+});
+
+// --- The contacts backup (iOS 4314e17e) -----------------------------------------------------------
+
+const contactsFile = (entries, { deleted = [], walletAddress = WALLET_A } = {}) => JSON.stringify({
+  type: "kachat-address-book", version: 1, exportedAt: "2026-11-05T10:00:00Z", walletAddress, entries, deleted,
+});
+const contactRow = (address, name, updatedAt = "2026-11-01T10:00:00Z") => ({
+  id: UUID_1, address, name, note: "", createdAt: "2026-10-01T10:00:00Z", updatedAt,
+});
+const writesTo = (path) => dav.log.filter((r) => (r.method === "PUT" && r.path === path)
+  || (r.method === "MOVE" && r.path.startsWith(`KaChat/.${path.split("/").pop()}.upload-`)));
+
+
+test("a backup is one encrypted kachat-contacts.json holding the Address Book, and never the chat backup", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  saveAddressBookEntry({ address: ALICE, name: "Alice" });
+  dav.put("sam", "KaChat/kachat-backup.json", "{\"old\":true}");
+  startModule();
+  await runBackup();
+  const raw = dav.get("sam", BACKUP_PATH);
+  assert.ok(raw, "the file is there");
+  assert.equal(JSON.parse(raw).kachatEncryptedBackup, 1);
+  assert.ok(!raw.includes("Alice") && !raw.includes(ALICE), "nothing readable on the server");
+  const inside = JSON.parse(await openFor(WALLET_A, raw));
+  assert.equal(inside.type, "kachat-address-book");
+  assert.equal(inside.walletAddress, WALLET_A);
+  assert.deepEqual(inside.entries.map((e) => e.address), [ALICE]);
+  assert.ok(Array.isArray(inside.deleted));
+  assert.equal(dav.get("sam", "KaChat/kachat-backup.json"), "{\"old\":true}");
+  assert.ok(!dav.log.some((r) => r.path === "KaChat/kachat-backup.json"), "the old file is never even read");
+});
+
+test("an account with no contacts writes no file", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  startModule();
+  await runBackup();
+  assert.equal(dav.get("sam", BACKUP_PATH), undefined);
+  assert.equal(writesTo(BACKUP_PATH).length, 0);
+});
+
+test("a backup merges the file first and writes only what the file is missing", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  saveAddressBookEntry({ address: BOB, name: "Bob" });
+  dav.put("sam", BACKUP_PATH, await sealFor(WALLET_A, contactsFile([contactRow(ALICE, "Alice")])));
+  startModule();
+  await runBackup();
+  assert.equal(addressBookEntry(ALICE).name, "Alice", "the other device's contact came in");
+  const inside = JSON.parse(await openFor(WALLET_A, dav.get("sam", BACKUP_PATH)));
+  assert.deepEqual(inside.entries.map((e) => e.address).sort(), [ALICE, BOB].sort());
+  // Nothing new: read and left alone.
+  const before = writesTo(BACKUP_PATH).length;
+  await runBackup();
+  assert.equal(writesTo(BACKUP_PATH).length, before);
+});
+
+test("a deletion on another device stays deleted here", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  saveAddressBookEntry({ address: ALICE, name: "Alice" });
+  dav.put("sam", BACKUP_PATH, await sealFor(WALLET_A, contactsFile([], { deleted: [{ address: ALICE, deletedAt: "2099-01-01T00:00:00Z" }] })));
+  startModule();
+  await runBackup();
+  assert.equal(addressBookEntry(ALICE), null);
+});
+
+test("a file that can't be read as this account's contacts is never overwritten", async () => {
+  const cases = [
+    ["a plain file", contactsFile([contactRow(ALICE, "Alice")]), /isn't encrypted by KaChat/],
+    ["another wallet's file", await sealFor(WALLET_B, contactsFile([contactRow(ALICE, "Alice")], { walletAddress: WALLET_B })), /./],
+    ["a chat archive in the envelope", await sealFor(WALLET_A, JSON.stringify({ schemaVersion: 1, conversations: [] })), /./],
+    ["a file cut off on the way", `{"kachatEncryptedBackup":1,"cipher":"aes-256-gcm","nonce":"AAAA`, /arrived incomplete/],
+    ["a sign-in page", "<!doctype html><html></html>", /web page/],
+  ];
+  for (const [name, body, message] of cases) {
+    toFake(WALLET_A, { autoBackup: false });
+    saveAddressBookEntry({ address: BOB, name: "Bob" });
+    dav.put("sam", BACKUP_PATH, body);
+    startModule();
+    await assert.rejects(runBackup(), message, name);
+    assert.equal(dav.get("sam", BACKUP_PATH), body, name);
+    assert.equal(writesTo(BACKUP_PATH).length, 0, name);
+  }
+});
+
+test("this account's own file that won't decrypt is replaced in place", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  saveAddressBookEntry({ address: BOB, name: "Bob" });
+  const sealed = JSON.parse(await sealFor(WALLET_A, contactsFile([])));
+  sealed.ciphertext = Buffer.from("damaged").toString("base64");
+  dav.put("sam", BACKUP_PATH, JSON.stringify(sealed));
+  startModule();
+  await runBackup();
+  const inside = JSON.parse(await openFor(WALLET_A, dav.get("sam", BACKUP_PATH)));
+  assert.deepEqual(inside.entries.map((e) => e.address), [BOB]);
+  assert.ok(logs.some((line) => line.includes("replacing it in place")));
+});
+
+test("the watcher's poll brings a new device its contacts, once, and owes back what the file lacks", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  dav.put("sam", BACKUP_PATH, await sealFor(WALLET_A, contactsFile([contactRow(ALICE, "Alice")])));
+  startModule();
+  await checkForRemoteChangeAndImport();
+  assert.equal(addressBookEntry(ALICE).name, "Alice");
+  const reads = () => dav.log.filter((r) => r.method === "GET" && r.path === BACKUP_PATH).length;
+  assert.equal(reads(), 1);
+  await checkForRemoteChangeAndImport();
+  assert.equal(reads(), 1, "the same ETag isn't downloaded again");
+  // Our own upload isn't read back either.
+  saveAddressBookEntry({ address: BOB, name: "Bob" });
+  await runBackup();
+  const afterBackup = reads();
+  await checkForRemoteChangeAndImport();
+  assert.equal(reads(), afterBackup);
+  // No file yet: nothing happens, and it isn't an error.
+  toFake(WALLET_A, { autoBackup: false });
+  startModule();
+  await checkForRemoteChangeAndImport();
+  assert.equal(addressBookEntries().length, 0);
+});
+
+test("a file the watcher can't read is skipped, changes nothing, and isn't downloaded every poll", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  saveAddressBookEntry({ address: BOB, name: "Bob" });
+  const body = contactsFile([contactRow(ALICE, "Alice")]);
+  dav.put("sam", BACKUP_PATH, body);
+  startModule();
+  await checkForRemoteChangeAndImport();
+  await checkForRemoteChangeAndImport();
+  assert.equal(addressBookEntry(ALICE), null);
+  assert.equal(dav.get("sam", BACKUP_PATH), body);
+  assert.equal(dav.log.filter((r) => r.method === "GET" && r.path === BACKUP_PATH).length, 1);
+  assert.ok(logs.some((line) => line.includes("skipped an unreadable contacts file")));
+});
+
+test("switching account mid-backup writes nothing", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  saveAddressBookEntry({ address: ALICE, name: "Alice" });
+  startModule();
+  dav.hook = async ({ method, path }) => {
+    if (method === "GET" && path === BACKUP_PATH) {
+      fresh({ activeWallet: WALLET_B });
+      storeAccount(WALLET_B, { autoBackup: false });
+      resetNextcloudForAccount();
+    }
+  };
+  await assert.rejects(runBackup(), /account changed/);
+  assert.equal(writesTo(BACKUP_PATH).length, 0);
+  dav.hook = null;
+});
+
+test("deleting the backup with the account takes the contacts file and the old chat backups", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  dav.put("sam", BACKUP_PATH, "{}");
+  dav.put("sam", "KaChat/kachat-backup.json", "{}");
+  dav.put("sam", "KaChat/kachat-backup-desktop.json", "{}");
+  startModule();
+  await deleteRemoteNextcloudBackup();
+  assert.equal(dav.get("sam", BACKUP_PATH), undefined);
+  assert.equal(dav.get("sam", "KaChat/kachat-backup.json"), undefined);
+  assert.equal(dav.get("sam", "KaChat/kachat-backup-desktop.json"), undefined);
+  // Nothing there is the state asked for.
+  await deleteRemoteNextcloudBackup();
 });
 
 // --- Run ------------------------------------------------------------------------------------------

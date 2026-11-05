@@ -203,20 +203,23 @@ function roomActivityAt(name) {
   return Number(joinedAtByChannel[name] || 0);
 }
 
-// --- The Chats circles row (iOS a062577 / f90a70a) ---------------------------------------------
-// The rooms show as circles above the Chats list, beside the group chats; the app draws them and
-// owns their selection. These are the room facts and actions it needs.
+// --- Rooms in the Chats list ---------------------------------------------------------------------
+// On Desktop the rooms are rows in the Chats list, each with # for its avatar (owner, 2026-11-05;
+// iOS a062577 has them as circles above it). The app draws them and owns their selection. These are
+// the room facts and actions it needs.
 
 /** The rooms in the list, each with what its circle shows: unread (messages from others since
  *  the room was last opened), latest activity (for the row's order), and the half sheet's state. */
-export function chatCircleRooms() {
+export function chatListRooms() {
   if (!deps) return [];
   // The same rooms the Public Chats list shows - the featured ones plus every joined room - as
-  // iOS ChatListView's circles read PublicChatService.listedChannels (no unjoined language rooms).
+  // iOS ChatListView reads PublicChatService.listedChannels (no unjoined language rooms).
   return listedChannels().map((name) => ({
     name,
     unread: unreadFor(name),
     lastAt: roomActivityAt(name),
+    lastMessageAt: Number(lastVisibleMessage(name)?.blockTime || 0),
+    preview: roomPreviewLine(name),
     notify: Boolean(notifyByChannel[name]),
     indexed: isCuratedBroadcastChannel(name), // a default room: switched off, not deleted
     // the indexer keeps it, so the bell covers it with the room closed (iOS 21c480d)
@@ -1168,16 +1171,20 @@ function lastVisibleMessage(name) {
   }
   return null;
 }
+/** A room's newest message as a row shows it, with who sent it; "" with none. */
+function roomPreviewLine(name) {
+  const last = lastVisibleMessage(name);
+  if (!last) return "";
+  const me = deps.engine.address || "";
+  // A link-bearing message never shows its URL in a row, same as the chat lists.
+  const rawPreview = humanizeBroadcastContent(effectiveContent(name, last));
+  const previewText = /https?:\/\/\S+/i.test(rawPreview) ? "📎 Sent a link" : rawPreview;
+  return `${last.senderAddress === me ? "You" : senderName(last.senderAddress)}: ${previewText}`.replace(/\s+/g, " ").slice(0, 120);
+}
 function roomRowHtml(name, { title = null, subtitle = null } = {}) {
   const last = lastVisibleMessage(name);
   const unread = unreadFor(name);
-  const me = deps.engine.address || "";
-  // A link-bearing message never shows its URL in a row, same as the chat lists.
-  const rawPreview = last ? humanizeBroadcastContent(effectiveContent(name, last)) : "";
-  const previewText = /https?:\/\/\S+/i.test(rawPreview) ? "📎 Sent a link" : rawPreview;
-  const preview = last
-    ? `${last.senderAddress === me ? "You" : senderName(last.senderAddress)}: ${previewText}`
-    : (subtitle || "No messages yet");
+  const preview = roomPreviewLine(name) || subtitle || "No messages yet";
   const bellOff = !notifyByChannel[name];
   return `
     <button class="broadcast-room-row${name === activeChannel && !roomSelectionActive ? " active" : ""}${roomSelectionActive ? " selecting" : ""}${selectedRooms.has(name) ? " selected" : ""}" type="button" data-broadcast-open="${deps.escapeHtml(name)}"${roomSelectionActive ? ` aria-pressed="${selectedRooms.has(name) ? "true" : "false"}"` : ""}>
@@ -1190,7 +1197,7 @@ function roomRowHtml(name, { title = null, subtitle = null } = {}) {
           <span class="broadcast-room-row-time">${deps.escapeHtml(roomRowTime(last?.blockTime))}</span>
         </span>
         <span class="broadcast-room-row-bottom">
-          <span class="broadcast-room-row-preview">${deps.escapeHtml(preview.replace(/\s+/g, " ").slice(0, 120))}</span>
+          <span class="broadcast-room-row-preview">${deps.escapeHtml(preview)}</span>
           ${unread > 0 ? `<b class="unread-badge">${unread > 99 ? "99+" : unread}</b>` : ""}
         </span>
       </span>
@@ -1198,8 +1205,8 @@ function roomRowHtml(name, { title = null, subtitle = null } = {}) {
 }
 
 function renderChannelList() {
-  // The rooms are circles above the Chats list now (iOS a062577), drawn by the app: with no list
-  // mounted, this only tells the app that a room's state changed, so the circles redraw.
+  // The rooms are rows in the Chats list, drawn by the app: with no list mounted, this only tells
+  // the app that a room's state changed, so their rows redraw.
   if (!listEl) { deps?.onUnreadChanged?.(); return; }
   const others = joinedChannels
     .filter((name) => !FEATURED_BROADCAST_CHANNELS.includes(name) && curatedShown(name) && !isServiceBroadcastChannel(name))

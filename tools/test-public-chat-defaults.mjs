@@ -1,7 +1,7 @@
 // Public Chats' default rooms (iOS 865c9ab / d37f64d): every default room joined from the start,
 // #kaspa and #kachat-bugs notifying once per wallet, the language rooms ordered as iOS lists them,
 // and the Languages switch's helpers. Drives ui/broadcasts.js with the DOM stubbed out (no list
-// is mounted: the app draws the rooms as circles from chatCircleRooms). Run from the repo root:
+// is mounted: the app draws the rooms as circles from chatListRooms). Run from the repo root:
 //
 //   node tools/test-public-chat-defaults.mjs
 
@@ -46,7 +46,7 @@ rooms.initBroadcasts({
   onUnreadChanged: noop,
 });
 
-const byName = () => new Map(rooms.chatCircleRooms().map((room) => [room.name, room]));
+const byName = () => new Map(rooms.chatListRooms().map((room) => [room.name, room]));
 const notifyStore = () => JSON.parse(localStorage.getItem(scoped("kachat-broadcast-notify-v1")) || "{}");
 
 // --- every default room is in the list, joined -----------------------------------------------------
@@ -92,7 +92,7 @@ const notifyStore = () => JSON.parse(localStorage.getItem(scoped("kachat-broadca
 
 // --- the language rooms keep iOS's order while nobody has written in them -------------------------
 {
-  const circles = rooms.chatCircleRooms().filter((room) => LANGUAGE_BROADCAST_CHANNELS.includes(room.name));
+  const circles = rooms.chatListRooms().filter((room) => LANGUAGE_BROADCAST_CHANNELS.includes(room.name));
   const order = [...circles].sort((a, b) => b.lastAt - a.lastAt).map((room) => room.name);
   r.eq(order.join(","), LANGUAGE_BROADCAST_CHANNELS.join(","), "languageChannels order");
   r.check(circles.every((room) => room.lastAt < 0), "after every room with activity (they sort last)");

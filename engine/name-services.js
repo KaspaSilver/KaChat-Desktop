@@ -55,9 +55,6 @@ const REQUEST_TIMEOUT_MS = 15000; // iOS: timeoutIntervalForRequest = 15
  * @property {NameServiceTLD} tld        Raw value, e.g. "kas".
  * @property {string} suffix             The tab label and display ending, e.g. ".kas".
  * @property {string} serviceName        Who runs it ("KNS", "dotk", "Kaspa Names", "KaChat Names").
- * @property {string|null} websiteURL    Where a person gets one of these names; null for .kachat.
- * @property {string|null} websiteName   The site as people know it ("knsdomains.org"); null for .kachat.
- * @property {string|null} getDomainLabel "Get a .kas domain at knsdomains.org"; null for .kachat.
  * @property {boolean} isLive            Whether the app can read this service yet (.kachat: only where
  *                                       its registry is launched - testnet-10 and mainnet).
  */
@@ -65,10 +62,10 @@ const REQUEST_TIMEOUT_MS = 15000; // iOS: timeoutIntervalForRequest = 15
 const SERVICE_TABLE = {
   // Readable where its registry is launched (iOS 25cc2c9, 7227d69 isLaunched): testnet-10, and
   // mainnet since 2026-10-09 (iOS ef6b21e). Its UI is on everywhere.
-  kachat: { serviceName: "KaChat Names", websiteURL: null, websiteName: null, isLive: kachatNetworks.includes(NETWORK_ID) },
-  kas: { serviceName: "KNS", websiteURL: "https://app.knsdomains.org", websiteName: "knsdomains.org", isLive: true },
-  k: { serviceName: "dotk", websiteURL: "https://dotk.name", websiteName: "dotk.name", isLive: true },
-  kaspa: { serviceName: "Kaspa Names", websiteURL: "https://kaspaname.com", websiteName: "kaspaname.com", isLive: true },
+  kachat: { serviceName: "KaChat Names", isLive: kachatNetworks.includes(NETWORK_ID) },
+  kas: { serviceName: "KNS", isLive: true },
+  k: { serviceName: "dotk", isLive: true },
+  kaspa: { serviceName: "Kaspa Names", isLive: true },
 };
 
 /** Every TLD in declaration (= tab) order: KaChat's own names first. */
@@ -85,9 +82,6 @@ export const NAME_SERVICES = Object.freeze(Object.fromEntries(NAME_SERVICE_TLDS.
     tld,
     suffix,
     serviceName: row.serviceName,
-    websiteURL: row.websiteURL,
-    websiteName: row.websiteName,
-    getDomainLabel: row.websiteName ? `Get a ${suffix} domain at ${row.websiteName}` : null,
     isLive: row.isLive,
   })];
 })));

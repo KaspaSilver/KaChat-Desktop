@@ -125,9 +125,9 @@
         </div>
 
         <div class="sidebar-scroll">
-          <!-- Group chats and public rooms as a sideways row of circles above the chats (iOS
+          <!-- The bots and anything pinned as a sideways row of circles above the chats (iOS
                ChatCirclesStrip): click opens, right-click or long-press opens its options. -->
-          <div class="chat-circles" data-chat-circles role="group" aria-label="Group chats and public rooms" hidden></div>
+          <div class="chat-circles" data-chat-circles role="group" aria-label="Bots and pinned chats" hidden></div>
           <div class="chat-list" data-chat-list hidden></div>
           <!-- Below the Message Requests row, only when there are no chats (iOS emptyStateView overlay). -->
           <div class="empty-state-card" data-empty-state>
@@ -140,8 +140,8 @@
             <h1>No Conversations Yet</h1>
             <p>Start a new chat by adding a contact</p>
           </div>
-          <!-- Group chats and public rooms have no list of their own any more: they are the circles
-               above (iOS a062577). New ones come from the New sheet (+). -->
+          <!-- Group chats and public rooms have no list of their own: they are rows in the one list
+               above. New ones come from the New sheet (+). -->
         </div>
 
         <div class="chat-selection-bar" data-chat-selection-bar hidden>
@@ -2394,8 +2394,8 @@
         <div class="profile-domain-detail" data-domain-detail hidden></div>
       </div>
       <div class="manage-address-actions">
-        <!-- Each outside service's "Get a domain" button (iOS 718724b); none on .kachat yet. -->
-        <button type="button" class="chatting-address-copy domains-inscribe-button" data-domains-inscribe hidden>Get a .kas domain at knsdomains.org</button>
+        <!-- .kachat's Inscribe; the outside services have no button (iOS 4314e17e). -->
+        <button type="button" class="chatting-address-copy domains-inscribe-button" data-domains-inscribe hidden>Inscribe</button>
       </div>
     </div>
   </div>

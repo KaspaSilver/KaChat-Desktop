@@ -13040,8 +13040,8 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .new-chat-sheet-join { width: 100%; padding: 14px; border-radius: 16px; font-size: 15px; font-weight: 700; }
 .new-chat-sheet-join:disabled { opacity: .4; cursor: default; }
 
-/* Chats circles (iOS ChatCirclesStrip, a062577 / f90a70a): Chats is one list, and every group chat
-   and public room is a circle in a sideways row above it - a red count for messages from others
+/* Chats circles (iOS ChatCirclesStrip, a062577 / f90a70a): Chats is one list, and the bots and
+   anything pinned are circles in a sideways row above it - a red count for messages from others
    since it was last opened, a pin badge when pinned to the front, a checkmark in Select mode, and
    a ring on the one open in the detail pane. Full-bleed like the chat rows below it. */
 .chat-circles {
@@ -13072,7 +13072,6 @@ body:has(.profile-screen[data-app-tab-screen="profile"]:not([hidden])) .topbar-p
 .chat-circle-glyph { display: grid; place-items: center; }
 .chat-circle-glyph svg { width: 26px; height: 26px; display: block; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .chat-circle-glyph.chat-circle-bot svg { width: 24px; height: 24px; stroke-width: 1.8; } /* a bot's icon (iOS 5fcf755) */
-.chat-circle-hash { font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; font-size: 26px; font-weight: 700; line-height: 1; }
 /* The whole name: a long one carries on underneath (up to three lines, centered) rather than being
    cut off, and every name reserves the three lines so the row has one height and the chat list
    below never covers a second or third line; the row is top-aligned, so the circles stay level
@@ -15308,6 +15307,8 @@ body.settings-tab [data-account-overlay] .settings-done-button { visibility: hid
 .composer-send.composer-send-busy { opacity: .5; }
 
 /* Groups in the chat list and their invites (iOS d1844582, bfe9f022). */
+/* A public room's row: # for its avatar, in the circles' tint. */
+.chat-row .room-row-avatar { display: flex; align-items: center; justify-content: center; background: color-mix(in srgb, var(--kaspa-ink) 20%, transparent); color: var(--kaspa-ink); font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif; font-size: 24px; font-weight: 700; line-height: 1; }
 .group-row-avatar { display: flex; align-items: center; justify-content: center; overflow: hidden; background: color-mix(in srgb, var(--kaspa-ink) 20%, transparent); color: var(--kaspa-ink); }
 .group-row-avatar .group-avatar-photo { width: 100%; height: 100%; object-fit: cover; }
 .group-row-avatar .group-avatar-fallback { display: flex; align-items: center; justify-content: center; width: 60%; height: 60%; background: none; color: inherit; }

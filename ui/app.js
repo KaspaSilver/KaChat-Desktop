@@ -24,7 +24,7 @@ import { mediaFrameByteLength, mediaFrameForEnvelope } from "../engine/media-fra
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange, showKaPostsActionToast } from "./kaposts.js";
 import { kapostsFiatFieldText, kapostsKasFieldText, kapostsTipFieldAmount, kapostsSwitchTipText, kapostsDefaultTipSompi } from "./kaposts-format.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
-import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatCircleRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
+import { initBroadcasts, refreshBroadcasts, repaintBroadcastIdentities, resetBroadcastsForAccount, stopBroadcastPolling, openBroadcastChannelFromNotification, openBroadcastRoomFromLink, broadcastUnreadTotal, broadcastJoinError, joinBroadcastChannelFromSheet, chatListRooms, openBroadcastRoom, closeBroadcastRoom, markBroadcastRooms, removeBroadcastRooms, setBroadcastRoomNotify, copyBroadcastRoomLink } from "./broadcasts.js";
 import { initChessTournaments, showChessTournaments, hideChessTournaments, resetChessTournamentsForAccount, chessTournamentsMayLeave, openChessBotChallenge } from "./chess-tournaments.js";
 import { parseBotChallengeLink, botChallengeFromLaunchSearch } from "../engine/chess-bot-links.js";
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
@@ -51,7 +51,7 @@ import { askKaPostTerms, kaPostTermsAccepted, kaPostTermsHtml } from "./kapost-m
 import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml, KACHAT_BOTS } from "./kachat-bots.js";
 import {
   configureAddressBook, addressBookName, addressBookEntry, addressBookEntries, addressBookPhoto, addressBookIsEmpty, archiveAddressBook,
-  importAddressBookArchive, mergeAddressBookArchives, removeAddressBookForWallet, saveAddressBookEntry,
+  importAddressBookArchive, removeAddressBookForWallet, saveAddressBookEntry,
 } from "./address-book-store.js";
 import {
   initAddressBook, showAddressBook, hideAddressBook, resetAddressBookForAccount, openAddressBookEditor,
@@ -59,7 +59,6 @@ import {
 } from "./address-book.js";
 import { NAME_SERVICES } from "../engine/name-services.js";
 import { initPortfolio, refreshPortfolio, resetPortfolioForAccount, portfolioArchive, importPortfolioArchive, portfolioAmountsHidden } from "./portfolio.js";
-import { mergePortfolioArchives } from "./portfolio-sync.js";
 import { initColdStorage, refreshColdStorage, refreshColdStorageOnActivity, resetColdStorageForAccount, listColdWatchedAddresses, openColdAccountForAddress, openColdAddressHistory, openTransactionActionsSheet } from "./coldstorage.js";
 import { scanKaspaAddress } from "./qr-scan.js";
 import {
@@ -76,7 +75,7 @@ import {
   createStepFlow, createFeeEditorStep, keypadHtml, wireKeypad, applyKeypadKey, stepChipHtml, stepQuestionHtml, reviewRowHtml, reviewAddressHtml,
 } from "./send-steps.js";
 import "./send-steps.css";
-import { initNextcloud, noteMessageActivity as noteNextcloudActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason } from "./nextcloud.js";
+import { initNextcloud, noteContactActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason } from "./nextcloud.js";
 import * as Calls from "./calls.js";
 // Kaspa Hub > ChangeNOW Swap (iOS SwapView), back on Desktop (owner, 2026-10-22).
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
@@ -1920,7 +1919,7 @@ function openProfileLink(address) {
   openChatInfoForAddress(known ? known.address : normalized);
 }
 function knownBroadcastRoom(channel) {
-  try { return chatCircleRooms().some((room) => room.name === channel); } catch { return true; }
+  try { return chatListRooms().some((room) => room.name === channel); } catch { return true; }
 }
 // The native in-app card (iOS KaChatInternalLinkCardView): glyph, eyebrow, title, what a tap does.
 function buildInternalLinkCard(link) {
@@ -3431,11 +3430,13 @@ const chatSelectAll = document.querySelector("[data-chat-select-all]");
 const chatSelectionBar = document.querySelector("[data-chat-selection-bar]");
 let chatSelectionModeActive = false;
 const selectedChatConversationIds = new Set();
-// Chats is one list with the group chats and public rooms as circles above it (iOS a062577), and
-// Select mode selects all three together: chats by conversation id, group circles by groupId,
-// room circles by channel name. Declared up here because the boot-time renderChats draws them.
+// Chats is one list: chats, groups and public rooms, with the bots and anything pinned as circles
+// above it. Select mode selects them together: chats by conversation id, groups by groupId, rooms by
+// channel name. Declared up here because the boot-time renderChats draws them.
 const selectedGroupIds = new Set();
 const selectedRoomNames = new Set();
+// The rooms as their rows last drew them, so a poll that changed nothing leaves the list alone.
+let chatRoomsLastSignature = "";
 // A public room open in the detail pane (broadcasts.js reports it); owns the pane like a chat.
 let publicRoomOpen = false;
 // Whether syncPublicChatsPane last gave the pane to a room, so closing it restores the rest once.
@@ -4301,7 +4302,7 @@ function isKasDomainName(name) {
 
 /// Every load, not once (iOS ce0b636; was once per account, iOS 509c0fe): a contact named with a
 /// bare .kas domain goes back to unnamed, so it reads as its .kachat name or address. A .kas name
-/// can come back later - restored from a Nextcloud backup another platform wrote, or by an older
+/// can come back later - from a chat archive another platform exported, or by an older
 /// build - and it must not stay.
 function revertDomainContactNames() {
   if (!engine.address || engine.knsNamesAsIdentity) return;
@@ -5353,7 +5354,7 @@ function hydrateConversationMessages(conversationEntry) {
 
 // --- Deleted-chat tombstones -----------------------------------------------
 // Deleting a chat records the contact's address here (account-scoped), and every
-// restore path (desktop snapshot, phone archive, shared kachat-backup.json merge)
+// restore path (an imported chat archive)
 // honors the list so a deleted chat can never resurrect from a backup. Manually
 // re-adding the contact clears its tombstone.
 
@@ -11456,7 +11457,7 @@ function setActiveAppTab(tab) {
   try { if (screenTab === "wallet") { renderProfileAccountTotal(); refreshSpendingSummaryOnShow(); warmReceiveAddressOnShow(); } } catch { /* not started */ }
   if (screenTab === "kaposts") refreshKaPostsFeed();
   else stopKaPostsPolling();
-  // The room circles sit above the Chats list, so the rooms stay live while Chats is up (and an
+  // The rooms are rows in the Chats list, so they stay live while Chats is up (and an
   // open room takes the pane back). Simple Mode hides public rooms.
   if (isChats && !isChildModeEnabled()) { refreshBroadcasts(); syncPublicChatsPane(); }
   else { stopBroadcastPolling(); syncPublicChatsPane(); }
@@ -12240,8 +12241,7 @@ function knsDomainCardHtml(domain, { clickable = true } = {}) {
 
 // Your Domains: a card per name service (iOS debd6fd, formerly tabs, df23b6f), each pushing that
 // service's own screen. .kas lists the KNS domains with their detail; .k and .kaspa list the names
-// this address owns there (read-only); .kachat lists KaChat's own names. Each outside service's
-// screen pins its "Get a domain" button.
+// this address owns there (read-only); .kachat lists KaChat's own names.
 async function refreshOtherServiceNames() {
   const address = engine.address;
   if (!address) return;
@@ -12367,23 +12367,18 @@ document.querySelector("[data-kachat-expired-banner]")?.addEventListener("click"
   renderKachatExpiredBanner();
 });
 
-/** Your Domains' pinned button: each outside service's "Get a domain", or .kachat's Inscribe -
- *  that one only once the .kachat list has loaded and not while the registry is being upgraded
- *  (iOS KachatLiveDomainsTab: `loaded && !registryUpgrading`). None on a domain's detail. */
+/** Your Domains' pinned button: .kachat's Inscribe, only once the .kachat list has loaded and not
+ *  while the registry is being upgraded (iOS KachatLiveDomainsTab: `loaded && !registryUpgrading`).
+ *  None on a domain's detail, and none for the outside services (iOS 4314e17e). */
 function syncDomainsGetButton() {
   const getButton = document.querySelector("[data-domains-inscribe]");
   if (!getButton) return;
   const detailEl = document.querySelector("[data-domain-detail]");
-  // none on the cards (no service pushed): `service` is undefined there
-  const service = NAME_SERVICES[activeDomainsService];
   // .kachat: a pinned Inscribe button that opens the .kachat marketplace over Your Domains (iOS
   // e4da63d), on every network (iOS 7227d69).
   const kachatInscribe = activeDomainsService === "kachat" && kachatNamesUiEnabled()
     && kachatDomainsListState?.address === engine.address && !kachatDomainsListState.upgrading;
-  getButton.hidden = (!service?.getDomainLabel && !kachatInscribe) || (activeDomainsService === "kachat" && !kachatInscribe)
-    || Boolean(detailEl && !detailEl.hidden);
-  if (kachatInscribe) getButton.textContent = "Inscribe";
-  else if (service?.getDomainLabel) getButton.textContent = service.getDomainLabel;
+  getButton.hidden = !kachatInscribe || Boolean(detailEl && !detailEl.hidden);
 }
 
 function renderProfileDomains() {
@@ -12588,7 +12583,6 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
   }
   if (event.target.closest("[data-domains-refresh]")) { refreshYourDomains(); return; }
   if (event.target.closest("[data-domains-inscribe]")) {
-    // Each outside service sells its own names; KaChat links to it (iOS 718724b).
     // .kachat: the marketplace as a sheet over Your Domains, whether or not it is in the dock or
     // Kaspa Hub; closing it comes back here and refreshes the registry, so a new name lands in the
     // list (iOS KachatLiveDomainsTab showMarketplace, onDismiss registry.refresh()).
@@ -12599,10 +12593,7 @@ document.querySelector("[data-domains-screen]")?.addEventListener("click", (even
           renderProfileDomains();
         },
       });
-      return;
     }
-    const url = NAME_SERVICES[activeDomainsService]?.websiteURL;
-    if (url) window.open(url, "_blank", "noopener,noreferrer");
   }
 });
 
@@ -12668,7 +12659,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 265;
+const APP_BUILD = 266;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -15095,7 +15086,7 @@ refreshExplorerSelectionUi();
 //   - messages with no usable timestamp (unknown age is not old age),
 //   - group chats (iOS's retention covers the 1:1 message store only; group history is a
 //     separate store on both platforms).
-// This is local cleanup: nothing is removed from the chain, from a Nextcloud backup, or
+// This is local cleanup: nothing is removed from the chain, from an exported archive, or
 // from any other device.
 // ---------------------------------------------------------------------------
 const MESSAGE_RETENTION_KEY = "kachat-message-retention-v1";
@@ -17500,10 +17491,11 @@ function importPayloadIntoConversation(payloadValue) {
   setStatus("Kasia payload imported");
 }
 
-// The tab badges are gone with the tabs (iOS a062577); what changes unread now is the circles'
-// red counts. Kept under this name for its callers (the rooms' onUnreadChanged among them).
+// The tab badges are gone with the tabs (iOS a062577); what changes unread now is the circles' and
+// the rows' red counts. Kept under this name for its callers (the rooms' onUnreadChanged among them).
 function updateChatsListTabBadges() {
-  renderChatCircles();
+  if (chatRoomsSignature() !== chatRoomsLastSignature) renderChats();
+  else renderChatCircles();
 }
 
 // The conversations currently shown in the chat list, honoring the search filter. Shared by
@@ -17595,6 +17587,39 @@ function visibleChatGroups() {
   return mgr.listGroups().filter((g) => (query ? groupMatchesChatSearch(g, query) : !pins.has(`g:${g.groupId}`)));
 }
 
+/** The public rooms in the list, by name while searching. Simple Mode hides them. */
+function visibleChatRooms() {
+  if (isChildModeEnabled()) return [];
+  let rooms = [];
+  try { rooms = chatListRooms(); } catch { rooms = []; }
+  const query = String(searchInput?.value || "").trim().toLowerCase();
+  return query ? rooms.filter((room) => `#${room.name}`.toLowerCase().includes(query)) : rooms;
+}
+
+function chatRoomsSignature() {
+  try { return JSON.stringify(chatListRooms()); } catch { return ""; }
+}
+
+/** A public room's row in the chat list: # for its avatar sets it apart (owner, 2026-11-05). */
+function roomRowHtml(room, { selecting = false, selected = false } = {}) {
+  const active = room.open && !selecting;
+  const time = room.lastMessageAt ? formatChatListDate(room.lastMessageAt) : "";
+  return `
+        <button class="chat-row room-row${selecting ? " selecting" : ""}${selected ? " selected" : ""}${active ? " active" : ""}" type="button" data-room-row="${escapeHtml(room.name)}" data-swipe-id="room:${escapeHtml(room.name)}">
+          ${selecting ? `<span class="chat-row-select" aria-hidden="true"><span class="chat-row-checkbox${selected ? " checked" : ""}"></span></span>` : ``}
+          <span class="chat-row-time">${escapeHtml(time)}</span>
+          <span class="chat-avatar room-row-avatar" aria-hidden="true">#</span>
+          <span class="chat-meta">
+            <strong>#${escapeHtml(room.name)}${room.notify ? "" : `<svg class="group-row-silenced" viewBox="0 0 24 24" role="img" aria-label="Notifications off"><path d="M9.5 19a2.5 2.5 0 0 0 5 0M6 8a6 6 0 0 1 9.6-4.8M18 8c0 5 2 7 2 7H8M4 15s2-2 2-7M3 3l18 18"/></svg>`}</strong>
+            ${room.preview
+              ? `<span>${escapeHtml(room.preview)}</span>`
+              : `<span class="chat-row-none">No messages yet</span>`}
+          </span>
+          ${room.unread > 0 ? `<b class="unread-badge">${room.unread > 99 ? "99+" : room.unread}</b>` : ``}
+        </button>
+      `;
+}
+
 /** A group's row in the chat list (iOS GroupChatRow). */
 function groupRowHtml(g, { selecting = false, selected = false, active = false } = {}) {
   const messages = groupMessages(g.groupId);
@@ -17629,7 +17654,7 @@ function renderChats() {
   // reaction) dropped you back to the list. Back closes a chat; one that no longer exists
   // (deleted, cleared, another account's state) closes here.
   if (activeConversationId && !state.conversations.some((entry) => entry.id === activeConversationId)) setActiveConversationId(null);
-  // The bots, public rooms and anything pinned are the circles above the list.
+  // The bots and anything pinned are the circles above the list.
   renderChatCircles();
   // The app icon's badge follows the same counts (iOS ChatService.updateAppBadge).
   scheduleAppBadgeUpdate();
@@ -17639,6 +17664,9 @@ function renderChats() {
 
   const visibleConversations = visibleChatConversations();
   const visibleGroups = visibleChatGroups();
+  const visibleRooms = visibleChatRooms();
+  chatRoomsLastSignature = chatRoomsSignature();
+  const noRows = visibleConversations.length === 0 && visibleGroups.length === 0 && visibleRooms.length === 0;
   const searching = Boolean(searchInput.value.trim());
 
   // People who wrote first and haven't been accepted: one row, always there, right above your
@@ -17660,15 +17688,15 @@ function renderChats() {
   // No chats and no search: the empty state, under the circles and the requests row. A search
   // with no match shows nothing at all (iOS has no "no results" card).
   const anyPinnedGroup = chatCirclePins().some((id) => id.startsWith("g:") && getGroupManager()?.getGroup(id.slice(2)));
-  emptyState.hidden = !(visibleConversations.length === 0 && visibleGroups.length === 0 && !anyPinnedGroup && !searching);
-  chatList.hidden = !requestsRowHtml && visibleConversations.length === 0 && visibleGroups.length === 0;
-  if (visibleConversations.length === 0 && visibleGroups.length === 0) {
+  emptyState.hidden = !(noRows && !anyPinnedGroup && !searching);
+  chatList.hidden = !requestsRowHtml && noRows;
+  if (noRows) {
     chatList.innerHTML = requestsRowHtml;
     chatRowSwipes?.refresh();
     return;
   }
 
-  // Chats and groups share the one list, by latest activity (iOS d1844582).
+  // Chats, groups and rooms share the one list, by latest activity (iOS d1844582).
   const rows = [
     ...visibleConversations.map((conversationEntry, order) => ({ at: conversationRecency(conversationEntry), order, html: () => conversationRowHtml(conversationEntry, {
       selecting: chatSelectionModeActive,
@@ -17679,6 +17707,10 @@ function renderChats() {
       selecting: chatSelectionModeActive,
       selected: selectedGroupIds.has(g.groupId),
       active: g.groupId === activeGroupId,
+    }) })),
+    ...visibleRooms.map((room, order) => ({ at: room.lastAt, order, html: () => roomRowHtml(room, {
+      selecting: chatSelectionModeActive,
+      selected: selectedRoomNames.has(room.name),
     }) })),
   ].sort((a, b) => b.at - a.at || a.order - b.order);
   // iOS: "{n} chat(s)" under the list.
@@ -21389,6 +21421,19 @@ chatList.addEventListener("click", (event) => {
     if (groupId !== activeGroupId) openGroupChat(groupId);
     return;
   }
+  const roomRow = event.target.closest("[data-room-row]");
+  if (roomRow) {
+    const name = roomRow.dataset.roomRow;
+    if (chatSelectionModeActive) {
+      if (selectedRoomNames.has(name)) selectedRoomNames.delete(name);
+      else selectedRoomNames.add(name);
+      renderChats();
+      updateChatSelectionBar();
+      return;
+    }
+    openRoomFromRow(name);
+    return;
+  }
   const row = event.target.closest("[data-conversation-id]");
   if (!row) return;
   const conversationId = row.dataset.conversationId;
@@ -21404,18 +21449,20 @@ chatList.addEventListener("click", (event) => {
   openConversation(conversationId);
 });
 
-// One selection across the chats and the circles above them (iOS a062577).
+// One selection across the chats, groups and rooms (iOS a062577).
 function activeSelectionCount() {
   return selectedChatConversationIds.size + selectedGroupIds.size + selectedRoomNames.size;
 }
 function isEverythingSelected() {
   const chats = visibleChatConversations();
   const groups = visibleChatGroups();
+  const rooms = visibleChatRooms();
   const circles = visibleChatCircles();
-  if (!chats.length && !groups.length && !circles.length) return false;
+  if (!chats.length && !groups.length && !rooms.length && !circles.length) return false;
   return chats.every((entry) => selectedChatConversationIds.has(entry.id))
     && groups.every((g) => selectedGroupIds.has(g.groupId))
-    && circles.every((item) => (item.kind === "group" ? selectedGroupIds.has(item.key) : item.kind === "bot" || selectedRoomNames.has(item.key)));
+    && rooms.every((room) => selectedRoomNames.has(room.name))
+    && circles.every((item) => item.kind !== "group" || selectedGroupIds.has(item.key));
 }
 
 function updateChatSelectionBar() {
@@ -21444,7 +21491,7 @@ function updateChatSelectionBar() {
   }
   if (chatSelectAll) {
     chatSelectAll.textContent = isEverythingSelected() ? "Deselect All" : "Select All";
-    chatSelectAll.disabled = visibleChatConversations().length === 0 && visibleChatGroups().length === 0 && visibleChatCircles().length === 0;
+    chatSelectAll.disabled = visibleChatConversations().length === 0 && visibleChatGroups().length === 0 && visibleChatRooms().length === 0 && visibleChatCircles().length === 0;
   }
 }
 
@@ -21485,7 +21532,7 @@ function setChatSelectionMode(active) {
 
 chatSelectToggle?.addEventListener("click", () => setChatSelectionMode(!chatSelectionModeActive));
 
-// Select All takes everything visible - chats, group circles and room circles - or clears it all.
+// Select All takes everything visible - chats, groups and rooms - or clears it all.
 chatSelectAll?.addEventListener("click", () => {
   if (!chatSelectionModeActive) return;
   if (isEverythingSelected()) {
@@ -21495,9 +21542,9 @@ chatSelectAll?.addEventListener("click", () => {
   } else {
     for (const entry of visibleChatConversations()) selectedChatConversationIds.add(entry.id);
     for (const g of visibleChatGroups()) selectedGroupIds.add(g.groupId);
+    for (const room of visibleChatRooms()) selectedRoomNames.add(room.name);
     for (const item of visibleChatCircles()) {
       if (item.kind === "group") selectedGroupIds.add(item.key);
-      else if (item.kind === "room") selectedRoomNames.add(item.key);
     }
   }
   renderChats();
@@ -21505,7 +21552,7 @@ chatSelectAll?.addEventListener("click", () => {
 });
 
 // A public room open in the detail pane owns it the way a conversation does. Rooms open beside the
-// one Chats list now - from their circle, a notification, a room link or the New sheet (iOS a062577).
+// one Chats list now - from their row, a notification, a room link or the New sheet (iOS a062577).
 function syncPublicChatsPane() {
   updatePublicChatsSettingsButton();
   const onChats = currentAppTab === "chats";
@@ -21565,20 +21612,21 @@ function openPublicChatsTab() {
 }
 
 // --- Chats circles (iOS ChatCirclesStrip, a062577 / f90a70a) -------------------------------------
-// Every group chat and public room as a circle in a sideways row above the chats, each with a red
-// count of messages from others since it was last opened. Click opens it in the detail pane;
-// right-click (long-press on touch) opens its half sheet; in Select mode a click selects it.
-// Pinned circles come first, newest pin first, then the rest by latest activity. Pins are saved
-// per wallet as "g:<groupId>" / "r:<room>", and a 1:1 chat pinned up into the row (Pin to Top Row,
-// iOS 7abc06e8) as "c:<address>". Everything here reads the DOM and module state at call time: the
-// boot-time renderChats reaches it before the code below has run.
+// The bots and anything pinned as circles in a sideways row above the chats, each with a red count
+// of messages from others since it was last opened. Click opens it in the detail pane; right-click
+// (long-press on touch) opens its half sheet; in Select mode a click on a group selects it. Pinned
+// circles come first, newest pin first, then the rest by latest activity. Pins are saved per wallet
+// as "g:<groupId>", and a 1:1 chat pinned up into the row (Pin to Top Row, iOS 7abc06e8) as
+// "c:<address>". Public rooms are never here on Desktop: they are rows in the list, and a room pinned
+// before that ("r:<room>") is forgotten on the next save. Everything here reads the DOM and module
+// state at call time: the boot-time renderChats reaches it before the code below has run.
 const CHAT_CIRCLE_CHECK_SVG = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.1 10.1 3.1 3.1 6.7-7"/></svg>';
 const CHAT_CIRCLE_PIN_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3.5 20.5 9l-2.2 1.1-3.6 3.6.4 4.6-1.6 1.6-3.9-3.9-4.8 4.8-.8-.8 4.8-4.8-3.9-3.9 1.6-1.6 4.6.4 3.6-3.6Z"/></svg>';
 
 function chatCirclePins() {
   try {
     const list = JSON.parse(localStorage.getItem(accountScopedKey("kachat-chat-circle-pins-v1")) || "[]");
-    return Array.isArray(list) ? list.filter((id) => typeof id === "string") : [];
+    return Array.isArray(list) ? list.filter((id) => typeof id === "string" && !id.startsWith("r:")) : [];
   } catch { return []; }
 }
 function saveChatCirclePins(pins) {
@@ -21604,7 +21652,7 @@ function dropChatCirclePins(ids) {
 }
 
 // The search box filters groups by name, a member's name or address, or message text, as the
-// Group Chats list did; rooms by name.
+// Group Chats list did.
 function groupMatchesChatSearch(g, query) {
   if (String(g.name || "").toLowerCase().includes(query)) return true;
   if ((g.members || []).some((m) => String(m.address || "").toLowerCase().includes(query) || groupSenderLabel(m.address).toLowerCase().includes(query))) return true;
@@ -21624,16 +21672,6 @@ function visibleChatCircles() {
       // Pinned groups only, and not while searching: the results list them (iOS d1844582).
       if (query || !pins.has(`g:${g.groupId}`)) continue;
       items.push({ id: `g:${g.groupId}`, kind: "group", key: g.groupId, title: g.name || "Group", unread: groupDisplayUnread(g, opened), at: groupLastActivityAt(g), group: g });
-    }
-  }
-  // Simple Mode hides public rooms.
-  if (!isChildModeEnabled()) {
-    let rooms = [];
-    try { rooms = chatCircleRooms(); } catch { rooms = []; }
-    for (const room of rooms) {
-      const title = `#${room.name}`;
-      if (query && !title.toLowerCase().includes(query)) continue;
-      items.push({ id: `r:${room.name}`, kind: "room", key: room.name, title, unread: room.unread, at: room.lastAt, room });
     }
   }
   // Every bot always has its circle, with or without a chat; tapping one starts it (iOS d1844582).
@@ -21771,8 +21809,8 @@ function chatCirclesHtml(items, pins, selecting) {
   return items.map((item) => {
     // A bot chat is deleted from its own sheet, not in Select mode (iOS 5fcf755).
     const isChat = item.kind === "bot" || item.kind === "chat";
-    const selected = item.kind === "group" ? selectedGroupIds.has(item.key) : isChat ? false : selectedRoomNames.has(item.key);
-    const active = item.kind === "group" ? item.key === activeGroupId : isChat ? item.key === activeConversationId : Boolean(item.room?.open);
+    const selected = item.kind === "group" && selectedGroupIds.has(item.key);
+    const active = item.kind === "group" ? item.key === activeGroupId : isChat && item.key === activeConversationId;
     const pinned = pins.has(item.id);
     let avatar;
     if (item.kind === "group") {
@@ -21782,10 +21820,8 @@ function chatCirclesHtml(items, pins, selecting) {
         : `<span class="chat-circle-glyph">${GROUP_AVATAR_SVG || ""}</span>`;
     } else if (item.kind === "bot") {
       avatar = `<span class="chat-circle-glyph chat-circle-bot">${kachatBotIconHtml(kachatBotFor(item.contact?.address))}</span>`;
-    } else if (item.kind === "chat") {
-      avatar = avatarHtmlFor(item.contact, "chat-circle-person");
     } else {
-      avatar = `<span class="chat-circle-hash">#</span>`;
+      avatar = avatarHtmlFor(item.contact, "chat-circle-person");
     }
     const corner = selecting
       ? `<span class="chat-circle-check${selected ? " checked" : ""}" aria-hidden="true">${selected ? (CHAT_CIRCLE_CHECK_SVG || "") : ""}</span>`
@@ -21801,21 +21837,21 @@ function chatCirclesHtml(items, pins, selecting) {
   }).join("");
 }
 
-// A room from its circle: chats and groups give the pane up first. Clicking the open room's circle
-// again closes it, as with a chat row.
-function openRoomFromCircle(name) {
+// A room from its row: chats and groups give the pane up first. The open room stays open, as with a
+// chat row.
+function openRoomFromRow(name) {
   if (isChildModeEnabled()) return;
   // Asked before the chat gives the pane up, so Not Now leaves it as it was.
-  if (!kaPostTermsAccepted()) { askKaPostTerms({ onAgree: () => openRoomFromCircle(name) }); return; }
+  if (!kaPostTermsAccepted()) { askKaPostTerms({ onAgree: () => openRoomFromRow(name) }); return; }
   let rooms = [];
-  try { rooms = chatCircleRooms(); } catch { rooms = []; }
-  if (rooms.find((room) => room.name === name)?.open) { closeBroadcastRoom(); return; }
+  try { rooms = chatListRooms(); } catch { rooms = []; }
+  if (rooms.find((room) => room.name === name)?.open) return;
   if (activeGroupId) closeGroupChat();
   if (activeConversationId) setActiveConversationId(null);
   openBroadcastRoom(name);
 }
 
-/** Simple Mode turned on or off: public rooms leave (or rejoin) the row, and an open room closes. */
+/** Simple Mode turned on or off: public rooms leave (or rejoin) the list, and an open room closes. */
 function syncChatCirclesForSimpleMode() {
   if (isChildModeEnabled()) {
     selectedRoomNames.clear();
@@ -21824,15 +21860,13 @@ function syncChatCirclesForSimpleMode() {
     try { refreshBroadcasts(); } catch { /* rooms not started */ }
   }
   updatePublicChatsSettingsButton();
-  renderChatCircles();
+  renderChats();
   if (chatSelectionModeActive) updateChatSelectionBar();
 }
 
 // Hold a circle - right-click, or long-press on touch - for the same half sheet as a chat row
 // (iOS f90a70a). Group: Mark as Read / Unread, Pin to Front / Unpin, Silence / Unsilence, Delete
-// (confirmed). Room: Mark as Read / Unread, Pin to Front / Unpin, notifications on/off, Copy Room
-// Link, Delete (a custom room after a confirmation; a default room is switched off, as in Public
-// Chats settings).
+// (confirmed). A public room's row holds for its own sheet below.
 /** What a group row's swipe or a group's half sheet chose. */
 async function runGroupRowChoice(groupId, choice) {
   const g = getGroupManager()?.getGroup(groupId);
@@ -21890,45 +21924,54 @@ async function openChatCircleSheet(id) {
     return;
   }
   if (id.startsWith("b:")) { await openBotCircleSheet(id, pinOption); return; }
-  if (!id.startsWith("r:") || isChildModeEnabled()) return;
-  const name = id.slice(2);
-  let room = null;
-  try { room = chatCircleRooms().find((entry) => entry.name === name) || null; } catch { room = null; }
+}
+
+function chatRoomNamed(name) {
+  if (isChildModeEnabled()) return null;
+  try { return chatListRooms().find((entry) => entry.name === name) || null; } catch { return null; }
+}
+
+/** What a room row's swipe or its half sheet chose. Delete removes a room you added, after a
+ *  confirmation; a default room is switched off, as in Public Chats settings. */
+async function runRoomRowChoice(name, choice) {
+  const room = chatRoomNamed(name);
   if (!room) return;
-  const options = [
-    room.unread > 0
-      ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this room.", icon: ACTION_TILE_ICONS.envelopeOpen }
-      : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again.", icon: ACTION_TILE_ICONS.envelopeBadge },
-    pinOption,
-    room.notify
-      ? { id: "notify", title: "Turn Off Notifications", subtitle: "No notification for new messages in this room.", icon: ACTION_TILE_ICONS.bellSlash }
-      : { id: "notify", title: "Turn On Notifications", subtitle: room.tracked ? "Notifies you of new messages, even when the app is closed." : "Notifies you of new messages while the app is open.", icon: ACTION_TILE_ICONS.bell },
-    { id: "copy", title: "Copy Room Link", subtitle: "A kachat.app link that opens this room.", icon: ACTION_TILE_ICONS.link },
-  ];
-  if (room.indexed) {
-    options.push({ id: "switch-off", title: "Delete", subtitle: "Switches this default room off. Turn it back on in Public Chats settings.", destructive: true, icon: ACTION_TILE_ICONS.trash });
-  } else if (room.joined) {
-    options.push({ id: "delete", title: "Delete", subtitle: "Removes this room and its messages from this device.", destructive: true, icon: ACTION_TILE_ICONS.trash });
-  }
-  const choice = await chooseDialog({ title: `#${name}`, layout: "tiles", options });
-  if (!choice) return;
   if (choice === "read") markBroadcastRooms([name], true);
   else if (choice === "unread") markBroadcastRooms([name], false);
-  else if (choice === "pin") toggleChatCirclePin(id);
-  else if (choice === "notify") setBroadcastRoomNotify(name, !room.notify);
+  else if (choice === "silence") setBroadcastRoomNotify(name, !room.notify);
   else if (choice === "copy") copyBroadcastRoomLink(name);
-  else if (choice === "switch-off") { removeBroadcastRooms([name]); dropChatCirclePins([id]); renderChatCircles(); }
-  else if (choice === "delete") {
+  else if (choice === "delete" && room.indexed) removeBroadcastRooms([name]);
+  else if (choice === "delete" && room.joined) {
     const ok = await confirmDialog({
       title: "Delete Room?",
       message: "Every message cached for this room on this device is deleted. This cannot be undone - rejoining later starts with no history.",
       confirmLabel: "Delete", destructive: true,
     });
-    if (!ok) return;
-    removeBroadcastRooms([name]);
-    dropChatCirclePins([id]);
-    renderChatCircles();
+    if (ok) removeBroadcastRooms([name]);
   }
+}
+
+// Hold a room's row - right-click, or swipe on touch: Mark as Read / Unread, notifications on/off,
+// Copy Room Link, Delete. No pin: rooms never go in the row above the list.
+async function openRoomRowSheet(name) {
+  const room = chatRoomNamed(name);
+  if (!room) return;
+  const options = [
+    room.unread > 0
+      ? { id: "read", title: "Mark as Read", subtitle: "Clears the unread badge on this room.", icon: ACTION_TILE_ICONS.envelopeOpen }
+      : { id: "unread", title: "Mark as Unread", subtitle: "Puts the unread badge back so you come across it again.", icon: ACTION_TILE_ICONS.envelopeBadge },
+    room.notify
+      ? { id: "silence", title: "Turn Off Notifications", subtitle: "No notification for new messages in this room.", icon: ACTION_TILE_ICONS.bellSlash }
+      : { id: "silence", title: "Turn On Notifications", subtitle: room.tracked ? "Notifies you of new messages, even when the app is closed." : "Notifies you of new messages while the app is open.", icon: ACTION_TILE_ICONS.bell },
+    { id: "copy", title: "Copy Room Link", subtitle: "A kachat.app link that opens this room.", icon: ACTION_TILE_ICONS.link },
+  ];
+  if (room.indexed) {
+    options.push({ id: "delete", title: "Delete", subtitle: "Switches this default room off. Turn it back on in Public Chats settings.", destructive: true, icon: ACTION_TILE_ICONS.trash });
+  } else if (room.joined) {
+    options.push({ id: "delete", title: "Delete", subtitle: "Removes this room and its messages from this device.", destructive: true, icon: ACTION_TILE_ICONS.trash });
+  }
+  const choice = await chooseDialog({ title: `#${name}`, layout: "tiles", options });
+  if (choice) await runRoomRowChoice(name, choice);
 }
 
 // Hold a bot's circle (iOS 5fcf755): Mark as Read / Unread, Pin to Front / Unpin, Silence /
@@ -21984,9 +22027,8 @@ async function openBotCircleSheet(id, pinOption) {
       // A bot chat is deleted from its own sheet, not in Select mode (iOS 5fcf755); so is a chat
       // pinned to the row.
       if (id.startsWith("b:") || id.startsWith("c:")) return;
-      const set = id.startsWith("g:") ? selectedGroupIds : selectedRoomNames;
-      if (set.has(key)) set.delete(key);
-      else set.add(key);
+      if (selectedGroupIds.has(key)) selectedGroupIds.delete(key);
+      else selectedGroupIds.add(key);
       renderChatCircles();
       updateChatSelectionBar();
       return;
@@ -21995,8 +22037,6 @@ async function openBotCircleSheet(id, pinOption) {
       // Clicking the open group's circle again closes it, as with a chat row.
       if (key === activeGroupId) { closeGroupChat(); return; }
       openGroupChat(key);
-    } else if (id.startsWith("r:")) {
-      openRoomFromCircle(key);
     } else if (id.startsWith("b:") || id.startsWith("c:")) {
       // A bot chat or a pinned chat from its circle, like a chat row: clicking the open one again
       // closes it.
@@ -22021,8 +22061,8 @@ async function openBotCircleSheet(id, pinOption) {
   });
 }
 
-// Mark read, mark unread and delete act on everything selected: chats, group circles and room
-// circles alike (iOS a062577).
+// Mark read, mark unread and delete act on everything selected: chats, groups and rooms alike (iOS
+// a062577).
 document.querySelector("[data-chat-mark-read]")?.addEventListener("click", () => {
   for (const id of selectedGroupIds) { markGroupOpened(id); setGroupUnread(id, 0); }
   if (selectedRoomNames.size) { try { markBroadcastRooms([...selectedRoomNames], true); } catch { /* rooms not started */ } }
@@ -22047,10 +22087,10 @@ document.querySelector("[data-chat-mark-unread]")?.addEventListener("click", () 
   setChatSelectionMode(false);
 });
 
-/** The picked rooms still in the row, with their bell state. */
+/** The picked rooms still in the list, with their bell state. */
 function selectedRoomsForBulk() {
   if (!selectedRoomNames.size || isChildModeEnabled()) return [];
-  try { return chatCircleRooms().filter((room) => selectedRoomNames.has(room.name)); } catch { return []; }
+  try { return chatListRooms().filter((room) => selectedRoomNames.has(room.name)); } catch { return []; }
 }
 
 document.querySelector("[data-chat-mute-rooms]")?.addEventListener("click", () => {
@@ -22085,7 +22125,7 @@ document.querySelector("[data-chat-delete-selected]")?.addEventListener("click",
   if (chatIds.length) deleteConversationsByIds(chatIds, { quiet: groupIds.length > 0 });
   if (groupIds.length) await deleteGroupsWithOwnerNotice(groupIds);
   if (roomNames.length) { try { removeBroadcastRooms(roomNames); } catch { /* rooms not started */ } }
-  dropChatCirclePins([...groupIds.map((id) => `g:${id}`), ...roomNames.map((name) => `r:${name}`)]);
+  dropChatCirclePins(groupIds.map((id) => `g:${id}`));
   setChatSelectionMode(false);
   if (groups) showCopyToast(groups === 1 ? "Group deleted." : `${groups} groups deleted.`);
 });
@@ -22099,8 +22139,7 @@ function deleteConversationsByIds(ids, { quiet = false } = {}) {
   const contactIdsToDelete = new Set(
     state.conversations.filter((entry) => idsToDelete.has(entry.id)).map((entry) => entry.contactId),
   );
-  // Tombstone the addresses so no backup restore (snapshot, phone archive, shared
-  // kachat-backup.json) can resurrect these chats.
+  // Tombstone the addresses so no imported chat archive can resurrect these chats.
   recordDeletedContactAddresses(
     state.contacts.filter((contact) => contactIdsToDelete.has(contact.id)).map((contact) => contact.address),
   );
@@ -22136,12 +22175,14 @@ function deleteConversationsByIds(ids, { quiet = false } = {}) {
 // of hold (KaChat-iPhone d063b897), so a hold no longer opens this; a mouse has no swipe and keeps it.
 chatList.addEventListener("contextmenu", (event) => {
   const groupRow = event.target.closest("[data-group-row]");
+  const roomRow = event.target.closest("[data-room-row]");
   const row = event.target.closest("[data-conversation-id]");
-  if ((!row && !groupRow) || chatSelectionModeActive) return;
+  if ((!row && !groupRow && !roomRow) || chatSelectionModeActive) return;
   event.preventDefault();
   // Android raises contextmenu for a hold.
   if (event.pointerType === "touch" || event.pointerType === "pen" || chatRowSwipes?.fingerIsDown()) return;
   if (groupRow) { openChatCircleSheet(`g:${groupRow.dataset.groupRow}`); return; }
+  if (roomRow) { openRoomRowSheet(roomRow.dataset.roomRow); return; }
   const conversationEntry = state.conversations.find((entry) => entry.id === row.dataset.conversationId);
   if (conversationEntry) openChatRowSheet(conversationEntry);
 });
@@ -22158,6 +22199,10 @@ chatRowSwipes = attachRowSwipes(chatList, {
         isPinned: chatCirclePins().includes(`g:${g.groupId}`),
       });
     }
+    if (id.startsWith("room:")) {
+      const room = chatRoomNamed(id.slice(5));
+      return room && chatRowSwipeActions({ unread: room.unread, isSilent: !room.notify, canPin: false });
+    }
     const conversationEntry = state.conversations.find((entry) => entry.id === id);
     const contact = contactForConversation(conversationEntry);
     if (!conversationEntry || !contact) return null;
@@ -22171,6 +22216,7 @@ chatRowSwipes = attachRowSwipes(chatList, {
   iconFor: (key) => ACTION_TILE_ICONS[key] || "",
   onAction(id, actionId) {
     if (id.startsWith("group:")) { runGroupRowChoice(id.slice(6), actionId); return; }
+    if (id.startsWith("room:")) { runRoomRowChoice(id.slice(5), actionId); return; }
     const conversationEntry = state.conversations.find((entry) => entry.id === id);
     if (conversationEntry) runChatRowChoice(conversationEntry, actionId);
   },
@@ -25814,12 +25860,11 @@ function appendIncomingOrReactionMessage(conversationEntry, message) {
 }
 
 // ---------------------------------------------------------------------------
-// Phone (iOS/Android) chat-history archive import — used by the Nextcloud
-// restore flow. The phone apps back up `kachat-backup.json` in the shared
+// Phone (iOS/Android) chat-history archive import — used by Import Chat History
+// in Settings > Storage. An exported file is in the shared
 // ChatHistoryArchive schema ({schemaVersion, exportedAt, walletAddress,
 // conversations: [{contactAddress, contactAlias, unreadCount, messages}]}),
-// which is NOT the desktop backup format. Unlike importBackupPayload (which
-// REPLACES local state), this MERGES into the existing desktop conversations:
+// and this MERGES it into the existing desktop conversations:
 // find-or-create per contact address, dedupe by txid, reactions go through the
 // same reactionsByTxId store as live messages, and base64 voice bodies become
 // small placeholders (desktop can't play the iOS Opus envelopes anyway). With
@@ -26177,13 +26222,12 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
 // ---------------------------------------------------------------------------
 // Shared chat-history archive EXPORT — the exact inverse of the import above.
 //
-// Desktop, iOS and Android all back up to the SAME file (`kachat-backup.json`)
-// in the SAME schema, so any device can restore any other device's backup:
+// Desktop, iOS and Android all export the SAME schema, so any device can import
+// any other device's file:
 //
 //   { schemaVersion: 1, exportedAt, walletAddress,
 //     conversations: [{ conversationId, contactAddress, contactAlias,
-//                       unreadCount, messages: [ChatMessage…] }],
-//     desktopState: {…}   // additive, ignored by both phones
+//                       unreadCount, messages: [ChatMessage…] }]
 //   }
 //
 // Wire constraints that are NOT negotiable (verified against the real decoders):
@@ -26203,7 +26247,6 @@ function importPhoneChatArchive(json, { reloadState = true, persist = true, rend
 // ---------------------------------------------------------------------------
 
 const CHAT_ARCHIVE_SCHEMA_VERSION = 1;
-const SHARED_BACKUP_KIND = "kachat-desktop-backup";
 
 // Desktop status -> archive deliveryStatus. Inverse of PHONE_ARCHIVE_STATUSES;
 // the pre-broadcast working states all collapse to "pending" (the phones have
@@ -26309,66 +26352,6 @@ function isPhantomArchiveMessage(message) {
   if (txId.startsWith("pending_")) return true;
   if (!txId) return status === "pending" || status === "failed";
   return false;
-}
-
-function archiveMessageKey(archiveMessage) {
-  const txId = String(archiveMessage?.txId || "").trim();
-  return txId ? `tx:${txId}` : `id:${String(archiveMessage?.id || "")}`;
-}
-
-function isArchivePlaceholderContent(content) {
-  const text = String(content || "");
-  return !text || isHiddenPlaceholder(text);
-}
-
-/** Mirrors iOS's ChatService.preferMessage: a real body beats a placeholder,
- *  then the further-along delivery status wins, then the later blockTime. */
-function preferArchiveMessage(existing, candidate) {
-  const existingPlaceholder = isArchivePlaceholderContent(existing?.content);
-  const candidatePlaceholder = isArchivePlaceholderContent(candidate?.content);
-  if (existingPlaceholder !== candidatePlaceholder) return candidatePlaceholder ? existing : candidate;
-
-  const existingPriority = ARCHIVE_STATUS_PRIORITY[String(existing?.deliveryStatus)] ?? 3;
-  const candidatePriority = ARCHIVE_STATUS_PRIORITY[String(candidate?.deliveryStatus)] ?? 3;
-  if (existingPriority !== candidatePriority) return candidatePriority > existingPriority ? candidate : existing;
-
-  return Number(candidate?.blockTime || 0) > Number(existing?.blockTime || 0) ? candidate : existing;
-}
-
-/**
- * Coerces any archive message — including one another device wrote — into the
- * strictest shape every decoder accepts, without touching what it says.
- *
- * This matters because Android currently writes `id` = the 64-hex txId and
- * `timestamp` via ISO_INSTANT (fractional seconds), BOTH of which iOS's
- * JSONDecoder rejects outright (`UUID` / `.iso8601`), taking the whole archive
- * down with them. Since desktop rewrites the shared file on every backup, it
- * heals those messages on the way out; Android keys its rows by `txId` and
- * ignores `id`/`timestamp` on import, so nothing is lost on that side.
- */
-function normalizeArchiveMessage(message) {
-  const txId = String(message?.txId || "").trim();
-  const rawId = String(message?.id || "").trim();
-  const blockTime = Math.max(0, Math.round(Number(message?.blockTime) || 0));
-  const timestampMs = blockTime > 0 ? blockTime : (Date.parse(String(message?.timestamp || "")) || Date.now());
-  const rawType = String(message?.messageType || "").trim().toLowerCase();
-  const rawStatus = String(message?.deliveryStatus || "").trim().toLowerCase();
-
-  const normalized = {
-    id: archiveUuid(rawId, `${txId}:${rawId}`),
-    txId,
-    senderAddress: String(message?.senderAddress || ""),
-    receiverAddress: String(message?.receiverAddress || ""),
-    content: String(message?.content || ""),
-    timestamp: archiveIsoTimestamp(timestampMs),
-    blockTime,
-    isOutgoing: Boolean(message?.isOutgoing),
-    messageType: archiveMessageType({ messageType: rawType, text: message?.content }),
-    deliveryStatus: ARCHIVE_STATUS_PRIORITY[rawStatus] === undefined ? "sent" : rawStatus,
-  };
-  const acceptingBlock = String(message?.acceptingBlock || "").trim();
-  if (acceptingBlock) normalized.acceptingBlock = acceptingBlock;
-  return normalized;
 }
 
 function sortArchiveMessages(messages) {
@@ -26513,233 +26496,12 @@ function buildArchiveGroups() {
   } catch { return []; }
 }
 
-function archiveExportedAtMs(archive) {
-  const parsed = Date.parse(String(archive?.exportedAt || ""));
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-/**
- * Validates the archive already sitting on the server. Every failure path
- * THROWS — the caller aborts before uploading, so an unreadable or foreign
- * backup is left exactly as it was rather than being overwritten.
- */
-function parseRemoteChatArchive(json) {
-  let parsed = null;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
-    // Not a readable archive (damaged, or cut off at rest): the backup sync replaces it in place
-    // (NEXTCLOUD_SYNC.md §7); a restore reports it.
-    const unreadable = new Error("The backup already on the server is not readable JSON. Nothing was uploaded and that file was left untouched. Move it aside (or pick another backup folder) to start a fresh backup.");
-    unreadable.code = "remoteUnreadable";
-    throw unreadable;
-  }
-  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.conversations)) {
-    const unreadable = new Error("The file already on the server is not a KaChat backup. Nothing was uploaded and it was left untouched. Pick a different backup folder.");
-    unreadable.code = "remoteUnreadable";
-    throw unreadable;
-  }
-  if (Number(parsed.schemaVersion) !== CHAT_ARCHIVE_SCHEMA_VERSION) {
-    throw new Error(`The backup already on the server uses schema version ${parsed.schemaVersion}, which this version can't merge. Nothing was uploaded and it was left untouched.`);
-  }
-  const remoteWallet = String(parsed.walletAddress || "").trim();
-  if (remoteWallet && engine.address && remoteWallet !== engine.address) {
-    throw new Error(`The backup already on the server belongs to a different wallet (${shortAddress(remoteWallet)}). Nothing was uploaded. Choose a separate backup folder for this wallet.`);
-  }
-  return parsed;
-}
-
-/**
- * Union of the archive on the server and this device's archive — this is what
- * makes the shared file a sync point rather than last-writer-wins:
- *   * a conversation present on only ONE side is kept whole;
- *   * messages are deduped by txId (falling back to id for never-broadcast
- *     ones), keeping the better copy per iOS's preferMessage ordering;
- *   * conversation metadata (alias / unreadCount) comes from whichever archive
- *     was exported more recently, and an empty value never overwrites a real
- *     one; conversationId keeps the already-published value for stability.
- * A desktop backup can therefore never delete a phone's history, or vice versa.
- */
-/** The top-level archive keys mergeChatArchives rebuilds itself (desktopState is re-attached by
- *  buildSharedBackupPayload); everything else rides through. A function, not a module constant,
- *  so it can never be read before its line has run. */
-function archiveModeledKeys() {
-  return new Set([
-    "schemaVersion", "exportedAt", "walletAddress", "conversations", "groups", "deletedContactAddresses",
-    "addressBook", "addressBookDeleted", "desktopState",
-    "portfolios", "portfolioTransactions", "portfolioFees", "portfolioDeleted",
-  ]);
-}
-
-function mergeChatArchives(remote, local) {
-  const remoteIsNewer = archiveExportedAtMs(remote) > archiveExportedAtMs(local);
-  const merged = new Map();
-  // Deletion tombstones: union of both sides, and tombstoned conversations are
-  // dropped from the merge — a chat deleted on one device stays deleted in the
-  // shared history instead of resurrecting from the other side's copy.
-  const tombstones = new Set([
-    ...(Array.isArray(remote?.deletedContactAddresses) ? remote.deletedContactAddresses : []),
-    ...(Array.isArray(local?.deletedContactAddresses) ? local.deletedContactAddresses : []),
-  ].map(String).filter(Boolean));
-
-  const absorb = (conversation, isRemote) => {
-    const contactAddress = String(conversation?.contactAddress || "").trim();
-    if (!contactAddress || !isOnActiveNetwork(contactAddress)) return;
-    if (tombstones.has(contactAddress)) return;
-    const metadataWins = isRemote ? remoteIsNewer : !remoteIsNewer;
-    const alias = String(conversation?.contactAlias || "").trim();
-    const photo = String(conversation?.contactPhoto || "").trim();
-    const conversationId = String(conversation?.conversationId || "").trim();
-    const unreadCount = Math.max(0, Number(conversation?.unreadCount || 0));
-
-    let entry = merged.get(contactAddress);
-    if (!entry) {
-      entry = { conversationId: conversationId || null, contactAddress, contactAlias: alias || null, contactPhoto: photo || null, unreadCount, messages: new Map() };
-      merged.set(contactAddress, entry);
-    } else {
-      if (alias && (metadataWins || !entry.contactAlias)) entry.contactAlias = alias;
-      // Same rule as alias: the newer export wins, and an empty photo never clears a real one.
-      if (photo && (metadataWins || !entry.contactPhoto)) entry.contactPhoto = photo;
-      if (conversationId && !entry.conversationId) entry.conversationId = conversationId;
-      if (metadataWins) entry.unreadCount = unreadCount;
-    }
-
-    for (const message of Array.isArray(conversation?.messages) ? conversation.messages : []) {
-      if (!message || typeof message !== "object") continue;
-      // Phantom scrub, matching iOS and Android. A row whose txId is blank or still a
-      // provisional pending_ id never reached the chain and can never be reconciled with
-      // its delivered self, so absorbing it would re-publish rows the phones just scrubbed
-      // on this device's next upload, and render them locally as eternal "waiting" rows.
-      if (isPhantomArchiveMessage(message)) continue;
-      const key = archiveMessageKey(message);
-      const existing = entry.messages.get(key);
-      entry.messages.set(key, existing ? preferArchiveMessage(existing, message) : message);
-    }
-  };
-
-  // Remote first so it seeds identity; local second so this device's newer view
-  // can win the per-field metadata contest when it is in fact newer.
-  for (const conversation of Array.isArray(remote?.conversations) ? remote.conversations : []) absorb(conversation, true);
-  for (const conversation of local.conversations) absorb(conversation, false);
-
-  const conversations = [...merged.values()]
-    .map((entry) => ({
-      // conversationId is normalized too — iOS decodes it as UUID?, so a
-      // non-UUID one from another client would throw on its restore.
-      conversationId: entry.conversationId ? archiveUuid(entry.conversationId, `conversation:${entry.contactAddress}`) : null,
-      contactAddress: entry.contactAddress,
-      contactAlias: entry.contactAlias,
-      ...(entry.contactPhoto ? { contactPhoto: entry.contactPhoto } : {}),
-      unreadCount: entry.unreadCount,
-      messages: sortArchiveMessages([...entry.messages.values()].map(normalizeArchiveMessage)),
-    }))
-    .sort((a, b) => a.contactAddress.localeCompare(b.contactAddress));
-
-  // Groups: union both sides by groupId so the shared cloud file keeps every device's groups
-  // and the union of their message history. For a group in both, the higher currentEpoch wins
-  // the key material and messages are unioned (deduped by msgIdHex/txId). A group tombstoned
-  // (deleted) on THIS device is dropped from the merge so a delete isn't undone by the remote.
-  const mgr = getGroupManager();
-  const groupsById = new Map();
-  const absorbGroup = (g) => {
-    const id = String(g?.groupId || "").trim();
-    if (!id) return;
-    if (mgr?.isGroupTombstoned?.(id, g.adminSigningPub || null)) return;
-    const incomingEpoch = Number(g.currentEpoch || 0);
-    const existing = groupsById.get(id);
-    const msgMap = existing?.__msgMap || new Map();
-    for (const m of Array.isArray(g.messages) ? g.messages : []) {
-      const key = String(m?.msgIdHex || m?.txId || "");
-      if (key && !msgMap.has(key)) msgMap.set(key, m);
-    }
-    if (!existing || incomingEpoch >= Number(existing.currentEpoch || 0)) {
-      groupsById.set(id, { ...g, __msgMap: msgMap });
-    } else {
-      existing.__msgMap = msgMap;
-    }
-  };
-  for (const g of Array.isArray(remote?.groups) ? remote.groups : []) absorbGroup(g);
-  for (const g of Array.isArray(local?.groups) ? local.groups : []) absorbGroup(g);
-  const mergedGroups = [...groupsById.values()].map((g) => {
-    const { __msgMap, ...rest } = g;
-    return { ...rest, messages: [...__msgMap.values()] };
-  });
-
-  // Address Book: per address the newest edit or deletion wins, the winner's photo with it
-  // (NEXTCLOUD_SYNC.md §5, iOS mergeArchiveAddressBooks). Local first, so a tie keeps ours.
-  let book = { addressBook: [], addressBookDeleted: [] };
-  try { book = mergeAddressBookArchives(local, remote); } catch { /* unreadable: both sides dropped below */ }
-
-  // Portfolios: per item the newest edit or deletion wins, a deleted portfolio takes its rows and
-  // fees, the list is renumbered (iOS 11f1548 PortfolioSync.merge). Empty keys are left out.
-  let portfolioKeys = {};
-  try { portfolioKeys = mergePortfolioArchives(local, remote); } catch { /* unreadable: both sides dropped below */ }
-
-  // Keys this client doesn't model are carried through untouched (NEXTCLOUD_SYNC.md §5), so a
-  // newer client's fields survive this write. Ours are rebuilt below and win.
-  const carried = {};
-  const modeled = archiveModeledKeys();
-  for (const side of [remote, local]) {
-    if (!side || typeof side !== "object") continue;
-    for (const [key, value] of Object.entries(side)) {
-      if (!modeled.has(key)) carried[key] = value;
-    }
-  }
-
-  return {
-    ...carried,
-    schemaVersion: CHAT_ARCHIVE_SCHEMA_VERSION,
-    exportedAt: local.exportedAt,
-    walletAddress: local.walletAddress || String(remote?.walletAddress || "") || null,
-    conversations,
-    ...(mergedGroups.length ? { groups: mergedGroups } : {}),
-    ...(tombstones.size ? { deletedContactAddresses: [...tombstones].sort() } : {}),
-    ...(book.addressBook.length ? { addressBook: book.addressBook } : {}),
-    ...(book.addressBookDeleted.length ? { addressBookDeleted: book.addressBookDeleted } : {}),
-    ...portfolioKeys,
-  };
-}
-
-/** The desktop-only half of the backup, carried in the additive `desktopState`
- *  key. Both phone decoders skip unknown top-level keys (iOS: synthesized
- *  Codable init; Android: Gson, which has no strict-unknown mode at all), so
- *  this rides along without breaking either restore. */
-function buildDesktopStateSnapshot() {
-  return {
-    kind: SHARED_BACKUP_KIND,
-    version: 1,
-    savedAt: new Date().toISOString(),
-    state: JSON.parse(chatStorageGetSync(accountScopedKey(STORAGE_KEY)) || "null"),
-    history: JSON.parse(chatStorageGetSync(accountScopedKey(MESSAGE_HISTORY_KEY)) || "null"),
-    // Per-contact prefs (mute + photo-display toggle) live in a separate global key,
-    // so they must be carried explicitly or a restore would lose them.
-    contactPrefs: (() => { try { return JSON.parse(localStorage.getItem(CONTACT_PREFS_KEY) || "{}") || {}; } catch { return {}; } })(),
-    // Per-group notification mode (Group Info > Notifications) lives in its own global key
-    // for the same reason, so it rides along too.
-    groupPrefs: (() => { try { return JSON.parse(localStorage.getItem(GROUP_PREFS_KEY) || "{}") || {}; } catch { return {}; } })(),
-  };
-}
-
-/**
- * Full upload body for `kachat-backup.json`. `existingRemoteJson` is whatever
- * the server already holds (null when there is no backup yet); it is merged in
- * so this upload can only ever ADD to the shared history.
- */
-function buildSharedBackupPayload(existingRemoteJson = null) {
-  const local = buildLocalChatArchive();
-  const remote = existingRemoteJson ? parseRemoteChatArchive(existingRemoteJson) : null;
-  const archive = remote ? mergeChatArchives(remote, local) : local;
-  archive.desktopState = buildDesktopStateSnapshot();
-  return JSON.stringify(archive, null, 2);
-}
-
 // ---------------------------------------------------------------------------
-// Encrypted Backup Envelope (v1) — see ui/backup-crypto.js. The cloud copy of
-// `kachat-backup.json` is encrypted at rest with a key derived from the
-// identity private key (engine.privateKeyHex, the m/44'/111111'/0'/0/0 key),
-// so every device on the same seed reads/writes the same file and nothing else
-// can. The plaintext INSIDE the envelope is the unchanged ChatHistoryArchive,
-// desktopState included.
+// Encrypted Backup Envelope (v1) — see ui/backup-crypto.js. An exported chat
+// archive and the Nextcloud `kachat-contacts.json` are encrypted at rest with a
+// key derived from the identity private key (engine.privateKeyHex, the
+// m/44'/111111'/0'/0/0 key), so every device on the same seed can read them and
+// nothing else can.
 // ---------------------------------------------------------------------------
 
 /** Writer half: encrypts a plaintext archive JSON string into the envelope. */
@@ -26755,52 +26517,6 @@ async function sealSharedBackupJson(plaintextJson) {
 async function openSharedBackupJson(json) {
   if (json == null) return json;
   return openBackupEnvelope(json, String(engine.privateKeyHex || "").trim(), String(engine.address || ""));
-}
-
-/** Write-through of a desktop state snapshot (from `desktopState`, or from a
- *  legacy kachat-backup-desktop.json body) into the live storage. */
-function applyDesktopStateSnapshot(snapshot) {
-  // Restoring is a backfill: the next sync sweep must not notify or mark its messages
-  // unread (see pendingInitialCatchUp).
-  pendingInitialCatchUp = true;
-  liveSinceMs = Date.now();
-  const serialized = JSON.stringify(snapshot.state);
-  chatStorageSetSync(accountScopedKey(STORAGE_KEY), serialized);
-  chatStorageSetSync(accountScopedKey(STATE_BACKUP_KEY), serialized);
-  if (snapshot.history) {
-    chatStorageSetSync(accountScopedKey(MESSAGE_HISTORY_KEY), JSON.stringify(snapshot.history));
-  }
-  // Restore per-contact prefs by MERGING (never clobber prefs for contacts outside
-  // this backup, e.g. another account's contacts sharing the global store).
-  if (snapshot.contactPrefs && typeof snapshot.contactPrefs === "object") {
-    try {
-      const current = JSON.parse(localStorage.getItem(CONTACT_PREFS_KEY) || "{}") || {};
-      contactPrefs = { ...current, ...snapshot.contactPrefs };
-      localStorage.setItem(CONTACT_PREFS_KEY, JSON.stringify(contactPrefs));
-    } catch { /* leave existing prefs untouched on parse failure */ }
-  }
-  // Same merge rule for the per-group notification modes.
-  if (snapshot.groupPrefs && typeof snapshot.groupPrefs === "object") {
-    try {
-      const current = JSON.parse(localStorage.getItem(GROUP_PREFS_KEY) || "{}") || {};
-      groupPrefs = { ...current, ...snapshot.groupPrefs };
-      localStorage.setItem(GROUP_PREFS_KEY, JSON.stringify(groupPrefs));
-    } catch { /* leave existing prefs untouched on parse failure */ }
-  }
-  reloadStateFromBrowserStorage();
-  renderChats();
-}
-
-/** Restores the desktop-only state carried inside a shared archive. Returns
- *  false when the file has none (i.e. it was written by a phone), which is the
- *  cue to fall back to a legacy desktop backup file if one is still there. */
-function importDesktopStateFromSharedArchive(json) {
-  let parsed = null;
-  try { parsed = JSON.parse(json); } catch { return false; }
-  const snapshot = parsed?.desktopState;
-  if (!snapshot || typeof snapshot !== "object" || !snapshot.state) return false;
-  applyDesktopStateSnapshot(snapshot);
-  return true;
 }
 
 // Sends a reaction as a real on-chain message (same encrypted pipeline as
@@ -29664,7 +29380,7 @@ async function exportChatHistoryFile() {
     // iOS exportChatHistoryArchive: "kachat-history-<ISO 8601 with fractional seconds>.json",
     // colons swapped for dashes. The file itself is the confirmation; no toast.
     const stamp = new Date().toISOString().replace(/:/g, "-");
-    // Sealed with the same envelope the Nextcloud backup uses (iOS does the same for its local
+    // Sealed with the same envelope Nextcloud's contacts file uses (iOS does the same for its local
     // export): the file carries group keys, and a plaintext copy in Downloads is not a place for
     // them. Every platform's importer already opens envelopes.
     const sealed = await sealSharedBackupJson(JSON.stringify(archive));
@@ -30587,7 +30303,7 @@ queueMicrotask(async () => {
       // Rooms no longer feed the profile bell (iOS 2010124): the Public Chats tab counts them.
       onIncomingBroadcast: () => {},
     });
-    // The room circles sit above the Chats list: if Chats came up before the rooms started, they
+    // The rooms are rows in the Chats list: if Chats came up before the rooms started, they
     // go live now (setActiveAppTab does it on every later visit).
     if (currentAppTab === "chats" && !isChildModeEnabled()) refreshBroadcasts();
   } catch (error) { appendEngineLog(`initBroadcasts did not start: ${error?.message || error}`); }
@@ -30669,14 +30385,6 @@ queueMicrotask(async () => {
     initNextcloud({
       accountScopedKey, escapeHtml, appendEngineLog,
       showToast: showCopyToast,
-      getActiveConversationId: () => activeConversationId,
-      // A real re-render for the open thread. Without this the module falls back to
-      // dispatching synthetic clicks at the sidebar row, which also clears composer state.
-      refreshActiveConversationView: () => {
-        if (!activeConversationId) return;
-        const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
-        if (conversationEntry) renderMessages(conversationEntry);
-      },
       queueConversationMessage,
       // "Send from Nextcloud" staging: the picked file's share link lands in the composer for
       // review instead of auto-sending — the user presses send themselves.
@@ -30689,39 +30397,10 @@ queueMicrotask(async () => {
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.focus();
       },
-      // The backup payload is the CROSS-PLATFORM ChatHistoryArchive (same file name
-      // and same schema iOS/Android write), merged with whatever the server already
-      // holds so a desktop upload can only ever add to the shared history. The
-      // desktop's own persisted state rides along in the additive `desktopState`
-      // key, which both phone decoders ignore. Since envelope v1 the upload body is
-      // ENCRYPTED: decrypt what the server already has (legacy plaintext passes
-      // through), merge, then always seal the union. A failed decrypt throws here,
-      // so runBackup aborts before its PUT and the remote file is left untouched.
-      exportBackupPayload: async (existingRemoteJson = null) => {
-        const remotePlainJson = existingRemoteJson == null ? null : await openSharedBackupJson(existingRemoteJson);
-        return sealSharedBackupJson(buildSharedBackupPayload(remotePlainJson));
-      },
-      // Reader for downloaded backup files: decrypts an envelope, passes legacy
-      // plaintext through, throws (aborting the restore) when decryption fails.
+      // The contacts file's envelope (NEXTCLOUD_SYNC.md §3). Writers always encrypt; the reader throws
+      // on another wallet's file or a failed decrypt, so a sync aborts before it writes anything.
+      sealBackupPayload: sealSharedBackupJson,
       openBackupPayload: openSharedBackupJson,
-      // Legacy `kachat-backup-desktop.json` bodies only — kept so a user with an
-      // old desktop-only backup can still recover from it.
-      importBackupPayload: (json) => {
-        const parsed = JSON.parse(json);
-        if (parsed?.kind !== "kachat-desktop-backup" || !parsed.state) {
-          throw new Error("That file is not a KaChat desktop backup.");
-        }
-        // Write-through the same storage the live persist path uses (IndexedDB
-        // cache when available, localStorage fallback otherwise), then reload
-        // synchronously from that cache.
-        applyDesktopStateSnapshot(parsed);
-      },
-      // The desktop-only half of a shared `kachat-backup.json`; false when the
-      // file was written by a phone and carries no desktopState.
-      importDesktopState: importDesktopStateFromSharedArchive,
-      // The shared archive itself (whoever wrote it): merged into the desktop
-      // conversations, never a state replace.
-      importPhoneArchive: importPhoneChatArchive,
     });
   } catch (error) { appendEngineLog(`initNextcloud did not start: ${error?.message || error}`); }
 
@@ -30929,7 +30608,7 @@ queueMicrotask(async () => {
         } catch { /* not ready */ }
         try { refreshChatInfoAddressBookRow(); } catch { /* not ready */ }
         // A user edit owes the backup an upload; a restore came FROM the backup (iOS didChange).
-        if (kind !== "restore") { try { noteNextcloudActivity(); } catch { /* not connected */ } }
+        if (kind !== "restore") { try { noteContactActivity(); } catch { /* not connected */ } }
       },
     });
     configureSendAddressBook({

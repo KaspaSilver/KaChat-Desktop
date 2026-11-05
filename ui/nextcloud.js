@@ -7,29 +7,23 @@ import { nextcloudOffReason, KASPA_QUICK_START_URL } from "./nextcloud-availabil
 import {
   addressBookHasBackupData, addressBookHoldsWallet, addressBookWalletAddress, mergeSharedContactsFile, sharedContactsFileJson,
 } from "./address-book-store.js";
+import { parseBackupEnvelope } from "./backup-crypto.js";
 // Nextcloud integration — desktop port of the iOS stack:
 // connect a server with an app password, browse it over WebDAV, send photos/videos in chats as
 // public /s/TOKEN share links (rendered by the link-preview feature), and keep the account's
-// chat data in sync with the server.
+// contacts in sync with the server.
 //
-// Sync is TWO-WAY, not an upload schedule. Uploading: local changes arm a debounced merge
-// upload (fast while a chat is open, relaxed otherwise), floored so a busy chat coalesces,
-// with an hourly heartbeat and a flush when the tab is hidden. Downloading: a change watcher
-// polls the shared file's ETag with a Depth-0 PROPFIND and merge-imports anything another
-// device wrote, so a message sent on a phone lands here in seconds instead of waiting for
-// someone to press Restore. Both halves stop while the page is hidden. See the "Automatic
-// sync" section for the cadence tiers and the own-write ETag guard that keeps a device from
-// importing its own upload back.
+// Nextcloud backs up contacts and nothing else (iOS 4314e17e, NEXTCLOUD_SYNC.md "Contacts only"):
+// messages and group chats come back from the seed, off the chain. The file is one encrypted
+// `kachat-contacts.json` per folder (AES-256-GCM keyed off the identity private key, see
+// ui/backup-crypto.js), holding the Address Book export. Sync is two-way: a contact changing arms a
+// debounced read, merge, write, with an hourly heartbeat and a flush when the tab is hidden, and a
+// change watcher polls the file's ETag with a Depth-0 PROPFIND and merges what another device wrote.
+// A new device gets its contacts from that first poll. `kachat-backup.json` is retired: never read or
+// written, only deleted when the user deletes their backup along with their account.
 //
-// The backup is cross-platform: one `kachat-backup.json` per folder in the shared
-// ChatHistoryArchive schema, written and read by iPhone, Android and desktop alike. Every
-// upload first downloads the file already there and uploads the UNION, so restoring on one
-// device never costs another device its history. Since envelope v1 the file is encrypted at
-// rest (AES-256-GCM keyed off the identity private key — see ui/backup-crypto.js); every
-// device on the same seed derives the same key, and legacy plaintext files stay restorable.
-//
-// One file is outside the backup: KaPay's contacts, shared in the clear (see "Contacts shared with
-// KaPay" below).
+// One other file is outside the backup: KaPay's contacts, shared in the clear (see "Contacts shared
+// with KaPay" below).
 //
 // Browser reality: unlike the native apps, fetches here would be subject to CORS — solved by
 // routing all API traffic through vite.config.mjs's same-origin /nc-proxy passthrough (see
@@ -41,55 +35,38 @@ import {
 // this page's memory while KaChat is unlocked. While locked nothing here runs (no backup, sync
 // watcher, media or Talk); Settings still shows the server and login.
 
-// Account-scoped (per wallet), which is also what makes `lastBackupEtag` and `autoRestoreDone`
-// per-wallet the way iOS scopes them by wallet hash suffix:
+// Account-scoped (per wallet), which is also what makes `lastBackupEtag` per-wallet the way iOS
+// scopes it by wallet hash suffix:
 // { server, username, appPassword, startFolder, backupFolder, autoBackup, lastAutoBackup,
-//   lastBackupEtag, autoRestoreDone }   (with an app password set, appPasswordSealed
+//   lastBackupEtag }   (with an app password set, appPasswordSealed
 //   { v, iv, ct } is stored instead of appPassword; in memory `nc` always has the opened one)
 const NC_KEY = "kachat-nextcloud-v1";
-// ONE shared backup file across iPhone, Android and desktop: same name, same
-// ChatHistoryArchive schema, so any device can restore any other device's
-// backup. Uploads MERGE with whatever is already on the server (see runBackup),
-// so no device can ever delete another's history.
-const BACKUP_FILENAME = "kachat-backup.json";
-// Pre-4.0 desktop-only file. Read on restore so an old backup can still be
-// recovered; never written again (so it also never gets encrypted — existing
-// copies stay plaintext-readable forever, though the restore path would open
-// an enveloped copy too).
-const LEGACY_DESKTOP_BACKUP_FILENAME = "kachat-backup-desktop.json";
+const BACKUP_FILENAME = "kachat-contacts.json";
+// Where chat history used to go, and the pre-4.0 desktop-only file before that. Never read or written
+// now; they stay on the server until the account is deleted (deleteRemoteNextcloudBackup).
+const RETIRED_BACKUP_FILENAMES = ["kachat-backup.json", "kachat-backup-desktop.json"];
 const DEFAULT_BACKUP_FOLDER = "KaChat";
-// Heartbeat: upload even when nothing looks changed, so a device that missed an activity
-// signal still refreshes the shared file once an hour.
+// Heartbeat: a sync even when no contact changed, so a device that missed a change still catches up.
 const AUTO_BACKUP_MIN_MS = 3600_000;
 const AUTO_CATCHUP_MS = 86_400_000;
 
-// --- Near-live sync cadence (mirrors iOS NextcloudService's tier constants) -------------
-// Two tiers everywhere: fast while a chat is open on screen (the latency-sensitive case),
-// relaxed elsewhere in the app. Everything stops while the page is hidden.
-//
-// Change watcher: how often the shared file's ETag is polled with a Depth-0 PROPFIND (a tiny
-// request, no body download). iOS: inChatChangeWatchInterval 5s / idleChangeWatchInterval 30s.
-const CHANGE_WATCH_IN_CHAT_MS = 5_000;
-const CHANGE_WATCH_IDLE_MS = 30_000;
-// Failed polls back off from the CURRENT tier's base (x3 per consecutive failure, capped) and
-// snap back to the tier cadence on the next success. iOS: changeWatchBackoffMax 60s.
+// --- Sync cadence (iOS NextcloudService) ------------------------------------------------
+// Change watcher: how often the file's ETag is polled with a Depth-0 PROPFIND (a tiny request, no
+// body download). Everything stops while the page is hidden.
+const CHANGE_WATCH_MS = 30_000;
+// Failed polls back off (x3 per consecutive failure, capped) and snap back on the next success.
 const CHANGE_WATCH_BACKOFF_MAX_MS = 60_000;
 const CHANGE_WATCH_BACKOFF_FACTOR_MAX = 12;
-// Quiet time after the last local change before the merge upload runs.
-// iOS: inChatSyncDebounceInterval 5s / idleSyncDebounceInterval 15s.
-const SYNC_DEBOUNCE_IN_CHAT_MS = 5_000;
-const SYNC_DEBOUNCE_IDLE_MS = 15_000;
-// Floor between AUTOMATIC merge uploads (the manual backup button is unaffected). The debounce
-// decides WHEN a burst has settled; this decides how often settled bursts may actually upload.
-// A debounce firing earlier re-arms itself to the earliest allowed time instead of dropping the
-// sync (the dirty flag stays set), so nothing is lost. iOS: autoSyncMinInterval 90s.
+// Quiet time after the last contact change before the merge upload runs.
+const SYNC_DEBOUNCE_MS = 15_000;
+// Floor between AUTOMATIC merge uploads (the manual backup button is unaffected). A debounce firing
+// earlier re-arms itself to the earliest allowed time instead of dropping the sync (the dirty flag
+// stays set), so nothing is lost.
 const AUTO_SYNC_MIN_MS = 90_000;
-// Coalescing window for the DOM change detector below — a render burst counts once.
-const ACTIVITY_COALESCE_MS = 400;
 
 // Contacts shared with KaPay (iOS 6c80aea3, NEXTCLOUD_SYNC.md §9). Always this folder at the root of
 // the user's files, whatever nc.backupFolder says: KaPay only looks here (its backupPath), and iOS
-// keeps it here even when the chat backup's folder was moved. So an account whose backup was found
+// keeps it here even when the contacts backup's folder was moved. So an account whose backup was found
 // in "Apps/KaChat" or "kachat" (Build 259) gets its contacts in "KaChat" all the same.
 const SHARED_CONTACTS_FOLDER = "KaChat";
 const SHARED_CONTACTS_FILENAME = "KaPay Contacts.json";
@@ -109,17 +86,12 @@ let thumbCache = new Map(); // path -> object URL
 let autoBackupTimer = null;
 
 // --- Near-live sync state ---------------------------------------------------------------
-let syncInFlight = false;       // a merge upload / silent import owns the local store
-let syncDirty = false;          // local changes are owed an upload
+let syncInFlight = false;       // a merge upload or merge owns the contacts
+let syncDirty = false;          // a contact change is owed an upload
 let syncDebounceTimer = null;
 let lastAutoSyncAt = 0;
 let watcherEpoch = 0;           // bumped to retire a running watcher loop
 let watcherRunning = false;
-let lastSeenConversationId = null;
-let autoRestoreTimer = null;
-let activityObserver = null;
-let activityCoalesceTimer = null;
-let lastActivityFingerprint = null;
 let lastSharedContactsCheck = 0; // when the app last looked at the contacts file shared with KaPay
 let sharedContactsInFlight = false; // one at a time: two PUTs at once get 423 Locked
 
@@ -149,9 +121,9 @@ export function nextcloudUnavailableReason() {
 }
 
 function loadState() {
-  // Testnet: Nextcloud is off (iOS af8ec68). The backup archive, media folder and calls are one
+  // Testnet: Nextcloud is off (iOS af8ec68). The contacts file, media folder and calls are one
   // per account across both networks, so testnet could otherwise overwrite the mainnet backup or
-  // import mainnet history. Nothing syncs, restores, uploads or rings; every option hides as if
+  // bring mainnet contacts in. Nothing syncs, restores, uploads or rings; every option hides as if
   // disconnected, and the mainnet connection is waiting, untouched, for the next mainnet load.
   ncLocked = null;
   if (NC_OFF) { nc = null; return; }
@@ -412,13 +384,13 @@ function backupFolderPath() {
 }
 
 /** Finds the KaChat folder this account already has, instead of assuming there isn't one (iOS
- *  discoverExistingBackupFolder). A folder holding the backup wins; a folder merely NAMED KaChat
- *  (any case, anywhere in the first few levels) is the fallback. Either way it is stored as the
- *  backup folder, so Settings names it rather than "KaChat (default)", and nothing makes a second
+ *  discoverExistingBackupFolder). A folder holding the contacts file wins; a folder merely NAMED
+ *  KaChat (any case, anywhere in the first few levels) is the fallback. Either way it is stored as
+ *  the backup folder, so Settings names it rather than "KaChat (default)", and nothing makes a second
  *  KaChat folder beside it. A folder you picked yourself is never replaced. Breadth-first and
  *  bounded: a WebDAV walk of someone's whole drive is not a thing to do on connect. Automatic Sync
- *  stays as it is (off after connecting): switching it on is what restores from that backup, once. */
-const BACKUP_FOLDER_SCAN_VERSION = 2; // 2: the named-folder fallback; connections scanned before it get it once
+ *  stays as it is (off after connecting). */
+const BACKUP_FOLDER_SCAN_VERSION = 3; // 3: looks for the contacts file; connections scanned before it get it once
 const FOLDER_DISCOVERY_MAX_FOLDERS = 40;
 const FOLDER_DISCOVERY_MAX_DEPTH = 3;
 
@@ -431,8 +403,8 @@ async function discoverExistingBackupFolder() {
     visited += 1;
     let entries;
     try { entries = await listFolder(path); } catch { continue; }
-    // A folder holding the backup file IS the answer - stop looking.
-    if (entries.some((f) => !f.isDirectory && (f.name === BACKUP_FILENAME || f.name === LEGACY_DESKTOP_BACKUP_FILENAME))) {
+    // A folder holding the contacts file IS the answer - stop looking.
+    if (entries.some((f) => !f.isDirectory && f.name === BACKUP_FILENAME)) {
       return path ? { path, hasBackup: true } : null;
     }
     for (const entry of entries) {
@@ -458,7 +430,7 @@ async function adoptExistingBackupFolder() {
     saveState();
     renderSettings();
     if (found.hasBackup && !nc.autoBackup) {
-      deps.showToast?.(`Found your KaChat backup in "${found.path}". Turn on Automatic Sync to restore from it.`);
+      deps.showToast?.(`Found your KaChat contacts in "${found.path}". Turn on Automatic Sync to bring them in.`);
     } else if (!found.hasBackup) {
       deps.showToast?.(`Using your existing "${found.path}" folder for backups.`);
     }
@@ -485,7 +457,7 @@ async function ensureFolder(davRoot, parts) {
 
 // --- Plain files in the KaChat folder (Portfolio CSV export / import, iOS aa5d783) ---
 
-/** Uploads `body` as `filename` into the KaChat folder (backupFolderPath - beside the chat
+/** Uploads `body` as `filename` into the KaChat folder (backupFolderPath - beside the contacts
  *  backup), creating the folder chain if needed, and returns the stored path. A file of the same
  *  name is replaced; exports carry a timestamp in their name, so each one is a new file.
  *  `keepSpaces` keeps a name the user gave (a portfolio's, "KaChat Contacts") readable in
@@ -541,15 +513,15 @@ export async function downloadNextcloudText(path, { maxBytes = 10_000_000 } = {}
 
 // --- Contacts shared with KaPay (iOS 6c80aea3, NEXTCLOUD_SYNC.md §9) ---
 //
-// KaPay, KaChat's wallet app, never reads kachat-backup.json: it keeps its contacts as a plain JSON
+// KaPay, KaChat's wallet app, never reads kachat-contacts.json: it keeps its contacts as a plain JSON
 // file. KaChat reads, merges and writes that same file, which is how a contact added or deleted in
 // either app reaches the other. It holds one account: a file naming another account is left out of
 // the merge and replaced (the store's mergeSharedContactsFile), so two accounts on one Nextcloud
 // login take turns replacing it, and neither ever gets the other's contacts.
 
 /** With Automatic Sync on, brings in KaPay's changes when the app opens, on an account activation
- *  and while the change watcher runs. A change it brings is passed on to the other KaChat clients
- *  through the chat backup. */
+ *  and while the change watcher runs. A change it brings is passed on to this account's other devices
+ *  through the contacts file. */
 function syncSharedContactsIfDue() {
   if (!nc?.autoBackup || sharedContactsInFlight || document.visibilityState === "hidden") return;
   if (lastSharedContactsCheck && Date.now() - lastSharedContactsCheck < SHARED_CONTACTS_CHECK_MS) return;
@@ -559,7 +531,7 @@ function syncSharedContactsIfDue() {
   window.setTimeout(async () => {
     if (nc !== account) return;
     try {
-      if (await syncSharedContacts() && nc === account) noteLocalActivity();
+      if (await syncSharedContacts() && nc === account) noteContactActivity();
     } catch (error) {
       deps.appendEngineLog?.(`[Nextcloud] Syncing contacts with KaPay failed: ${error.message}`);
     }
@@ -674,7 +646,7 @@ async function uploadBackup(payloadJson) {
   if (mkcol.status === 401) throw new Error(`Nextcloud refused the files path for user "${nc?.userId || nc?.username || ""}" (HTTP 401). If you signed in with an email or a different spelling of your name, disconnect and reconnect with your Nextcloud user id.`);
   if (!mkcol.ok && mkcol.status !== 405) throw new Error(`Could not create the backup folder (HTTP ${mkcol.status}).`);
 
-  // The archive is written to a temporary file first and then renamed over the backup (WebDAV
+  // The file is written to a temporary file first and then renamed over the backup (WebDAV
   // MOVE), the way sync clients do it. Nextcloud write-locks a file for as long as a PUT into it
   // runs, and an upload cut off halfway (a tab closed during its final flush, a dropped
   // connection) left that lock on the backup itself until the server expired it - every later
@@ -745,85 +717,61 @@ async function uploadBackup(payloadJson) {
 }
 const LOCK_RETRY_DELAYS_S = [1, 2, 4, 8, 15];
 
-// Backups on this device queue behind each other: Back Up Now must not run into the automatic
+// Backups on this device queue behind each other: Back Up Contacts Now must not run into the automatic
 // sync's upload of the same file (iOS 6551904).
 let backupChain = Promise.resolve();
-function runBackup() {
+/** Exported for tools/test-nextcloud-shared-contacts.mjs. */
+export function runBackup() {
   const run = backupChain.then(() => performBackup(), () => performBackup());
   backupChain = run.then(() => {}, () => {});
   return run;
 }
 
-/**
- * One backup run: read what the server already has, hand it to the exporter so
- * the two archives are unioned, then upload the union. The exporter also owns
- * the encrypted-envelope codec: it decrypts the downloaded file when it is an
- * envelope (legacy plaintext still merges as-is) and ALWAYS encrypts the
- * uploaded union, so the file at rest is unreadable without this wallet's key.
- *
- * All failure modes deliberately abort BEFORE the PUT, leaving the existing
- * file untouched: a download error other than 404 throws out of
- * downloadBackupFile, and an undecryptable/unreadable/foreign/wrong-schema
- * body throws out of exportBackupPayload.
- */
-/// Is this truncation the FILE being short, or the transfer losing its tail?
-///
-/// It matters, because the two need opposite handling and look identical from the download alone.
-/// A lost tail must abort and leave the server untouched. A file that is genuinely short is
-/// damaged goods that will fail identically forever - and since every backup reads the remote
-/// before writing, refusing to proceed would mean this device could never repair it.
-///
-/// The server knows its own file's size. If it matches what arrived, nothing was lost in
-/// transit and the stored file really is that short.
-async function repairableTruncation(error) {
-  const received = Number(error?.truncatedLength || 0);
-  if (!received) return false;
-  const info = await fetchBackupInfo();
-  const serverSize = Number(info?.size || 0);
-  if (!serverSize) return false;
-  // Characters against bytes: a multi-byte character makes the string shorter than the file, never
-  // longer, so "arrived at least as long as the file" is the safe form of the comparison.
-  return received >= serverSize;
-}
-
-// One sync = read, merge, write, verify (NEXTCLOUD_SYNC.md §4, §7). The file is written to one
-// hidden temp copy per device and renamed over the backup (uploadBackup), so a cut-off upload never
-// locks or damages it; leftover copies older than an hour are cleared after a sync. Nextcloud's own
-// version history keeps earlier contents. What happens to the server copy:
-// - a download that failed or stopped early (a transfer problem) throws before any PUT;
-// - another wallet's file, a hint-less envelope that won't open, or a newer schema throws - never
-//   touched;
-// - THIS wallet's file that can't be read (failed decrypt under our own walletHint, content that
-//   isn't a valid archive, or a file cut off at rest) is overwritten in place with this device's
-//   history. Every other device unions its own history back in on its next sync.
+// One sync = read, merge, write, verify (NEXTCLOUD_SYNC.md "Contacts only"). The newest edit or
+// deletion wins per address, so no device can undo another's newer change, and the file is written
+// only when it is missing something this device has. It goes to one hidden temp copy per device and
+// is renamed over the file (uploadBackup), so a cut-off upload never locks or damages it. What happens
+// to the server copy:
+// - a download that failed or stopped early (a transfer problem) throws before any write;
+// - a plain file, another wallet's file, a hint-less envelope that won't open, or one that opens and
+//   isn't an Address Book throws - never touched;
+// - THIS wallet's envelope that fails to decrypt is replaced in place. Nextcloud's own version history
+//   keeps its earlier contents.
 async function performBackup() {
-  // KaPay's contacts first, so this backup carries them to the other KaChat clients. A problem with
-  // that file never stops the chat backup (iOS 6c80aea3).
   const account = nc;
+  const wallet = addressBookWalletAddress();
+  if (!account || !wallet) throw new Error("Open a wallet first.");
+  const stillCurrent = () => nc === account && addressBookHoldsWallet(wallet);
+  // KaPay's contacts first, so this backup carries them to this account's other devices. A problem
+  // with that file never stops this one (iOS 6c80aea3).
   try {
     await syncSharedContacts();
   } catch (error) {
     deps.appendEngineLog?.(`[Nextcloud] Syncing contacts with KaPay failed: ${error.message}`);
   }
-  if (nc !== account) throw new Error("The account changed during the backup.");
-  let existingRemoteJson = null;
-  try {
-    existingRemoteJson = await downloadBackupFile(BACKUP_FILENAME);
-  } catch (error) {
-    if (!(await repairableTruncation(error))) throw error;
-    deps.appendEngineLog?.("[Nextcloud] The backup on the server is cut off; replacing it in place (Nextcloud keeps its earlier versions).");
-    existingRemoteJson = null;
+  if (!stillCurrent()) throw new Error("The account changed during the backup.");
+  const raw = await downloadBackupFile(BACKUP_FILENAME);
+  let serverCopy = null;
+  let replaceUnreadable = false;
+  if (raw != null) {
+    if (!parseBackupEnvelope(raw)) throw new Error("The contacts file on the server isn't encrypted by KaChat, so it was left alone.");
+    try {
+      serverCopy = await deps.openBackupPayload(raw);
+    } catch (error) {
+      if (error?.code !== "ownUnreadable") throw error;
+      deps.appendEngineLog?.("[Nextcloud] This account's contacts file can't be decrypted; replacing it in place");
+      replaceUnreadable = true;
+    }
   }
-  let payload;
-  try {
-    payload = await deps.exportBackupPayload(existingRemoteJson);
-  } catch (error) {
-    if (existingRemoteJson == null || (error?.code !== "ownUnreadable" && error?.code !== "remoteUnreadable")) throw error;
-    deps.appendEngineLog?.(error.code === "ownUnreadable"
-      ? "[Nextcloud] This account's backup on the server can't be decrypted; replacing it in place"
-      : "[Nextcloud] The backup on the server isn't a readable archive (damaged or cut off); replacing it in place");
-    payload = await deps.exportBackupPayload(null);
+  if (!stillCurrent()) throw new Error("The account changed during the backup.");
+  let serverIsBehind = replaceUnreadable || addressBookHasBackupData();
+  if (serverCopy != null) serverIsBehind = mergeSharedContactsFile(serverCopy).serverIsBehind;
+  if (!serverIsBehind) {
+    rememberBackupETag(await fetchBackupETag().catch(() => null));
+    return;
   }
+  const payload = await deps.sealBackupPayload(sharedContactsFileJson());
+  if (!stillCurrent()) throw new Error("The account changed during the backup.");
   let newETag = await uploadBackup(payload);
   if (!newETag) {
     // Some proxies strip the PUT response's ETag header; one follow-up Depth-0 PROPFIND
@@ -831,8 +779,8 @@ async function performBackup() {
     newETag = await fetchBackupETag().catch(() => null);
   }
   // Feedback-loop guard: remember our own write's ETag so the watcher never downloads it back.
-  // If both captures failed the stored ETag is cleared, and the watcher re-imports our own
-  // upload once — which the txId/id dedupe in importPhoneArchive makes a harmless no-op.
+  // If both captures failed the stored ETag is cleared, and the watcher merges our own upload once,
+  // which changes nothing.
   rememberBackupETag(newETag);
   // Verify (§4.6): the server must hold the whole file. A short one (an upload cut off on the
   // way) would read as damaged on the next sync; say so plainly instead of looping. Only our own
@@ -844,7 +792,7 @@ async function performBackup() {
     const currentETag = await fetchBackupETag().catch(() => null);
     if (!newETag || currentETag === newETag) {
       deps.appendEngineLog?.(`Nextcloud stored ${storedBytes} of ${expectedBytes} backup bytes - the upload was cut off.`);
-      throw transientError(`The backup upload was cut off: the server stored ${storedBytes.toLocaleString()} of ${expectedBytes.toLocaleString()} bytes. Something between this device and Nextcloud is ending large uploads early.`);
+      throw transientError(`The backup upload was cut off: the server stored ${storedBytes.toLocaleString()} of ${expectedBytes.toLocaleString()} bytes. Something between this device and Nextcloud is ending uploads early.`);
     }
   }
 }
@@ -858,45 +806,20 @@ async function fetchBackupInfo() {
 
 /** A failure the caller should RETRY rather than report as a bad file: a captive portal, a
  *  reverse-proxy error page, a maintenance screen, a truncated body. Marked so the change
- *  watcher backs off, the auto-restore stays silent and the restore overlay says "temporary"
- *  instead of "pick a different folder". */
+ *  watcher backs off. */
 function transientError(message) {
   const error = new Error(message);
   error.transient = true;
   return error;
 }
 
-/** Reads a response body while reporting bytes received (and the total when the server says),
- *  so a multi-megabyte archive is seen arriving rather than the bar sitting still. */
-async function readBodyWithProgress(response, onProgress) {
-  if (!onProgress || !response.body?.getReader) return response.text();
-  const total = Number(response.headers.get("Content-Length")) || 0;
-  const reader = response.body.getReader();
-  const chunks = [];
-  let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.byteLength;
-    try { onProgress({ received, total }); } catch {}
-  }
-  const merged = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder().decode(merged);
-}
-
 /** Downloads one backup file from the configured folder; null when it doesn't exist (404).
  *
  *  A WebDAV GET of the backup file is NEVER legitimately HTML: a 2xx HTML body is a
- *  reverse-proxy, sign-in, captive-portal or maintenance page standing in for the server.
- *  Without this check that page flows into the archive parser and surfaces as the
- *  permanent-sounding "not a KaChat backup, pick a different folder", misreading a transient
- *  hiccup as a foreign file — and on the upload path it would abort the merge with the same
- *  misleading message. Mirrors iOS NextcloudService.performBackupDownload's mimeType guard and
- *  its empty-body check. */
-async function downloadBackupFile(filename, { onProgress = null } = {}) {
+ *  reverse-proxy, sign-in, captive-portal or maintenance page standing in for the server, and
+ *  must not read as a foreign file. Mirrors iOS NextcloudService.downloadBackup's mimeType guard
+ *  and its empty-body check. */
+async function downloadBackupFile(filename) {
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const url = `${davRoot}/${backupFolderPath().split("/").map(encodeURIComponent).join("/")}/${encodeURIComponent(filename)}`;
   const response = await ncFetch(url, { headers: { Authorization: authHeader() }, cache: "no-store" });
@@ -906,31 +829,22 @@ async function downloadBackupFile(filename, { onProgress = null } = {}) {
   if (response.status === 423) throw transientError("Nextcloud has the backup file locked right now (HTTP 423): another device is writing it. Trying again shortly.");
   if (!response.ok) throw new Error(`Backup download failed (HTTP ${response.status}).`);
   const contentType = (response.headers.get("Content-Type") || "").toLowerCase();
-  const text = await readBodyWithProgress(response, onProgress);
+  const text = await response.text();
   if (contentType.includes("html") || /^\s*(<!doctype html|<html[\s>])/i.test(text)) {
     throw transientError("The server sent a web page instead of the backup file (a sign-in, proxy or maintenance page). The backup was left untouched.");
   }
-  // A 2xx with nothing in it is a truncated/proxied response, not an empty archive.
+  // A 2xx with nothing in it is a truncated/proxied response, not an empty file.
   if (!text.trim()) {
     throw transientError("The server returned an empty response for the backup file. The backup was left untouched.");
   }
-  // A download cut short mid-flight is the failure this file is most exposed to: the archive is
-  // megabytes of one JSON object, and losing the tail leaves something that looks like a corrupt
-  // backup rather than an incomplete transfer. It is worth telling those two apart, because the
-  // advice is opposite - one is "try again", the other is "your backup is gone".
-  //
-  // Cheap and encoding-agnostic: one JSON object must start with { and end with }. A truncated
-  // body cannot end with }, whatever compression it arrived under.
+  // A short file must never read as a damaged one and be overwritten. One JSON object must start
+  // with { and end with }; a truncated body cannot end with }, whatever compression it arrived under.
   const trimmed = text.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
-    const error = transientError(
+    throw transientError(
       `The backup file arrived incomplete (${text.length.toLocaleString()} characters, ending mid-file). `
       + "Nothing on the server was changed, so trying again is safe."
     );
-    // Carried so the backup path can ask the one question that settles it: is the file on the
-    // server this size, or did the transfer lose the tail? See repairableTruncation().
-    error.truncatedLength = text.length;
-    throw error;
   }
   return text;
 }
@@ -964,7 +878,7 @@ function parseETagFromMultistatus(xmlText) {
 }
 
 /** The backup file's current ETag via a Depth-0 PROPFIND requesting only `getetag` — a tiny
- *  request with no body download, which is what makes a 5s poll affordable.
+ *  request with no body download.
  *  null = no backup file yet (404); throws on any other failure. */
 async function fetchBackupETag() {
   if (!nc) return null;
@@ -994,34 +908,12 @@ function rememberBackupETag(etag) {
 }
 
 // ---------------------------------------------------------------------------
-// Automatic sync — the desktop half of a two-way mirror
+// Automatic sync
 //
-// Upload side: local changes arm a debounced merge upload (5s while a chat is open, 15s
-// otherwise), floored at one automatic upload per 90s, plus an hourly heartbeat and a flush
-// when the tab is hidden.
-// Download side: the change watcher below polls the shared file's ETag and pulls in whatever
-// another device wrote. Together they make desktop a mirror instead of an uploader.
+// Upload side: a contact changing arms a debounced merge upload (15s of quiet), floored at one
+// automatic upload per 90s, plus an hourly heartbeat and a flush when the tab is hidden.
+// Download side: the change watcher below polls the file's ETag and merges what another device wrote.
 // ---------------------------------------------------------------------------
-
-/** True while a 1:1 conversation is actually open on screen — the desktop equivalent of iOS's
- *  `isChatOpenOnScreen` (ChatService.activeConversationAddress != nil). */
-function isChatOpenOnScreen() {
-  return Boolean(deps?.getActiveConversationId?.());
-}
-
-function currentChangeWatchMs() {
-  return isChatOpenOnScreen() ? CHANGE_WATCH_IN_CHAT_MS : CHANGE_WATCH_IDLE_MS;
-}
-
-function currentSyncDebounceMs() {
-  return isChatOpenOnScreen() ? SYNC_DEBOUNCE_IN_CHAT_MS : SYNC_DEBOUNCE_IDLE_MS;
-}
-
-/** A manual restore, a silent import or another upload owns the local store right now. Mirrors
- *  the `BackupRestoreCoordinator.shared.isRunning || syncInFlight` guards on iOS. */
-function isBusy() {
-  return syncInFlight || restore.phase === "running";
-}
 
 function armSyncDebounce(delayMs) {
   if (syncDebounceTimer) clearTimeout(syncDebounceTimer);
@@ -1039,8 +931,8 @@ function armSyncDebounce(delayMs) {
  */
 async function performAutomaticSync({ bypassFloor = false } = {}) {
   if (!nc?.autoBackup) return;
-  if (isBusy()) {
-    // Something else owns the store; the dirty flag stays set and a short re-arm retries.
+  if (syncInFlight) {
+    // Something else owns the contacts; the dirty flag stays set and a short re-arm retries.
     armSyncDebounce(30_000);
     return;
   }
@@ -1064,9 +956,6 @@ async function performAutomaticSync({ bypassFloor = false } = {}) {
     deps.appendEngineLog?.(`Nextcloud automatic sync upload failed (a later trigger retries): ${error.message}`);
   } finally {
     syncInFlight = false;
-    // Our own upload changed nothing locally; keep the detector from reading the settings
-    // re-render as fresh activity.
-    lastActivityFingerprint = activityFingerprint();
   }
 }
 
@@ -1078,77 +967,20 @@ async function autoBackupIfDue(minMs = AUTO_BACKUP_MIN_MS) {
   await performAutomaticSync();
 }
 
-// --- Local change detection -------------------------------------------------------------
-// iOS gets an explicit signal (`noteMessageActivity`, called from ChatService for every message
-// that lands). Desktop's message pipeline lives in ui/app.js, which this module may not edit,
-// so the equivalent signal is derived from the rendered chat list instead: a fingerprint of
-// every row's conversation id, preview line and unread badge, plus the open thread's message
-// count. A new message (either direction, any path) always moves one of those. Timestamps are
-// deliberately excluded so a minute ticking over is not mistaken for activity.
-
-function activityFingerprint() {
-  const rows = document.querySelectorAll("[data-chat-list] [data-conversation-id]");
-  const parts = [];
-  for (const row of rows) {
-    const preview = row.querySelector(".chat-meta span")?.textContent || "";
-    const unread = row.querySelector(".unread-badge")?.textContent || "";
-    parts.push(`${row.dataset.conversationId}${preview}${unread}`);
-  }
-  const area = document.querySelector("[data-message-area]");
-  // The open thread's own bubble count catches the one case the previews miss: the same text
-  // sent twice in a row inside the chat you are looking at.
-  parts.push(`${area?.dataset?.renderedConversationId || ""}${area?.childElementCount ?? 0}`);
-  return parts.join("\n");
-}
-
-/** Local activity signal. Cheap and safe to call at any rate: it only arms a timer. */
-function noteLocalActivity() {
+/** A contact changed (iOS noteContactActivity): marks the contacts dirty and restarts the quiet-time
+ *  timer, so a run of edits becomes one merge upload. Cheap and safe to call at any rate. */
+export function noteContactActivity() {
   if (!nc?.autoBackup) return;
   syncDirty = true;
-  // Tier picked at ARM time, and every re-arm re-reads it, so the last change of a burst
-  // decides — same as iOS's armSyncDebounce.
-  armSyncDebounce(currentSyncDebounceMs());
-}
-
-// Explicit signal from the host app for every message that lands, the desktop equivalent of
-// iOS's noteMessageActivity. Exact, unlike the DOM fingerprint below.
-export function noteMessageActivity() {
-  noteLocalActivity();
-}
-
-function startActivityWatch() {
-  if (activityObserver) return;
-  // With a real signal wired up, the DOM fingerprint is redundant - and it is the weaker
-  // detector (it can miss the same text sent twice in a chat that is not open, and can fire
-  // on an unrelated list re-render), so prefer the signal alone.
-  if (deps?.hasMessageActivitySignal) return;
-  const chatList = document.querySelector("[data-chat-list]");
-  const messageArea = document.querySelector("[data-message-area]");
-  if (!chatList && !messageArea) return;
-  lastActivityFingerprint = activityFingerprint();
-  activityObserver = new MutationObserver(() => {
-    if (activityCoalesceTimer) return;
-    activityCoalesceTimer = window.setTimeout(() => {
-      activityCoalesceTimer = null;
-      const fingerprint = activityFingerprint();
-      if (fingerprint === lastActivityFingerprint) return;
-      lastActivityFingerprint = fingerprint;
-      noteLocalActivity();
-    }, ACTIVITY_COALESCE_MS);
-  });
-  const options = { childList: true, subtree: true, characterData: true };
-  if (chatList) activityObserver.observe(chatList, options);
-  if (messageArea) activityObserver.observe(messageArea, options);
+  armSyncDebounce(SYNC_DEBOUNCE_MS);
 }
 
 // ---------------------------------------------------------------------------
-// Change watcher — the near-live pull of another device's uploads
+// Change watcher — the pull of another device's contact changes
 //
-// Polls the shared file's ETag with a Depth-0 PROPFIND. When it differs from the last ETag this
-// device wrote or imported, the file is downloaded, decrypted and merge-imported (additive,
-// txId-deduped) silently, with one engine-log line. Combined with the other device's upload
-// debounce, a message sent on a phone lands here in seconds while you are looking at the chat.
-// Mirrors iOS NextcloudService.startChangeWatcherIfNeeded / runChangeWatcher.
+// Polls the file's ETag with a Depth-0 PROPFIND. When it differs from the last ETag this device wrote
+// or merged, the file is downloaded, decrypted and merged into the contacts silently, with one
+// engine-log line. Mirrors iOS NextcloudService.startChangeWatcherIfNeeded / runChangeWatcher.
 // ---------------------------------------------------------------------------
 
 function startChangeWatcherIfNeeded() {
@@ -1157,7 +989,6 @@ function startChangeWatcherIfNeeded() {
   if (document.visibilityState === "hidden") return;
   watcherEpoch += 1;
   watcherRunning = true;
-  lastSeenConversationId = deps?.getActiveConversationId?.() ?? null;
   const epoch = watcherEpoch;
   runChangeWatcher(epoch).finally(() => { if (watcherEpoch === epoch) watcherRunning = false; });
 }
@@ -1172,9 +1003,7 @@ function stopChangeWatcher() {
 async function runChangeWatcher(epoch) {
   let backoffFactor = 1;
   while (watcherEpoch === epoch) {
-    // Tier resolved fresh every tick, so leaving a chat relaxes the very next sleep and
-    // entering one tightens it.
-    const interval = Math.min(currentChangeWatchMs() * backoffFactor, CHANGE_WATCH_BACKOFF_MAX_MS);
+    const interval = Math.min(CHANGE_WATCH_MS * backoffFactor, CHANGE_WATCH_BACKOFF_MAX_MS);
     await sleepInterruptibly(interval, epoch);
     if (watcherEpoch !== epoch) break;
     if (!nc?.autoBackup || document.visibilityState === "hidden") break;
@@ -1189,490 +1018,69 @@ async function runChangeWatcher(epoch) {
   }
 }
 
-/** Sleeps up to `ms` in short slices, returning early when the watcher is retired (epoch bump)
- *  or when a chat is opened. The chat-entry wake is iOS's `noteChatOpened`, which ChatService
- *  calls directly; with no hook into ui/app.js, entry is detected by watching the active
- *  conversation id across the sleep slices instead. Not a busy loop, and the watcher only runs
- *  while the page is visible, so the quarter-second granularity costs nothing. */
+/** Sleeps up to `ms` in short slices, returning early when the watcher is retired (epoch bump). */
 async function sleepInterruptibly(ms, epoch) {
   const deadline = Date.now() + ms;
   while (watcherEpoch === epoch) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) return;
-    const current = deps?.getActiveConversationId?.() ?? null;
-    if (current !== lastSeenConversationId) {
-      lastSeenConversationId = current;
-      // Opening a chat polls immediately instead of waiting out a residual idle-tier tick.
-      // Leaving one only re-reads the tier on the next iteration.
-      if (current) return;
-    }
     await new Promise((resolve) => window.setTimeout(resolve, Math.min(250, remaining)));
   }
 }
 
-/** One poll: fetch the ETag, import the file if it changed. */
-async function checkForRemoteChangeAndImport() {
+/** One poll: fetch the ETag, and merge the file if it changed. Exported for
+ *  tools/test-nextcloud-shared-contacts.mjs. */
+export async function checkForRemoteChangeAndImport() {
+  const account = nc;
+  const wallet = addressBookWalletAddress();
+  if (!account || !wallet) return;
+  const stillCurrent = () => nc === account && addressBookHoldsWallet(wallet);
   // ETag BEFORE the download: if the file is replaced between the two requests the stored ETag
-  // is the older one and the next poll simply imports again — the safe direction, since an
-  // import can only add.
+  // is the older one and the next poll simply merges again — the safe direction, since a merge
+  // changes nothing the second time.
   const etag = await fetchBackupETag();
-  if (!etag) return;                      // no backup on the server yet
-  if (etag === nc?.lastBackupEtag) return; // our own write, or already imported
-  if (isBusy()) return;                    // retry on the next poll, ETag left alone
+  if (!etag) return;                      // no file on the server yet
+  if (etag === nc?.lastBackupEtag) return; // our own write, or already merged
+  if (syncInFlight || !stillCurrent()) return; // retry on the next poll, ETag left alone
 
   syncInFlight = true;
   try {
     const raw = await downloadBackupFile(BACKUP_FILENAME);
-    if (!raw) return;                     // vanished between the poll and the download
-    let plain = null;
+    if (!raw || !stillCurrent()) return;  // vanished between the poll and the download
+    let serverIsBehind = false;
     try {
-      plain = await deps.openBackupPayload(raw);
+      if (!parseBackupEnvelope(raw)) throw new Error("It isn't encrypted by KaChat.");
+      const plain = await deps.openBackupPayload(raw);
+      if (!stillCurrent()) return;
+      serverIsBehind = mergeSharedContactsFile(plain).serverIsBehind;
     } catch (error) {
-      // A file this wallet cannot read (another wallet's backup, corrupt envelope): record the
-      // ETag so it is not re-downloaded every poll. A future replacement changes the ETag and
-      // gets a fresh look.
+      // A file this wallet can't read: record the ETag so it is not downloaded every poll. A future
+      // replacement changes the ETag and gets a fresh look.
       rememberBackupETag(etag);
-      deps.appendEngineLog?.(`Nextcloud change watcher skipped an unreadable server backup: ${error.message}`);
-      return;
-    }
-    let summary = null;
-    try {
-      summary = deps.importPhoneArchive?.(plain) || null;
-    } catch (error) {
-      // Out of local storage is worth retrying once space frees up; a foreign wallet or a
-      // wrong-schema file never becomes importable, so record its ETag and move on.
-      if (/quota|too large/i.test(String(error.message || ""))) throw error;
-      rememberBackupETag(etag);
-      deps.appendEngineLog?.(`Nextcloud change watcher could not merge the server backup: ${error.message}`);
+      deps.appendEngineLog?.(`Nextcloud change watcher skipped an unreadable contacts file: ${error.message}`);
       return;
     }
     rememberBackupETag(etag);
-    if (summary?.messages) {
-      refreshOpenConversationView();
-      // Converge the other direction too: this device may hold history the file we just merged
-      // never had, so owe an upload of the union. This terminates rather than ping-pongs — the
-      // next device's import of that union adds nothing (txId/id dedupe), so it uploads nothing.
-      noteLocalActivity();
-      deps.appendEngineLog?.(
-        `Nextcloud sync merged another device's update: ${summary.messages} message${summary.messages === 1 ? "" : "s"} in ${summary.conversations} chat${summary.conversations === 1 ? "" : "s"}.`,
-      );
-    }
+    // This device may hold a contact the file never had. It ends rather than ping-pongs: the next
+    // device's merge of that upload finds nothing to add, so it uploads nothing.
+    if (serverIsBehind) noteContactActivity();
+    deps.appendEngineLog?.("Nextcloud change watcher merged another device's contacts.");
   } finally {
     syncInFlight = false;
-    // The import legitimately changed local state, but it is the SAME state the server already
-    // holds — re-baselining here is what stops two devices ping-ponging uploads forever.
-    lastActivityFingerprint = activityFingerprint();
   }
 }
 
-/**
- * Re-renders the open thread after a silent merge. `importPhoneArchive` re-renders the chat
- * LIST itself, but the message pane is drawn by ui/app.js's `renderMessages`, which this module
- * cannot call. The chat row's own click handler is the only public route to it, and clicking
- * the active row closes then reopens the thread — both dispatches happen inside one task, so
- * the browser paints only the final state and nothing flickers.
- *
- * Skipped when the list is in selection mode (a click would toggle a checkbox instead), when a
- * draft is sitting in the composer, or when the composer is in payment mode: reopening a chat
- * re-activates message mode and clears the input, and a half-typed message or amount is worth
- * more than an instantly refreshed thread. Those cases simply see the new messages on the next
- * natural render.
- */
-function refreshOpenConversationView() {
-  // The host app can re-render the open thread directly; that is exact and side-effect free.
-  // The synthetic-click path below is the fallback for wiring that predates the dep.
-  if (typeof deps?.refreshActiveConversationView === "function") {
-    deps.refreshActiveConversationView();
-    return;
-  }
-  const activeId = deps?.getActiveConversationId?.();
-  if (!activeId) return;
-  const selector = `[data-chat-list] [data-conversation-id="${CSS.escape(String(activeId))}"]`;
-  const row = document.querySelector(selector);
-  if (!row || row.classList.contains("selecting")) return;
-  const composerEl = document.querySelector("[data-composer]");
-  if (composerEl?.classList.contains("payment-mode")) return;
-  const draft = composerEl?.querySelector('textarea[name="message"]');
-  if (draft && String(draft.value || "").trim()) return;
-  row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  // The close re-rendered the list, so the row element above is stale — re-query it.
-  document.querySelector(selector)?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-}
-
-// ---------------------------------------------------------------------------
-// Silent auto-restore (one-time bootstrap per wallet)
-//
-// Mirrors iOS `scheduleAutoRestoreIfNeeded` / `runAutoRestore`: shortly after a wallet loads,
-// if the server holds a backup and this device has never imported one, merge it in silently —
-// a log line, no modal. A missing file (404) deliberately leaves the done flag UNSET, so a
-// backup that appears later (the first sync from another device) still bootstraps this one.
-// Only the additive archive merge runs here; the desktop-state REPLACE stays on the explicit
-// restore path, where the user asked for it.
-// ---------------------------------------------------------------------------
-
-function scheduleAutoRestoreIfNeeded() {
-  if (autoRestoreTimer) { clearTimeout(autoRestoreTimer); autoRestoreTimer = null; }
-  if (!nc?.autoBackup || nc.autoRestoreDone) return;
-  // A few seconds' delay so wallet activation (state reload, chat list render) finishes first.
-  autoRestoreTimer = window.setTimeout(() => { autoRestoreTimer = null; runAutoRestore(); }, 3_000);
-}
-
-async function runAutoRestore({ announce = false } = {}) {
-  if (!nc?.autoBackup || nc.autoRestoreDone) return;
-  if (isBusy()) return;   // the done flag stays unset, so a later trigger retries
-  if (announce) deps.showToast?.("Restoring from your Nextcloud backup…");
-  syncInFlight = true;
-  try {
-    // ETag before the download (best effort): recorded after a successful import so the change
-    // watcher's first poll does not immediately re-download what the bootstrap just imported.
-    const etagAtDownload = await fetchBackupETag().catch(() => null);
-    const raw = await downloadBackupFile(BACKUP_FILENAME);
-    if (!raw) {           // no backup yet: NOT an error, and NOT done
-      if (announce) deps.showToast?.("No backup in this folder yet - this device's history will be backed up there.");
-      return;
-    }
-    const plain = await deps.openBackupPayload(raw);
-    const summary = deps.importPhoneArchive?.(plain) || null;
-    if (!nc) return;
-    nc.autoRestoreDone = true;
-    saveState();
-    if (etagAtDownload) rememberBackupETag(etagAtDownload);
-    refreshOpenConversationView();
-    // A bootstrapping device usually also has history the server has never seen (chats it made
-    // before sync was switched on). Owe an upload of the union so convergence is two-way.
-    noteLocalActivity();
-    // Fully silent by design — sync is invisible plumbing, like iCloud. The log line is the
-    // only trace.
-    const restoredText = `${summary?.messages ?? 0} message${summary?.messages === 1 ? "" : "s"} in ${summary?.conversations ?? 0} chat${summary?.conversations === 1 ? "" : "s"}`;
-    deps.appendEngineLog?.(`Nextcloud automatic restore finished: ${restoredText}.`);
-    // Switching Automatic Sync on says what it brought in; the background bootstrap stays silent.
-    if (announce) deps.showToast?.(`Restored from your backup: ${restoredText}.`);
-  } catch (error) {
-    // Includes an unreadable archive and transient network failures: stay silent, leave the
-    // done flag unset so a later trigger retries, and never surface a modal.
-    deps.appendEngineLog?.(`Nextcloud automatic restore skipped (a later attempt retries): ${error.message}`);
-    if (announce) deps.showToast?.(`Couldn't restore from the backup yet (${error.message}). It tries again shortly.`);
-  } finally {
-    syncInFlight = false;
-    lastActivityFingerprint = activityFingerprint();
-  }
-}
-
-/** Arms (or disarms) everything automatic: the hourly heartbeat, the change watcher, the
- *  local-change detector and the one-time silent bootstrap. */
+/** Arms (or disarms) everything automatic: the hourly heartbeat and the change watcher. */
 function armAutoBackup() {
   if (autoBackupTimer) { clearInterval(autoBackupTimer); autoBackupTimer = null; }
   if (syncDebounceTimer) { clearTimeout(syncDebounceTimer); syncDebounceTimer = null; }
-  if (autoRestoreTimer) { clearTimeout(autoRestoreTimer); autoRestoreTimer = null; }
   stopChangeWatcher();
   if (!nc?.autoBackup) return;
-  startActivityWatch();
   autoBackupTimer = window.setInterval(() => autoBackupIfDue(), AUTO_BACKUP_MIN_MS);
   autoBackupIfDue(AUTO_CATCHUP_MS);
   startChangeWatcherIfNeeded();
-  scheduleAutoRestoreIfNeeded();
   syncSharedContactsIfDue();
 }
-
-// ---------------------------------------------------------------------------
-// Restore coordinator + blocking progress overlay
-//
-// The desktop port of iOS's BackupRestoreCoordinator (NextcloudService.swift) and its
-// ChatRestoreProgressModal (SettingsView.swift): a small state machine with an `isRunning`
-// gate, and a full-screen modal that CANNOT be dismissed while the import is in flight — no
-// close button, no Escape, and a beforeunload guard against a reload mid-import. The old flow
-// was a window.confirm plus toasts, which let the user navigate away while the merge ran.
-//
-// Progress is real, not decorative. The download is one fetch that resolves whole, so it is a
-// fixed slice of the bar (iOS streams bytes there; a browser fetch would need a reader loop for
-// no practical gain on a file this size). The merge, which is the slow part, is fed to
-// importPhoneArchive in batches so the "N of M chats" count advances for real, yielding a frame
-// between batches so the bar paints. Batch size targets roughly ten steps, since every batch
-// costs one full persist round.
-// ---------------------------------------------------------------------------
-
-const RESTORE_PROGRESS_STEPS = 10;
-
-const restore = {
-  phase: "idle",      // idle | confirm | running | success | failure
-  fraction: 0,
-  stage: "",
-  summary: null,
-  error: null,
-  transient: false,
-};
-
-function nextFrame() {
-  return new Promise((resolve) => {
-    window.requestAnimationFrame(() => window.setTimeout(resolve, 0));
-  });
-}
-
-/** Monotonic progress: an out-of-order report can never move the bar backwards. */
-function advanceRestore(fraction, stage) {
-  restore.fraction = Math.max(restore.fraction, Math.min(fraction, 1));
-  if (stage) restore.stage = stage;
-  renderRestoreOverlay();
-}
-
-function openRestoreOverlay() {
-  if (restore.phase === "running") return;
-  restore.phase = "confirm";
-  restore.fraction = 0;
-  restore.stage = "";
-  restore.summary = null;
-  restore.error = null;
-  restore.transient = false;
-  renderRestoreOverlay();
-}
-
-/** Leaves the overlay. Only honored from a terminal state — a running restore cannot be
- *  dismissed, which is the whole point of the gate. */
-function closeRestoreOverlay() {
-  if (restore.phase === "running") return;
-  restore.phase = "idle";
-  renderRestoreOverlay();
-}
-
-function renderRestoreOverlay() {
-  const modal = modalsEl?.querySelector("[data-nc-restore-modal]");
-  if (!modal) return;
-  modal.hidden = restore.phase === "idle";
-  if (restore.phase === "idle") return;
-  const body = modal.querySelector("[data-nc-restore-body]");
-  const actions = modal.querySelector("[data-nc-restore-actions]");
-  const title = modal.querySelector("[data-nc-restore-title]");
-  if (!body || !actions || !title) return;
-
-  const bar = (percent) => `
-    <div class="nc-restore-track" style="height:8px;border-radius:999px;background:var(--surface-2);overflow:hidden;margin:16px 0 10px;">
-      <div style="height:100%;width:${percent}%;border-radius:999px;background:var(--kaspa);transition:width .25s ease;"></div>
-    </div>`;
-
-  if (restore.phase === "confirm") {
-    title.textContent = "Restore from Backup";
-    body.innerHTML = `
-      <p class="field-hint">Messages from the server backup are merged into this device's chat history. Nothing is deleted.</p>
-      <p class="field-hint">Any desktop settings stored in the backup replace this device's.</p>`;
-    actions.innerHTML = `
-      <button class="secondary-button" type="button" data-nc-restore-cancel>Cancel</button>
-      <button class="primary-button" type="button" data-nc-restore-start>Restore</button>`;
-    return;
-  }
-
-  if (restore.phase === "running") {
-    title.textContent = "Restoring Backup";
-    const percent = Math.round(restore.fraction * 100);
-    body.innerHTML = `
-      <p class="field-hint" style="margin:0;">${deps.escapeHtml(restore.stage)}</p>
-      ${bar(percent)}
-      <p class="field-hint" style="margin:0;font-variant-numeric:tabular-nums;">${percent}%</p>
-      <p class="field-hint">Please keep the app open. Leaving now could corrupt your chat history.</p>`;
-    actions.innerHTML = "";
-    return;
-  }
-
-  if (restore.phase === "success") {
-    title.textContent = "Restore Complete";
-    // iOS ChatRestoreProgressModal.successMessage, word for word.
-    const summary = restore.summary || { messages: 0, conversations: 0 };
-    body.innerHTML = `
-      <p class="field-hint">Restored ${Number(summary.messages) || 0} messages from ${Number(summary.conversations) || 0} chats.</p>`;
-    actions.innerHTML = `<button class="primary-button" type="button" data-nc-restore-close>Done</button>`;
-    return;
-  }
-
-  title.textContent = "Restore Failed";
-  body.innerHTML = `
-    <p class="field-error">${deps.escapeHtml(restore.error || "Something went wrong.")}</p>
-    ${restore.transient ? `<p class="field-hint">This looks temporary. Nothing on the server was changed, so trying again in a moment is safe.</p>` : ""}`;
-  actions.innerHTML = `
-    <button class="secondary-button" type="button" data-nc-restore-close>Close</button>
-    <button class="primary-button" type="button" data-nc-restore-start>Try Again</button>`;
-}
-
-/** Counts what an archive is about to contribute, for the progress line. */
-function parsedArchive(plainJsonOrObject) {
-  if (plainJsonOrObject && typeof plainJsonOrObject === "object") return plainJsonOrObject;
-  try { return JSON.parse(plainJsonOrObject); } catch { return null; }
-}
-function archiveConversationCount(plainJson) {
-  const parsed = parsedArchive(plainJson);
-  return Array.isArray(parsed?.conversations) ? parsed.conversations.length : 0;
-}
-/** What the backup file holds, before merging: the merge only counts what was NEW to this
- *  device, and a device that already synced its chats from the chain merges almost nothing -
- *  which read as a failed restore. */
-function archiveTotals(plainJson) {
-  const parsed = parsedArchive(plainJson);
-  const conversations = Array.isArray(parsed?.conversations) ? parsed.conversations : [];
-  const messages = conversations.reduce((sum, c) => sum + (Array.isArray(c?.messages) ? c.messages.length : 0), 0);
-  return { conversations: conversations.length, messages };
-}
-
-/** Splits a shared archive into per-batch archives so the import reports honest progress.
- *  Returns null when the archive should just be handed over whole (unparseable — let the real
- *  importer produce its own error — or too small to be worth splitting). Groups ride along with
- *  the LAST batch so they are imported exactly once. */
-function splitArchiveForProgress(plainJson) {
-  const parsed = parsedArchive(plainJson);
-  const conversations = Array.isArray(parsed?.conversations) ? parsed.conversations : null;
-  if (!conversations || conversations.length <= 1) return null;
-  const batchSize = Math.max(1, Math.ceil(conversations.length / RESTORE_PROGRESS_STEPS));
-  const batches = [];
-  for (let index = 0; index < conversations.length; index += batchSize) {
-    // Only what the importer reads. Spreading the whole archive into every slice carried the
-    // desktop-state snapshot (megabytes) ten times over, serialised and parsed each time.
-    const batch = {
-      walletAddress: parsed.walletAddress,
-      deletedContactAddresses: parsed.deletedContactAddresses,
-      conversations: conversations.slice(index, index + batchSize),
-    };
-    batches.push(batch);
-  }
-  if (Array.isArray(parsed.groups) && parsed.groups.length) {
-    batches[batches.length - 1].groups = parsed.groups;
-  }
-  // The Address Book (NEXTCLOUD_SYNC.md §5) rides with the last batch too, so it is applied once.
-  if (Array.isArray(parsed.addressBook)) batches[batches.length - 1].addressBook = parsed.addressBook;
-  if (Array.isArray(parsed.addressBookDeleted)) batches[batches.length - 1].addressBookDeleted = parsed.addressBookDeleted;
-  // So do the portfolios (iOS 11f1548).
-  for (const key of ["portfolios", "portfolioTransactions", "portfolioFees", "portfolioDeleted"]) {
-    if (Array.isArray(parsed[key])) batches[batches.length - 1][key] = parsed[key];
-  }
-  return { total: conversations.length, batches };
-}
-
-async function runRestore() {
-  if (restore.phase === "running") return;
-  if (!nc) return;
-  restore.phase = "running";
-  restore.fraction = 0;
-  restore.summary = null;
-  restore.error = null;
-  restore.transient = false;
-  advanceRestore(0.04, "Contacting your server…");
-
-  const wasWatching = watcherRunning;
-  stopChangeWatcher();
-  if (syncDebounceTimer) { clearTimeout(syncDebounceTimer); syncDebounceTimer = null; }
-
-  try {
-    // ETag before the download, recorded on success so the change watcher does not immediately
-    // re-download the file this restore just imported.
-    const etagAtDownload = await fetchBackupETag().catch(() => null);
-
-    advanceRestore(0.10, "Downloading backup…");
-    // Primary: the shared cross-device archive. A pre-4.0 desktop-only file may still be
-    // sitting next to it — read as a fallback for the desktop half. A missing file (404) is
-    // fine as long as one of them exists.
-    const formatMb = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    let sharedJson = await downloadBackupFile(BACKUP_FILENAME, {
-      onProgress: ({ received, total }) => {
-        const share = total > 0 ? Math.min(1, received / total) : 0;
-        advanceRestore(0.10 + 0.12 * share, total > 0
-          ? `Downloading backup… ${formatMb(received)} of ${formatMb(total)}`
-          : `Downloading backup… ${formatMb(received)}`);
-      },
-    });
-    advanceRestore(0.22, "Downloading backup…");
-    // A hiccup on the legacy probe must not sink a restore whose real file already downloaded.
-    let legacyJson = sharedJson
-      ? await downloadBackupFile(LEGACY_DESKTOP_BACKUP_FILENAME).catch(() => null)
-      : await downloadBackupFile(LEGACY_DESKTOP_BACKUP_FILENAME);
-    if (!sharedJson && !legacyJson) throw new Error("No KaChat backup was found in that folder.");
-
-    advanceRestore(0.30, "Validating backup…");
-    // Envelope v1: files written since the phones/desktop started encrypting are envelopes —
-    // decrypt before any importer sees them. Legacy plaintext passes through unchanged, and a
-    // failed decrypt throws, aborting the whole restore before anything local is touched.
-    if (sharedJson) sharedJson = await deps.openBackupPayload(sharedJson);
-    if (legacyJson) legacyJson = await deps.openBackupPayload(legacyJson);
-
-    const totalConversations = sharedJson ? archiveConversationCount(parsedArchive(sharedJson) || sharedJson) : 0;
-    advanceRestore(0.38, "Preparing messages…");
-    await nextFrame();
-
-    // Desktop state first (it REPLACES local state), then the archive merge — that ordering is
-    // what stops the replace from wiping the freshly merged history. A shared file written by a
-    // phone has no desktopState, in which case the legacy desktop file (if any) supplies it.
-    let desktopRestored = sharedJson ? deps.importDesktopState?.(sharedJson) === true : false;
-    if (!desktopRestored && legacyJson) {
-      deps.importBackupPayload(legacyJson);
-      desktopRestored = true;
-    }
-    advanceRestore(0.46, `Restoring messages… 0 of ${totalConversations} chat${totalConversations === 1 ? "" : "s"}`);
-    await nextFrame();
-
-    // Parsed once; the counts, the split and every slice read the same object.
-    const sharedParsed = sharedJson ? parsedArchive(sharedJson) : null;
-    const summary = { conversations: 0, messages: 0, groups: 0, held: sharedParsed ? archiveTotals(sharedParsed) : { conversations: 0, messages: 0 } };
-    if (sharedJson) {
-      const split = sharedParsed ? splitArchiveForProgress(sharedParsed) : null;
-      if (!split) {
-        const single = deps.importPhoneArchive?.(sharedJson);
-        if (single) {
-          summary.conversations += single.conversations || 0;
-          summary.messages += single.messages || 0;
-          summary.groups += single.groups || 0;
-        }
-        advanceRestore(0.92, "Restoring messages…");
-      } else {
-        let done = 0;
-        for (const [batchIndex, batch] of split.batches.entries()) {
-          const last = batchIndex === split.batches.length - 1;
-          // Storage is read before the first slice and written after the last; in between the
-          // slices merge into memory only (see importPhoneChatArchive).
-          const partial = deps.importPhoneArchive?.(batch, { reloadState: batchIndex === 0, persist: last, render: last });
-          if (partial) {
-            summary.conversations += partial.conversations || 0;
-            summary.messages += partial.messages || 0;
-            summary.groups += partial.groups || 0;
-          }
-          done += batch.conversations.length;
-          advanceRestore(
-            0.46 + 0.46 * (done / split.total),
-            `Restoring messages… ${done} of ${split.total} chat${split.total === 1 ? "" : "s"}`,
-          );
-          // Yield so the bar actually paints between batches.
-          await nextFrame();
-        }
-      }
-    }
-
-    advanceRestore(0.95, "Finishing up…");
-    await nextFrame();
-    if (nc) {
-      // This device now holds the server's history: mark the one-time bootstrap done and adopt
-      // the file's ETag so the watcher does not re-import it on its first poll.
-      nc.autoRestoreDone = true;
-      saveState();
-      if (etagAtDownload) rememberBackupETag(etagAtDownload);
-    }
-    refreshOpenConversationView();
-    lastActivityFingerprint = activityFingerprint();
-    // Same two-way convergence as the silent bootstrap: this device may hold history the
-    // restored file never had, so owe an upload of the union.
-    noteLocalActivity();
-    restore.summary = summary;
-    restore.phase = "success";
-    advanceRestore(1, "Done");
-    refreshBackupStatusLine();
-  } catch (error) {
-    restore.error = corsHint(error);
-    restore.transient = Boolean(error?.transient);
-    restore.phase = "failure";
-    renderRestoreOverlay();
-  } finally {
-    if (restore.phase !== "running" && (wasWatching || nc?.autoBackup)) startChangeWatcherIfNeeded();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Settings UI (renders into [data-nextcloud-settings])
-// ---------------------------------------------------------------------------
-
-let lastBackupInfo = undefined; // undefined = not asked yet, null = none on the server
 
 function ncConnectFormValid() {
   const server = String(settingsEl?.querySelector("[data-nc-server]")?.value || "").trim();
@@ -1765,7 +1173,6 @@ function renderSettings() {
 
   const host = (() => { try { return new URL(nc.server).host; } catch { return nc.server; } })();
   const lastSynced = Number(nc.lastAutoBackup || 0);
-  const restoreDisabled = restore.phase === "running" || lastBackupInfo === null;
   settingsEl.innerHTML = `
     <p class="settings-group-label">Connected Account</p>
     <div class="settings-list-card">
@@ -1775,17 +1182,17 @@ function renderSettings() {
     <div class="settings-list-card">
       <button class="settings-list-row" type="button" data-nc-pick-start><span class="settings-row-copy"><strong>Start Folder</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.startFolder || "All Files")}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
     </div>
-    <p class="settings-group-label">Message Backup</p>
+    <p class="settings-group-label">Contact Backup</p>
     <div class="settings-list-card">
       <div class="settings-toggle-row"><span><strong>Automatic Sync</strong><small>Automatic sync works with one cloud service at a time.</small></span><label class="switch-control"><input type="checkbox" data-nc-auto ${nc.autoBackup ? "checked" : ""}><span></span></label></div>
       ${lastSynced > 0 ? `<div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Last synced</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(new Date(lastSynced).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }))}</span></div>` : ""}
       <button class="settings-list-row" type="button" data-nc-pick-backup><span class="settings-row-copy"><strong>Backup Folder</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.backupFolder || `${DEFAULT_BACKUP_FOLDER} (default)`)}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
-      <button class="settings-list-row" type="button" data-nc-backup-now><span class="settings-row-copy"><strong>Back Up Messages Now</strong></span></button>
-      <button class="settings-list-row" type="button" data-nc-restore ${restoreDisabled ? "disabled" : ""}><span class="settings-row-copy"><strong>Restore from Backup</strong></span></button>
+      <button class="settings-list-row" type="button" data-nc-backup-now><span class="settings-row-copy"><strong>Back Up Contacts Now</strong></span></button>
       <div class="settings-list-row settings-info-row" data-nc-last-backup-row hidden><span class="settings-row-copy"><strong>Last backup</strong></span><span class="settings-dropdown-caption" data-nc-last-backup></span></div>
       <div class="settings-list-row settings-info-row" data-nc-backup-status-row hidden><span class="settings-row-copy"><small data-nc-backup-status></small></span></div>
       <div class="settings-list-row settings-info-row" data-nc-backup-result-row hidden><span class="settings-row-copy"><small data-nc-backup-result></small></span></div>
     </div>
+    <p class="settings-group-footer">Only your contacts are backed up here, encrypted. Your messages and group chats come back with your seed phrase.</p>
     <div class="settings-list-card danger-list-card">
       <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
     </div>`;
@@ -1797,11 +1204,8 @@ async function refreshBackupStatusLine() {
   const line = settingsEl?.querySelector("[data-nc-backup-status]");
   if (!line || !nc) return;
   const info = await fetchBackupInfo();
-  lastBackupInfo = info || null;
   const current = settingsEl?.querySelector("[data-nc-backup-status]");
   if (!current) return;
-  const restoreBtn = settingsEl?.querySelector("[data-nc-restore]");
-  if (restoreBtn) restoreBtn.disabled = !info || restore.phase === "running";
   // iOS: a "Last backup" row (date · size), or the line "No backup on this server yet."
   const statusRow = settingsEl?.querySelector("[data-nc-backup-status-row]");
   const lastRow = settingsEl?.querySelector("[data-nc-last-backup-row]");
@@ -2057,31 +1461,10 @@ function buildModals() {
           <button class="primary-button" type="button" data-nc-picker-choose hidden>Use This Folder</button>
         </div>
       </div>
-    </div>
-    <div class="modal-backdrop nc-restore-backdrop" data-nc-restore-modal hidden>
-      <div class="contact-modal nc-restore-modal" role="dialog" aria-modal="true" aria-live="polite" aria-label="Restore from backup">
-        <div class="modal-header">
-          <div><p class="modal-kicker">Nextcloud</p><h2 data-nc-restore-title>Restore from Backup</h2></div>
-        </div>
-        <div data-nc-restore-body></div>
-        <div class="modal-actions" data-nc-restore-actions></div>
-      </div>
     </div>`;
   document.body.appendChild(modalsEl);
 
-  // A reload or tab close mid-import would leave a half-merged store; warn while running.
-  window.addEventListener("beforeunload", (event) => {
-    if (restore.phase !== "running") return;
-    event.preventDefault();
-    event.returnValue = "";
-  });
-
   modalsEl.addEventListener("click", (event) => {
-    if (event.target.closest("[data-nc-restore-start]")) { runRestore(); return; }
-    if (event.target.closest("[data-nc-restore-cancel]") || event.target.closest("[data-nc-restore-close]")) {
-      closeRestoreOverlay();
-      return;
-    }
     if (event.target.closest("[data-nc-picker-close]")) { closePicker(); return; }
     if (event.target.closest("[data-nc-picker-back]")) {
       pickerPath = pickerStack.pop() ?? "";
@@ -2116,8 +1499,6 @@ function buildModals() {
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    // A running restore swallows Escape: the overlay is only leavable from a terminal state.
-    if (restore.phase !== "idle") { closeRestoreOverlay(); return; }
     if (pickerOpen) closePicker();
   });
 }
@@ -2144,8 +1525,7 @@ function wireSettings() {
       try {
         const userId = await verifyCredentials(server, username, appPassword);
         // Automatic Sync starts off (the owner's call, 2026-10-13; iOS bde94b0 switched it on at
-        // connect): the person picks the folder first, and switching it on restores from that
-        // backup once before anything is uploaded.
+        // connect): the person picks the folder first.
         nc = { server, username, userId: userId || null, appPassword, startFolder: null, backupFolder: null, autoBackup: false, lastAutoBackup: 0 };
         try { saveState({ strict: true }); }
         catch (error) { nc = null; throw error; } // locked meanwhile: not connected, nothing stored
@@ -2153,8 +1533,8 @@ function wireSettings() {
         renderSettings();
         armAutoBackup();
         deps.showToast?.("Nextcloud connected.");
-        // A backup the phone already keeps on this server is the point of connecting: find its
-        // folder and pick it up, rather than sitting on an empty default.
+        // Contacts the phone already keeps on this server: find their folder and pick it up, rather
+        // than sitting on an empty default.
         adoptExistingBackupFolder().catch(() => {});
       } catch (error) {
         button.textContent = "Connect";
@@ -2170,7 +1550,6 @@ function wireSettings() {
       ncLocked = null;
       syncDirty = false;
       lastAutoSyncAt = 0;
-      if (restore.phase !== "running") closeRestoreOverlay();
       clearStoredState();
       armAutoBackup();  // stops the watcher, the heartbeat and the debounce
       renderSettings();
@@ -2180,8 +1559,8 @@ function wireSettings() {
     if (event.target.closest("[data-nc-pick-backup]")) { openPicker("folder-backup"); return; }
     if (event.target.closest("[data-nc-backup-now]")) {
       // The manual button bypasses the debounce and the automatic-sync floor, but still waits
-      // for whatever already owns the store rather than racing it.
-      if (isBusy()) { setBackupResult("A sync is already running. Try again in a moment.", true); return; }
+      // for whatever already owns the contacts rather than racing it.
+      if (syncInFlight) { setBackupResult("A sync is already running. Try again in a moment.", true); return; }
       const button = event.target.closest("[data-nc-backup-now]");
       if (button) button.disabled = true;
       setBackupResult("");
@@ -2192,22 +1571,18 @@ function wireSettings() {
         lastAutoSyncAt = Date.now();
         nc.lastAutoBackup = lastAutoSyncAt;
         saveState();
-        // iOS backUpNow: "Backup uploaded." under the rows, not a toast.
-        setBackupResult("Backup uploaded.");
+        // iOS backUpNow: "Contacts backed up." under the rows, not a toast.
+        setBackupResult("Contacts backed up.");
       } catch (error) {
         syncDirty = true;
         setBackupResult(corsHint(error), true);
       } finally {
         if (button?.isConnected) button.disabled = false;
         syncInFlight = false;
-        lastActivityFingerprint = activityFingerprint();
       }
       refreshBackupStatusLine();
       return;
     }
-    // The restore itself lives in the blocking overlay (confirm -> progress -> result), so the
-    // user cannot navigate away mid-import and the merge is never a toast-only affair.
-    if (event.target.closest("[data-nc-restore]")) { openRestoreOverlay(); return; }
   });
 
   settingsEl?.addEventListener("input", (event) => {
@@ -2218,12 +1593,10 @@ function wireSettings() {
     if (event.target.matches("[data-nc-auto]")) {
       if (!nc) return;
       nc.autoBackup = event.target.checked;
-      if (!nc.autoBackup) { saveState(); armAutoBackup(); return; }
-      // Switched on: one full restore from the chosen backup first, so every chat is complete
-      // at once (not caught up chat by chat as each one opens); the uploads start after it.
-      nc.autoRestoreDone = false;
       saveState();
-      void runAutoRestore({ announce: true }).finally(() => armAutoBackup());
+      armAutoBackup();
+      // Switched on: the first upload happens promptly.
+      noteContactActivity();
     }
   });
 }
@@ -2232,19 +1605,20 @@ function wireSettings() {
 // Exports
 // ---------------------------------------------------------------------------
 
-/** Deletes the encrypted archive from the user's Nextcloud. Only ever on the user's say-so (the
- *  Delete Account option that names it): the archive is what carries history to their other
- *  devices. 404 is the state asked for. */
+/** Deletes the encrypted contacts file from the user's Nextcloud, and the old chat backup with it:
+ *  this is the account going away, the one time KaChat still touches that file. Only ever on the
+ *  user's say-so (the Delete Account option that names it). 404 is the state asked for. */
 export async function deleteRemoteNextcloudBackup() {
   if (!nc?.server || !nc?.username || !nc?.appPassword) return;
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folder = backupFolderPath().split("/").map(encodeURIComponent).join("/");
-  for (const name of [BACKUP_FILENAME, LEGACY_DESKTOP_BACKUP_FILENAME]) {
+  for (const name of [BACKUP_FILENAME, ...RETIRED_BACKUP_FILENAMES]) {
     const response = await ncFetch(`${davRoot}/${folder}/${encodeURIComponent(name)}`, { method: "DELETE", headers: { Authorization: authHeader() } });
     if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
     if (!(response.ok || response.status === 404)) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
   }
-  deps.appendEngineLog?.("[Nextcloud] Remote archive deleted");
+  rememberBackupETag(null);
+  deps.appendEngineLog?.("[Nextcloud] Remote backup deleted");
 }
 
 export function isNextcloudConnected() {
@@ -2297,12 +1671,9 @@ export function resetNextcloudForAccount() {
   // ETag, the dirty flag and the sync floor all belong to the wallet that just left.
   stopChangeWatcher();
   if (syncDebounceTimer) { clearTimeout(syncDebounceTimer); syncDebounceTimer = null; }
-  if (autoRestoreTimer) { clearTimeout(autoRestoreTimer); autoRestoreTimer = null; }
   syncDirty = false;
   lastAutoSyncAt = 0;
-  lastSeenConversationId = null;
   lastSharedContactsCheck = 0;
-  if (restore.phase !== "running") closeRestoreOverlay();
   for (const url of thumbCache.values()) { if (url) URL.revokeObjectURL(url); }
   thumbCache = new Map();
   loadState();
@@ -2340,16 +1711,8 @@ export function initNextcloud(dependencies) {
       else autoBackupIfDue();
       return;
     }
-    // Timers are throttled while hidden, so a change that landed back there may never have
-    // reached the detector. Compare rather than re-baseline, so it is not lost.
-    const fingerprint = activityFingerprint();
-    if (fingerprint !== lastActivityFingerprint) {
-      lastActivityFingerprint = fingerprint;
-      noteLocalActivity();
-    }
     startChangeWatcherIfNeeded();
     autoBackupIfDue(AUTO_CATCHUP_MS);
-    scheduleAutoRestoreIfNeeded();
     syncSharedContactsIfDue();
   });
 

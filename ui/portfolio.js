@@ -36,7 +36,7 @@ import { closeActiveScanner, scanKaspaAddress } from "./qr-scan.js";
 import { otherDomainsHtml, pickOtherDomain } from "./send-kaspa-components.js";
 import { saveFile } from "./save-file.js";
 import { transactionBelongsInHistory } from "../engine/sync.js";
-import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker, noteMessageActivity } from "./nextcloud.js";
+import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, openNextcloudFilePicker } from "./nextcloud.js";
 import {
   PORTFOLIO_SEED_NAME, isPortfolioUuid, newPortfolioUuid, stampPortfolioChanges, mergePortfolioTombstones,
   mergePortfolioSync, portfolioSyncFromDesktop, portfolioSyncToDesktop, portfolioSyncFromArchive,
@@ -54,7 +54,7 @@ const PORTFOLIO_KEY = "kachat-portfolios-v1"; // account-scoped: { activeId, por
 // fiatValue }] - fiatValue null until that day's price is known (the backfill fills it in).
 const FEES_KEY = "kachat-portfolio-fees-v1";
 // Portfolios and rows deleted on this account, [{ kind: "portfolio" | "transaction", id, deletedAt }]
-// (ms), carried in the Nextcloud backup so a merge or restore never brings them back (iOS 11f1548).
+// (ms), carried in an exported chat archive so importing one never brings them back (iOS 11f1548).
 const TOMBSTONES_KEY = "kachat-portfolio-tombstones-v1";
 const MAX_PORTFOLIOS = 5;
 // Mirrors iOS PortfolioAddressImporter.priceUnavailableNote — rows the import couldn't price
@@ -309,9 +309,9 @@ function writeState() {
   localStorage.setItem(deps.accountScopedKey(PORTFOLIO_KEY), JSON.stringify(state));
 }
 
-/// Saves the list: anything added, renamed, moved or edited is stamped, anything gone is recorded
-/// as deleted, and the Nextcloud backup is marked to upload (NEXTCLOUD_SYNC.md §5, iOS 11f1548
-/// PortfolioManager/PortfolioViewModel.persist). Picking the active portfolio changes nothing here.
+/// Saves the list: anything added, renamed, moved or edited is stamped and anything gone is recorded
+/// as deleted (iOS 11f1548 PortfolioManager/PortfolioViewModel.persist). Picking the active portfolio
+/// changes nothing here.
 function saveState() {
   const now = Date.now();
   const result = stampPortfolioChanges(savedPortfolios, state.portfolios, now);
@@ -321,11 +321,6 @@ function saveState() {
   }
   writeState();
   savedPortfolios = snapshotPortfolios();
-  if (result.changed) noteBackupActivity();
-}
-
-function noteBackupActivity() {
-  try { noteMessageActivity(); } catch { /* Nextcloud not set up */ }
 }
 
 function loadTombstones() {
@@ -348,7 +343,6 @@ function loadFees() {
 
 function saveFees() {
   try { localStorage.setItem(deps.accountScopedKey(FEES_KEY), JSON.stringify(fees)); } catch { /* quota */ }
-  noteBackupActivity(); // fees ride in the backup too (iOS persistFees)
 }
 
 /// A deleted portfolio's fees go with it (iOS forgetPortfolio). Its rows already do: they live
@@ -3159,7 +3153,7 @@ async function refreshData({ force = false } = {}) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Nextcloud backup (NEXTCLOUD_SYNC.md §5 "Portfolios", iOS 11f1548)
+// Chat archive export (NEXTCLOUD_SYNC.md §5 "Portfolios", iOS 11f1548)
 // ---------------------------------------------------------------------------
 
 /** This account's portfolios as the sync model sees them. */
@@ -3167,7 +3161,7 @@ function currentPortfolioSync() {
   return portfolioSyncFromDesktop(state.portfolios, fees, tombstones);
 }
 
-/** What the backup carries for this account: the archive's optional `portfolios`,
+/** What an exported archive carries for this account: the archive's optional `portfolios`,
  *  `portfolioTransactions`, `portfolioFees` and `portfolioDeleted` keys, empty ones left out.
  *  An untouched "Portfolio 1" seed is never uploaded. */
 export function portfolioArchive() {

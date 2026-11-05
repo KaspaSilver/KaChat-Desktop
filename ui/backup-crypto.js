@@ -1,5 +1,5 @@
 // Encrypted Backup Envelope (v1) — the cross-platform at-rest encryption for
-// cloud copies of the chat archive (the shared Nextcloud `kachat-backup.json`).
+// exported chat archives and the Nextcloud contacts file (`kachat-contacts.json`).
 // iOS, Android and desktop all implement this codec identically; see
 // MESSAGING.md "Encrypted Backup Envelope (v1)" in the iOS repo.
 //
