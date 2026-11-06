@@ -8,7 +8,7 @@ import {
 } from "../engine/amounts.js";
 
 globalThis.fetch = async () => new Response("", { status: 404 });
-const { sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, isTransactionKnown, sendKaspa, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE, isLostSubmitAnswer } = await import("../engine/transactions.js");
+const { sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, isTransactionKnown, sendKaspa, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE, isLostSubmitAnswer, excludeJustSpentUtxos, noteSpentOutpoints, clearJustSpentOutpoints, JUST_SPENT_HOLD_MS, maxSendEntries, MAX_SEND_INPUT_LIMIT } = await import("../engine/transactions.js");
 
 let pass = 0;
 const tests = [];
@@ -312,6 +312,47 @@ test("UTXO answers above the Kaspa supply are refused, per coin and in total", (
   // DSK-046: the refusal marks the node at fault, so withRpc switches nodes instead of rethrowing.
   try { checkedUtxoAnswer({ entries: [{ amount: MAX_SUPPLY_SOMPI + 1n }] }); assert.fail("no throw"); }
   catch (error) { assert.equal(error.badNode, true); }
+});
+
+// MARK: iOS 3942a5b7 - a rejection is a verdict, just-spent coins, Max past one transaction's coins
+const twoNodes = async (run) => { try { return await run({ ...NOT_FOUND }); } catch { return run({ ...NOT_FOUND }); } };
+test("a lost answer then a node's rejection is a plain failure, not Not confirmed", () => withNoRest(async () => {
+  let calls = 0;
+  await assert.rejects(
+    submitConfirmingAcceptance({ withRpc: twoNodes, submit: async () => { calls += 1; throw new Error(calls === 1 ? "timed out" : "transaction rejected: fee too low"); }, txid: TXID, lostAnswerWaitMs: 1 }),
+    (error) => error.code !== SEND_OUTCOME_UNKNOWN && /fee too low/.test(error.message),
+  );
+  assert.equal(calls, 2);
+}));
+const heldCoin = (txid, index, amount) => ({ outpoint: { transactionId: txid, index }, amount: BigInt(amount) });
+test("coins a send just spent are held back, then come back", async () => {
+  clearJustSpentOutpoints();
+  const coins = [heldCoin("aa", 0, 5), heldCoin("bb", 1, 7)];
+  await submitConfirmingAcceptance({ rpc: { getMempoolEntry: async () => ({ mempoolEntry: {} }) }, submit: async () => ({ transactionId: TXID }), txid: TXID, spends: ["aa:0"], recheckMs: 1 });
+  assert.deepEqual(excludeJustSpentUtxos(coins).map((c) => c.outpoint.transactionId), ["bb"]);
+  assert.equal(excludeJustSpentUtxos(coins, Date.now() + JUST_SPENT_HOLD_MS + 1).length, 2, "held for a while, not for good");
+  clearJustSpentOutpoints();
+});
+test("an unknown outcome holds its coins back; a rejection doesn't", () => withNoRest(async () => {
+  clearJustSpentOutpoints();
+  const coins = [heldCoin("aa", 0, 5), heldCoin("bb", 1, 7)];
+  await assert.rejects(submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => { throw new Error("fee too low"); }, txid: TXID, spends: ["bb:1"], lostAnswerWaitMs: 1 }));
+  assert.equal(excludeJustSpentUtxos(coins).length, 2);
+  await assert.rejects(
+    submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => { throw new Error("timed out"); }, txid: TXID, spends: ["bb:1"], lostAnswerWaitMs: 1 }),
+    (error) => error.code === SEND_OUTCOME_UNKNOWN,
+  );
+  assert.deepEqual(excludeJustSpentUtxos(coins).map((c) => c.outpoint.transactionId), ["aa"]);
+  clearJustSpentOutpoints();
+}));
+test("Max past one transaction's coins spends the largest 80; a coin-control pick is kept as is", () => {
+  const many = Array.from({ length: MAX_SEND_INPUT_LIMIT + 5 }, (_, i) => heldCoin(`t${i}`, 0, 1000 + i));
+  const picked = maxSendEntries(many);
+  assert.equal(picked.length, MAX_SEND_INPUT_LIMIT);
+  assert.equal(picked[0].amount, 1005n, "the five smallest are left out");
+  assert.equal(maxSendEntries(many.slice(0, 3)).length, 3);
+  const pick = many.slice(0, MAX_SEND_INPUT_LIMIT + 2).map((c) => `${c.outpoint.transactionId}:0`);
+  assert.equal(maxSendEntries(many, pick).length, MAX_SEND_INPUT_LIMIT + 2, "the pick is refused later, by the plan, never trimmed");
 });
 
 for (const [name, fn] of tests) {

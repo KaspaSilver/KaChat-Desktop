@@ -225,6 +225,38 @@ export function decidedWinner(game, now) {
   if (!flagged) return null;
   return flagged === WHITE ? game.black : game.white;
 }
+/** The instant (chain time) the side to move runs out of clock, while the game is on: the last
+ *  event, plus this move's allowance, plus what is left on that side's clock (iOS 8d5f925
+ *  ChessTournamentGame.flagAt). Null once the game is over. */
+export function flagAt(game) {
+  if (!game || game.winner) return null;
+  return game.lastEventAt + allowanceMs(game.moves.length + 1, game.startedAt) + CLOCK_MS - usedMs(game, game.board.sideToMove);
+}
+
+// --- Timeout claims (iOS 8d5f925 ChessTournamentService.claimTimeoutsIfDue / postClaim) -------
+/** A claim the chain voided (a last-second move landed first, a clock ahead of the chain) or
+ *  that failed to send is posted again after this long, while the game is still undecided. */
+export const CLAIM_RETRY_MS = 30_000;
+/** The app claims by itself only for a flag this recent: an old game both players walked away
+ *  from is not paid for on every launch. The board's Claim win covers the rest. */
+export const AUTO_CLAIM_WINDOW_MS = 30 * 60_000;
+/** Whether the app posts the claim by itself at wall time `now`: a second and a half past the
+ *  flag, so the claim's block time is safely after it, and only a recent flag. */
+export function autoClaimDue(flag, now) {
+  if (flag == null) return false;
+  return now - 1_500 >= flag && now - flag < AUTO_CLAIM_WINDOW_MS;
+}
+/** Whether a claim may go out now, given when the last one for that game was posted (wall ms,
+ *  or undefined). `force` - the board's Claim win - goes past the throttle. */
+export function claimMayPost(lastClaimAt, now, force = false) {
+  if (force || lastClaimAt == null) return true;
+  return now - lastClaimAt >= CLAIM_RETRY_MS;
+}
+
+/** A move of ours that the chain has not shown after this long (dropped, never mined) can be
+ *  played again (iOS 8d5f925 pendingMoveTimeoutMs). */
+export const PENDING_MOVE_TIMEOUT_MS = 25_000;
+export const PENDING_MOVE_EXPIRED_MESSAGE = "Your move didn't reach the network. Play it again.";
 /** Live with at least one game still undecided. */
 export function isInPlay(t, now) {
   return tournamentStatus(t) === "live" && Object.values(t.games).some((g) => !isDecided(g, now));
@@ -243,6 +275,73 @@ export function isStillPlaying(t, address, now) {
 export function seatExpiry(t, address) {
   if (tournamentStatus(t) !== "open" || !t.players.includes(address)) return null;
   return (t.joinedAt[address] ?? t.createdAt) + SEAT_TTL_MS;
+}
+
+/**
+ * Our own rows carry this device's clock until the chain's block time reaches us (`localStamps`,
+ * the txids of rows still locally stamped). A clock ahead of the chain put our move after the
+ * reply to it, a clock behind before the move it answers - either way a move out of turn,
+ * ignored, and a board stuck until the chain's time came. Until then such a move sits between
+ * the moves of its game around it by ply, whatever the local stamp says: no earlier than one
+ * past the latest smaller ply, no later than one before the earliest bigger ply. This device's
+ * view only: every device still reduces the chain's times once they are known (iOS 8d5f925
+ * ChessTournamentService.orderingLocalStamps).
+ */
+export function orderingLocalStamps(events, localStamps) {
+  if (!localStamps || !localStamps.size) return events;
+  return events.map((event) => {
+    const message = event.message;
+    if (!localStamps.has(event.txId) || message?.a !== "move" || message.g == null || message.n == null) return event;
+    const gameId = message.g;
+    const ply = message.n;
+    let lower = null;
+    let upper = null;
+    for (const other of events) {
+      if (other.txId === event.txId || other.message?.t !== message.t || other.message.g !== gameId || other.message.a !== "move") continue;
+      const otherPly = other.message.n;
+      if (otherPly == null) continue;
+      if (otherPly < ply) lower = lower == null ? other.blockTime : Math.max(lower, other.blockTime);
+      if (otherPly > ply) upper = upper == null ? other.blockTime : Math.min(upper, other.blockTime);
+    }
+    let time = event.blockTime;
+    if (upper != null) time = Math.min(time, upper - 1);
+    if (lower != null) time = Math.max(time, lower + 1);
+    return time === event.blockTime ? event : { ...event, blockTime: time };
+  });
+}
+
+// --- Send errors (iOS 8d5f925 PublicChatService.isRetryableSendError / friendlySendErrorMessage)
+// Shared by the arena's sends and the bot stamp (engine/chess-bot.js).
+
+export const SEND_CONFIRMING_MESSAGE = "The network is still confirming your previous send. Please try again in a few seconds.";
+export const NOT_ENOUGH_KAS_MESSAGE = "Not enough KAS on your Chatting Address. Add some and try again.";
+/** engine/transactions.js SEND_OUTCOME_UNKNOWN, by value: this file stays free of the send code. */
+const SEND_OUTCOME_UNKNOWN_CODE = "SEND_OUTCOME_UNKNOWN";
+const RETRYABLE_SEND_TEXT = [
+  "orphan", "already spent",
+  // iOS ChatService.isNoConfirmedInputsError: the coins are there, the change not spendable yet.
+  "no spendable funds available yet", "no confirmed spendable utxos available", "no spendable utxos available", "no utxos available",
+  SEND_CONFIRMING_MESSAGE.toLowerCase(),
+];
+const sendErrorText = (error) => String(error?.message || error || "");
+/** Worth trying again in a moment: the coins are there but not spendable yet (the change of the
+ *  last send), or the node refused the transaction as an orphan / already spent - none of which
+ *  reached the chain. Anything else fails at once: no KAS at all, and above all a send a node may
+ *  hold without having answered (SEND_OUTCOME_UNKNOWN), which a retry could pay for twice. */
+export function isRetryableSendError(error) {
+  if (error?.code === SEND_OUTCOME_UNKNOWN_CODE) return false;
+  const lower = sendErrorText(error).toLowerCase();
+  return RETRYABLE_SEND_TEXT.some((text) => lower.includes(text));
+}
+/** What a failed chess send says. No coin at all on the address - iOS's "fresh UTXOs empty",
+ *  Desktop's "No UTXOs found. Fund the receive address first." - reads as no KAS, like
+ *  insufficient funds. */
+export function friendlySendErrorMessage(error) {
+  const raw = sendErrorText(error);
+  const lower = raw.toLowerCase();
+  if (lower.includes("orphan") || lower.includes("already spent") || lower.includes("double spend")) return SEND_CONFIRMING_MESSAGE;
+  if (lower.includes("insufficient funds") || lower.includes("no utxos found")) return NOT_ENOUGH_KAS_MESSAGE;
+  return raw;
 }
 
 /** Chain order: block time, then txid - the same on every device. */

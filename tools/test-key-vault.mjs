@@ -12,7 +12,7 @@ import {
   LEGACY_PERSISTED_WALLET_KEY, VAULT_LEGACY_WALLET_KEY, VAULT_SESSION_KEY, VAULT_HANDOFF_KEY,
   VAULT_HANDOFF_TTL_MS, VAULT_PBKDF2_ITERATIONS,
   readNextcloudAccount, writeNextcloudAccount, onKeyVaultStateChanged, NEXTCLOUD_STORAGE_KEY,
-  ACCOUNT_PASSWORDS_KEY,
+  ACCOUNT_PASSWORDS_KEY, forgetAccountSecrets,
 } from "../ui/key-vault.js";
 // A second tab: the same module loaded again is a separate vault (its own memory and
 // sessionStorage) on the same localStorage.
@@ -1008,6 +1008,29 @@ test("per-account: the target account is what the address-less calls mean", asyn
   } finally {
     configureKeyVault({ target: null });
   }
+});
+
+test("iOS 3942a5b7: a deleted account's opened secrets leave memory; the others and the key stay", async () => {
+  fresh();
+  writeAccountRecords([accountA, accountB]);
+  await setAppPassword("correct horse");
+  // reading opens (and caches) both accounts' secrets
+  assert.equal(byAddress(accountA.address).privateKeyHex, KEY_A);
+  assert.equal(byAddress(accountB.address).privateKeyHex, KEY_B);
+  assert.equal(forgetAccountSecrets(""), false);
+  assert.equal(forgetAccountSecrets(accountA.address), true, "Alice's opened secrets dropped");
+  assert.equal(forgetAccountSecrets(accountA.address), false, "nothing of hers left to drop");
+  assert.equal(isAppLocked(), false, "the data key stays");
+  // the testnet encoding is the same account
+  assert.equal(forgetAccountSecrets(accountB.address.replace(/^kaspa:/, "kaspatest:")), true);
+  // still readable while unlocked: they open again from storage (Alice too, while she is listed)
+  assert.equal(byAddress(accountB.address).privateKeyHex, KEY_B);
+  // Delete Account's order: off the registry first, then out of memory; nothing reopens her
+  writeAccountRecords([accountB]);
+  assert.equal(forgetAccountSecrets(accountA.address), true);
+  assert.equal(byAddress(accountA.address), undefined);
+  assert.equal(forgetAccountSecrets(accountA.address), false);
+  assert.equal(byAddress(accountB.address).privateKeyHex, KEY_B);
 });
 
 let failed = 0;

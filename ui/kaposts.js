@@ -80,6 +80,8 @@ import {
   kapostsDrawerDim,
   kapostsPaymentRequestIn,
   kachatSiteLinkIn,
+  kapostsFailureDelivery,
+  kapostsSubmitWithUtxoRetry,
 } from "./kaposts-format.js";
 import { botChallengeIn, botChallengeTitle } from "../engine/chess-bot-links.js";
 // The phone header's hamburger, its slide-out card and the swipeable feeds (iOS 865c9ab).
@@ -1828,6 +1830,10 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
     ? `<div class="kaposts-delivery pending" title="Posting"><span class="kaposts-spinner" aria-label="Posting"></span></div>`
     : post.delivery === "failed"
       ? `<div class="kaposts-delivery failed"><button type="button" data-kaposts-retry="${pid}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5M12 16v.5"/></svg>Retry</button></div>`
+      // The network never answered, so it may have landed: an orange question mark and no Retry,
+      // which could post and pay twice (iOS e5a9b11 KaPostCellView .unconfirmed).
+      : post.delivery === "unconfirmed"
+        ? `<div class="kaposts-delivery unconfirmed" role="img" aria-label="Not confirmed. It may have gone through. Check before posting it again." title="It may have gone through. Check before posting it again."><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.6.3-1 .8-1 1.5v.2M12 16.6v.4"/></svg><span aria-hidden="true">Not confirmed</span></div>`
       : sentCheck
         ? `<div class="kaposts-delivery sent" data-kaposts-sent-check="${(Number(post.timestamp) || 0) + 60_000}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></div>`
         : "";
@@ -2322,7 +2328,7 @@ function schedulePost(text) {
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
     } catch (error) {
       // The red Retry on the card is the whole report (iOS schedulePost): no toast.
-      mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
+      mutatePost(post.id, (p) => { p.delivery = kapostsFailureDelivery(error); p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost submit failed: ${error.message}`);
     }
     renderAll();
@@ -2350,7 +2356,7 @@ function schedulePoll(question, options, lengthMs) {
       const txid = await submitKaPoll({ engine: deps.engine, question, options, closesAtMs: closesAt, mentionedPubkeys: await mentionedPubkeysFor(question) });
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
     } catch (error) {
-      mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
+      mutatePost(post.id, (p) => { p.delivery = kapostsFailureDelivery(error); p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost poll failed: ${error.message}`);
     }
     renderAll();
@@ -2476,18 +2482,12 @@ async function loadSelfThreadChain(post) {
 const threadRemainders = new Map();
 
 // Consecutive payload txs spend each other's change before the node indexes it (~1s blocks) -
-// retry a few times with settle delays before giving up.
-async function submitWithUtxoRetry(op) {
-  let attempt = 0;
-  for (;;) {
-    try { return await op(); }
-    catch (error) {
-      attempt += 1;
-      if (attempt > 4) throw error;
-      deps.appendEngineLog?.(`KaPost thread segment retry ${attempt}: ${error.message}`);
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-    }
-  }
+// retry a few times with settle delays before giving up. Never after an unknown outcome, which is
+// rethrown at once: the first one may have landed (iOS e5a9b11).
+function submitWithUtxoRetry(op) {
+  return kapostsSubmitWithUtxoRetry(op, {
+    onRetry: (attempt, error) => deps.appendEngineLog?.(`KaPost thread segment retry ${attempt}: ${error.message}`),
+  });
 }
 
 // First segment = top-level post, each following segment = reply to the PREVIOUS one. Segments
@@ -2546,7 +2546,8 @@ async function continueThread(localId) {
     threadRemainders.delete(localId);
     mutatePost(localId, (p) => { p.delivery = "sent"; });
   } catch (error) {
-    mutatePost(localId, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
+    // Not confirmed: the remainders stay, but with no Retry to resume them (iOS e5a9b11).
+    mutatePost(localId, (p) => { p.delivery = kapostsFailureDelivery(error); p.failureReason = error?.message || String(error); });
     deps.appendEngineLog?.(`KaPost thread submit failed (resumable): ${error.message}`);
   }
   renderAll();
@@ -2566,7 +2567,7 @@ function scheduleQuote(target, text) {
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
       showActionToast("Quote posted to the network", txid);
     } catch (error) {
-      mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
+      mutatePost(post.id, (p) => { p.delivery = kapostsFailureDelivery(error); p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost quote failed: ${error.message}`);
     }
     renderAll();
@@ -2816,7 +2817,7 @@ async function submitReply(parent, text) {
       sessionReplyIds.add(txid);
       mutatePost(comment.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
     } catch (error) {
-      mutatePost(comment.id, (p) => { p.delivery = "failed"; });
+      mutatePost(comment.id, (p) => { p.delivery = kapostsFailureDelivery(error); });
       deps.appendEngineLog?.(`KaPost reply failed: ${error.message}`);
     }
     renderThread();
@@ -2835,6 +2836,8 @@ async function submitReply(parent, text) {
 }
 
 function retryPost(post) {
+  // Only a post that didn't go through: one not confirmed may have landed (iOS e5a9b11).
+  if (post?.delivery !== "failed") return;
   // A failed THREAD resumes its remaining chain instead of re-posting just the root.
   if (threadRemainders.has(post.id)) {
     continueThread(post.id);
@@ -2874,7 +2877,7 @@ function retryPost(post) {
       }
       mutatePost(post.id, (p) => { p.remoteId = txid; p.delivery = "sent"; });
     } catch (error) {
-      mutatePost(post.id, (p) => { p.delivery = "failed"; p.failureReason = error?.message || String(error); });
+      mutatePost(post.id, (p) => { p.delivery = kapostsFailureDelivery(error); p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost retry failed: ${userFacingError(error)}`);
     }
     renderAll();
@@ -3972,11 +3975,36 @@ async function resolveKaPostsPubkey(address) {
   return null;
 }
 
+// Coming back to a profile keeps the pages already scrolled in, as on the Feed (iOS e5a9b11
+// FeedLoadGates): page one is pulled again only when nothing is loaded or it is five minutes old.
+// Refresh still reloads. The last profile and the Notifications list, cleared on an account switch.
+const PROFILE_FRESH_MS = 5 * 60 * 1000;
+const NOTIFICATIONS_FRESH_MS = 120 * 1000;
+let keptProfilePanel = null;       // { address, panel, loadedAt }
+let keptNotificationsPanel = null; // { panel, loadedAt }
+
+/** The profile panel to show again for `address`, or null when it has to load. */
+function freshKeptProfilePanel(address, passedPubkey) {
+  const kept = keptProfilePanel;
+  if (!kept || kept.address !== address || Date.now() - kept.loadedAt >= PROFILE_FRESH_MS) return null;
+  const panel = kept.panel;
+  if (panel.loading || !(panel.posts.length || panel.replies.length)) return null;
+  if (passedPubkey && panel.pubkey && passedPubkey.toLowerCase() !== panel.pubkey.toLowerCase()) return null;
+  return panel;
+}
+
 async function openPosterProfile(address, passedPubkey) {
   rememberFeedScroll();
   panelGeneration += 1;
   clearPanelPagerSentinels();
   const generation = panelGeneration;
+  const kept = freshKeptProfilePanel(address, passedPubkey);
+  if (kept) {
+    activePanel = beginPanel(kept);
+    renderPanel();
+    syncRailActive();
+    return;
+  }
   activePanel = beginPanel({
     type: "profile", address, pubkey: passedPubkey || null, tab: "posts", posts: [], replies: [], details: null, loading: true,
     pagers: { posts: makePager(), replies: makePager() },
@@ -4017,6 +4045,7 @@ async function openPosterProfile(address, passedPubkey) {
     panel.loading = false;
     seedPager(panel.pagers.posts, content.posts, content.pagination);
     seedPager(panel.pagers.replies, repliesContent.posts, repliesContent.pagination);
+    keptProfilePanel = { address, panel, loadedAt: Date.now() };
     renderPanel();
     resolvePosterIdentities([address], () => { if (activePanel === panel) renderPanel(); });
   } catch (error) {
@@ -4065,6 +4094,7 @@ async function refreshProfilePanel(panel) {
     const mapped = content.posts.map(mapRemotePost).filter(Boolean);
     panel[tab] = tab === "replies" ? mapped : mapped.filter((post) => !post.parentRemoteId);
     seedPager(pager, content.posts, content.pagination);
+    if (keptProfilePanel?.panel === panel) keptProfilePanel.loadedAt = Date.now();
     renderPanel();
   } catch (error) {
     deps.appendEngineLog?.(`KaPost profile refresh failed: ${error.message}`);
@@ -4469,14 +4499,19 @@ async function openNotificationsPanel() {
   panelGeneration += 1;
   clearPanelPagerSentinels();
   const generation = panelGeneration;
-  activePanel = beginPanel({ type: "notifications", items: [], loading: true, pager: makePager({ pageSize: PAGER_THREAD_PAGE_SIZE }) });
+  // Within two minutes of the last load the list comes back as it was, pages and all; pull to
+  // refresh still reloads (iOS e5a9b11 KaPostsNotificationsView lastLoadedAt).
+  const kept = keptNotificationsPanel;
+  const reuse = kept && !kept.panel.loading && Date.now() - kept.loadedAt < NOTIFICATIONS_FRESH_MS;
+  activePanel = beginPanel(reuse ? kept.panel : { type: "notifications", items: [], loading: true, pager: makePager({ pageSize: PAGER_THREAD_PAGE_SIZE }) });
   const panel = activePanel;
   renderPanel();
   syncRailActive();
   // Opening the list IS seeing them - cleared on open rather than on close so the badge does
   // not sit there while you read.
   markAllKaPostsNotificationsSeen();
-  if (generation !== panelGeneration) return;
+  if (reuse || generation !== panelGeneration) return;
+  keptNotificationsPanel = { panel, loadedAt: Date.now() };
   await loadNotificationsFirstPage(panel);
 }
 
@@ -5099,6 +5134,8 @@ async function sendDueScheduledNow() {
 }
 
 async function refreshScheduledFromServer() {
+  // Only posts the server holds have anything to learn from it (iOS e5a9b11).
+  if (!scheduledPosts.some((entry) => entry.onServer)) return;
   let remote;
   try { remote = await fetchScheduledPosts({ engine: deps.engine }); } catch { return; }
   const byId = new Map(remote.map((r) => [r.txId, r]));
@@ -5733,6 +5770,9 @@ export function resetKaPostsForAccount() {
   myContentPosts = [];
   threadStack = [];
   activePanel = null;
+  // The kept profile and Notifications pages were the old account's.
+  keptProfilePanel = null;
+  keptNotificationsPanel = null;
   panelOverThread = false;
   pendingThreadScrollRemoteId = null;
   threadHighlightRemoteId = null;

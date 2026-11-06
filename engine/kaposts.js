@@ -710,6 +710,8 @@ export async function submitScheduledLocally({ engine, serialized, safeJson = nu
     withRpc: engine.withRpc.bind(engine),
     submit: (rpc, { allowOrphan = false } = {}) => rpc.submitTransaction({ transaction, allowOrphan }),
     txid: localId,
+    // the coins it spends stay out of the next send until it is in a block (iOS 3942a5b7)
+    spends: (serialized?.inputs || []).map((i) => `${outpointOf(i)?.transactionId}:${num(outpointOf(i)?.index)}`),
     label: "Scheduled post submit",
     log: typeof engine.log === "function" ? engine.log : () => {},
   });

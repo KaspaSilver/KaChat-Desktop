@@ -15,7 +15,7 @@ import {
   WHITE, BLACK, opposite, algebraic, promotionLetter, initialBoard, legalMoves, applyMove, isLegalMove,
   normalizingPromotion, isCheckmate, isStalemate, isInsufficientMaterial, pieceAt, squareEquals,
 } from "./chess.js";
-import { positionKey, periodSinceMs } from "./chess-tournament.js";
+import { positionKey, periodSinceMs, isRetryableSendError, friendlySendErrorMessage } from "./chess-tournament.js";
 
 // ---------------------------------------------------------------------------------------------
 // The bots (ChessBotModels.swift)
@@ -1006,7 +1006,10 @@ export class ChessBotGame {
   }
 
   /** One broadcast transaction, with the retries a send needs while the change of the last
-   *  transaction is not spendable yet. Resolves the error to show, or null once it is sent. */
+   *  transaction is not spendable yet (the arena's sends do the same). Only that kind of error
+   *  is retried (isRetryableSendError): no KAS on the chatting address, or a send whose outcome
+   *  is unknown (a second stamp of the same game), fails at once (iOS 8d5f925). Resolves the
+   *  error to show, or null once it is sent. */
   async sendWithRetries(message) {
     const content = encodeBotMessage(message);
     let attempt = 0;
@@ -1017,10 +1020,9 @@ export class ChessBotGame {
         return null;
       } catch (error) {
         attempt += 1;
-        if (attempt > BOT_SEND_RETRIES) {
-          const text = error?.message || String(error);
-          this.log(`Chess bot game stamp failed after retries: ${text}`);
-          return text;
+        if (attempt > BOT_SEND_RETRIES || !isRetryableSendError(error)) {
+          this.log(`Chess bot game stamp failed: ${error?.message || String(error)}`);
+          return friendlySendErrorMessage(error);
         }
         await this.sleep(BOT_SEND_RETRY_MS);
       }

@@ -16,7 +16,7 @@ import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHA
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
-import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, SEND_OUTCOME_UNKNOWN } from "../engine/transactions.js";
+import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, MAX_SEND_INPUT_LIMIT, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
 import { isLeftoverSend, undeliveredRowFor, settleLeftoverGroupRows } from "./leftover-sends.js";
 import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody } from "../engine/payment-notice.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory, restPaymentSompiTo, restPaymentSender, fetchHeldPaymentRows, strangerPaymentStep } from "../engine/sync.js";
@@ -127,7 +127,7 @@ import kachatLogoUrl from "./assets/kachat-logo.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, PROMPT_EXTRA, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 import { attachRowSwipes, chatRowSwipeActions } from "./row-swipe.js";
-import { IMPORT_ADDRESS_SEARCH_DEPTH, foundChattingAddresses, firstFundedAddress, rediscoveredGroupIsRead } from "./account-import.js";
+import { IMPORT_ADDRESS_SEARCH_DEPTH, foundChattingAddresses, firstFundedAddress, rediscoveredGroupIsRead, pastedWordsInvalidMessage } from "./account-import.js";
 import { attachPinnedSearch } from "./pinned-search.js";
 import { edgeBackWouldClaim } from "./edge-back.js";
 import { startAppUpdateChecks } from "./app-update.js";
@@ -135,7 +135,7 @@ import { saveFile } from "./save-file.js";
 import { createStoredZip } from "./zip-store.js";
 import { fetchAddressActivity, runSpendingDiscovery, captureSpendingAccount, deriveSpendingAddressForAccount, deriveSpendingAddressesForAccount, probeFreshQuantumSlot, chooseReceiveAddress, revealSpendingIndexFor, setPrimarySpendingIndexFor, markQuantumSpentFor } from "./spending-discovery.js";
 import { restoreRememberedVaults } from "./vault-remember.js";
-import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, isPasswordStorageKey, isBiometricStorageKey, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY, hasBiometricUnlock, biometricUnlockRetiredReason, loadBiometricRecord, removeBiometricUnlock, BIOMETRIC_UNLOCK_KEY } from "./key-vault.js";
+import { configureKeyVault, hasAppPassword as vaultHasAppPassword, isVaultEnabled, isAppLocked, unlockKeyVault, unlockKeyVaultFromSession, lockKeyVault, setAppPassword as vaultSetAppPassword, removeAppPassword as vaultRemoveAppPassword, resetForgottenAppPassword, releaseAppPasswordIfUnused, forgetAccountSecrets, isPasswordStorageKey, isBiometricStorageKey, readAccountRecords, writeAccountRecords, persistedWalletRecordForStorage, readLegacyWalletKey, clearLegacyWalletKey, appPasswordLockoutMessage, MIN_APP_PASSWORD_LENGTH, writeKeyVaultHandoff, keyVaultStorageChanged, onKeyVaultLockedByAnotherTab, VAULT_HANDOFF_TTL_MS, LOCKED_IN_ANOTHER_TAB_MESSAGE, APP_PASSWORD_KEY, APP_PASSWORD_PENDING_KEY, hasBiometricUnlock, biometricUnlockRetiredReason, loadBiometricRecord, removeBiometricUnlock, BIOMETRIC_UNLOCK_KEY } from "./key-vault.js";
 import { biometricName, biometricRowLabel, biometricButtonLabel, biometricEnvironmentProblem, canOfferBiometricUnlock, canAutoPromptBiometric, checkBiometricSupport, enrolBiometric, finishBiometricEnrolment, unlockWithBiometric, turnOffBiometricUnlock, BIOMETRIC_UNSUPPORTED_MESSAGE } from "./biometric-unlock.js";
 import { sameAccountAddress as sameStoredAccountAddress } from "../engine/network.js";
 import { openEmojiReactionPicker, openComposerEmojiPopover, closeComposerEmojiPopover, recordEmojiRecent } from "./emoji.js";
@@ -1059,7 +1059,12 @@ function activeAccountMetadata() {
   let all = {};
   try { all = loadAccountMetaMap(); } catch {}
   if (!all[address]) {
-    all[address] = { name: `Account ${address.slice(-6)}`, createdAt: Date.now() };
+    // The saved-accounts list's name for it, when it has one: a made-up name here would be saved
+    // over it by the next persistTestingWallet, undoing a rename (iOS 3942a5b7 withSavedAlias).
+    let saved = null;
+    try { saved = loadSavedAccounts().find((entry) => sameStoredAccountAddress(entry?.address, address)) || null; } catch { saved = null; }
+    const savedName = String(saved?.name || "").trim();
+    all[address] = { name: savedName || `Account ${address.slice(-6)}`, createdAt: saved?.createdAt || Date.now() };
     saveAccountMetaMap(all);
   }
   return all[address];
@@ -1249,6 +1254,18 @@ function activateSavedAccount(address) {
   try { localStorage.removeItem(UI_SPOT_TAB_KEY); } catch { /* best-effort */ }
 }
 
+/** Whether any of `address`'s keys reached this device's storage: a registry entry (sealed or not)
+ *  or the active-wallet record. A create that failed before this is true owes no backup. */
+function accountKeysStoredFor(address) {
+  try {
+    if (loadSavedAccounts().some((entry) => sameStoredAccountAddress(entry?.address, address))) return true;
+    const wallet = JSON.parse(localStorage.getItem(PERSISTED_WALLET_KEY) || "null");
+    return sameStoredAccountAddress(wallet?.address, address);
+  } catch {
+    return true; // unreadable: keep the account owed rather than risk it never being
+  }
+}
+
 /** iOS IOS-016: before the active-wallet record (and, with `legacy`, the pre-v2 bare key) is
  *  overwritten with another account, the account it holds must be in the saved-account registry,
  *  filed there now and read back if it is not. Throws when that fails, so the caller changes
@@ -1298,6 +1315,34 @@ async function unlockAppWithPassword(message, { allowForgot = true, autoBiometri
 
 let pendingSavedAccountRemoval = null;
 
+// Creating, signing in or removing an account: one at a time, since each one replaces the account in
+// the active slot (iOS 3942a5b7 isAccountActionRunning). "create" while Create New Account runs; a
+// sign-in or a removal is synchronous once its prompt is answered, so those only check it, before
+// the prompt and again after. A var with no initializer: the sign-in screen can render before here.
+var savedAccountActionRunning;
+/** Starts `kind` unless another account action is running. False when it may not start. */
+function beginSavedAccountAction(kind) {
+  if (savedAccountActionRunning) return false;
+  savedAccountActionRunning = kind;
+  applySavedAccountActionsEnabled();
+  return true;
+}
+function endSavedAccountAction(kind) {
+  if (savedAccountActionRunning !== kind) return;
+  savedAccountActionRunning = "";
+  applySavedAccountActionsEnabled();
+}
+/** The sign-in screen's rows and buttons are off while an account action runs (iOS
+ *  .disabled(isAccountActionRunning)). */
+function applySavedAccountActionsEnabled() {
+  const running = Boolean(savedAccountActionRunning);
+  savedAccountList?.querySelectorAll(".saved-account-signin, .saved-account-edit").forEach((button) => { button.disabled = running; });
+  for (const selector of ["[data-logged-out-create]", "[data-logged-out-import]", "[data-logged-out-create-passphrase]"]) {
+    const button = document.querySelector(selector);
+    if (button) button.disabled = running;
+  }
+}
+
 function renderSavedAccountsScreen() {
   if (!savedAccountList) return;
   savedAccountList.replaceChildren();
@@ -1305,7 +1350,7 @@ function renderSavedAccountsScreen() {
   // iOS OnboardingView: no Saved Accounts section at all until there is one.
   const section = savedAccountList.closest(".saved-accounts-section");
   if (section) section.hidden = !accounts.length;
-  if (!accounts.length) return;
+  if (!accounts.length) { applySavedAccountActionsEnabled(); return; }
   for (const account of accounts) {
     const row = document.createElement("div");
     row.className = "saved-account-card";
@@ -1332,6 +1377,7 @@ function renderSavedAccountsScreen() {
       small.append(head, tail);
     }
     signInButton.addEventListener("click", async () => {
+      if (savedAccountActionRunning) return;
       try {
         // Each account its own password: this account's, asked here when it is picked - never by
         // itself when the page opens (owner, 2026-10-22). Nothing signs in until it opens the keys
@@ -1343,9 +1389,12 @@ function renderSavedAccountsScreen() {
           const ok = await withVaultTarget(address, () => requestPassword({ mode: "verify", title: "Enter Password", message: "Enter your password to sign in." }));
           if (!ok) return;
         }
+        // the password prompt may have let another account action start meanwhile (iOS 3942a5b7)
+        if (!beginSavedAccountAction("signIn")) return;
         activateSavedAccount(account.address);
-        reloadKaChat();
+        reloadKaChat(); // held until the page goes
       } catch (error) {
+        endSavedAccountAction("signIn");
         // iOS OnboardingView: an alert, not a toast.
         alertDialog({ title: "Sign In Failed", message: userFacingError(error) || "Unable to sign in to this account." });
       }
@@ -1366,6 +1415,7 @@ function renderSavedAccountsScreen() {
     row.append(signInButton, editButton);
     savedAccountList.append(row);
   }
+  applySavedAccountActionsEnabled();
 }
 
 const accountActionMenu = document.querySelector("[data-account-action-menu]");
@@ -1445,7 +1495,7 @@ function deleteAccountWarningHtml({ notBackedUp, canBackUpHere }) {
   return `<span class="delete-account-warning">
     <span class="delete-account-warning-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4 21 19.5H3z"/><path d="M12 10v4.2"/><circle cx="12" cy="16.6" r=".3"/></svg></span>
     ${notBackedUp ? `<span class="delete-account-warning-strong">This account isn't backed up. If you delete it now, it and its funds can never be recovered.</span>` : ""}
-    ${notBackedUp && !canBackUpHere ? "<span>To back it up first, sign in to it and use the card on the Profile tab.</span>" : ""}
+    ${notBackedUp && !canBackUpHere ? "<span>To back it up first, sign in to it and tap the backup banner under the balance.</span>" : ""}
     <span>Make sure your 12 or 24 words are backed up, and your passphrase too if you have one. They are the only way to recover this account and its funds.</span>
   </span>`;
 }
@@ -1453,22 +1503,31 @@ function deleteAccountWarningHtml({ notBackedUp, canBackUpHere }) {
 // The sign-in screen's Delete: the same warning, without a way to the seed phrase (a signed-out
 // account has none open to show).
 async function openSavedAccountDelete(account) {
+  // One removal at a time, and none while another account action runs (iOS 3942a5b7).
+  if (savedAccountActionRunning || pendingSavedAccountRemoval) return;
   pendingSavedAccountRemoval = account;
-  const choice = await chooseDialog({
-    title: "Delete Account",
-    messageHtml: deleteAccountWarningHtml({ notBackedUp: accountBackupStatus.isPending(account.address), canBackUpHere: false }),
-    options: [
-      { id: "remove", title: "Delete Account", subtitle: `Deletes ${account.name} (${savedAccountShortAddress(account.address)}) and its local data from this device.`, destructive: true },
-      { id: "cancel", title: "Cancel", subtitle: "Leave everything as it is." },
-    ],
-  });
-  pendingSavedAccountRemoval = null;
-  if (choice !== "remove") return;
+  let choice = null;
+  try {
+    choice = await chooseDialog({
+      title: "Delete Account",
+      messageHtml: deleteAccountWarningHtml({ notBackedUp: accountBackupStatus.isPending(account.address), canBackUpHere: false }),
+      options: [
+        { id: "remove", title: "Delete Account", subtitle: `Deletes ${account.name} (${savedAccountShortAddress(account.address)}) and its local data from this device.`, destructive: true },
+        { id: "cancel", title: "Cancel", subtitle: "Leave everything as it is." },
+      ],
+    });
+  } finally {
+    pendingSavedAccountRemoval = null;
+  }
+  // the sheet may have let another account action start meanwhile
+  if (choice !== "remove" || !beginSavedAccountAction("remove")) return;
   try {
     removeSavedAccountFromDevice(account);
   } catch (error) {
     appendEngineLog(`Saved-account removal failed: ${error.message}`);
     showCopyToast(userFacingError(error));
+  } finally {
+    endSavedAccountAction("remove");
   }
 }
 
@@ -1596,6 +1655,8 @@ function removeSavedAccountFromDevice(account) {
   // Its closed-app notifications stop with it (the device key removes the registration).
   webPushForgetAccount(address).catch(() => {});
   removeAccountScopedLocalData(address);
+  // Its keys opened in this tab go too: they must not outlive the account in memory (iOS 3942a5b7).
+  forgetAccountSecrets(address);
   // Its own password and Face ID record protect nothing now, whether or not other accounts remain;
   // the shared one goes once no account is left in it.
   if (releaseAppPasswordIfUnused()) refreshPasswordStatus();
@@ -1881,11 +1942,12 @@ function openKaChatInternalLink(link) {
   else if (link.kind === "pay") openPaymentRequest(link.request);
   else if (link.kind === "kaplayBot") openKaPlayChallenge(link.challenge).catch(() => {});
 }
-/** A bot challenge opens KaPlay on that bot (KaPlay ddec987 KaChatChessApp.onOpenURL). A game on
- *  holds the board as it holds the dock: leaving it asks first, and a seat in a waiting room stays
- *  where it is. */
+/** A bot challenge opens KaPlay on that bot (KaPlay ddec987 KaChatChessApp.onOpenURL). Seated or
+ *  playing online, it waits in KaPlay until that is over and Chess's home is up - no resign
+ *  question, no popped waiting room (iOS 8d5f925 ChessHomeView.takeChallenge). A bot game on asks
+ *  first, as it does for the dock. */
 async function openKaPlayChallenge(challenge) {
-  const mayLeave = await chessTournamentsMayLeave().catch(() => true);
+  const mayLeave = await chessTournamentsMayLeave({ challenge }).catch(() => true);
   setActiveAppTab("chess");
   if (mayLeave) openChessBotChallenge(challenge);
 }
@@ -12700,7 +12762,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 267;
+const APP_BUILD = 268;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -13144,10 +13206,20 @@ const sendKaspaSlider = {
 const sendKaspaSwipeSubmit = {
   _disabled: true,
   get disabled() { return this._disabled; },
-  set disabled(value) { this._disabled = Boolean(value); sendKaspaSwipe.setEnabled(!this._disabled); },
+  set disabled(value) { this._disabled = Boolean(value); refreshSendKaspaSwipe(); },
   addEventListener() {},
 };
+// The swipe also waits for the amount and fee it shows to be the ones sent (iOS 3942a5b7 canSend):
+// not while Max or the fee is being worked out, and not when the fee couldn't be.
+const sendKaspaSwipeWait = { max: false, fee: false };
+function refreshSendKaspaSwipe() {
+  sendKaspaSwipe.setEnabled(!sendKaspaSwipeSubmit._disabled && !sendKaspaSwipeWait.max && !sendKaspaSwipeWait.fee && sendKaspaBaseFeeKas != null);
+}
 const sendKaspaFeeCtl = feeControls(sendKaspaModal, "send-kaspa");
+{
+  const setEstimating = sendKaspaFeeCtl.setEstimating.bind(sendKaspaFeeCtl);
+  sendKaspaFeeCtl.setEstimating = (on) => { sendKaspaSwipeWait.fee = Boolean(on); setEstimating(on); refreshSendKaspaSwipe(); };
+}
 
 const sendKaspaAmountInput = document.querySelector("[data-send-kaspa-amount]");
 const sendKaspaAmountLabel = document.querySelector("[data-send-kaspa-amount-label]");
@@ -13169,6 +13241,10 @@ let sendKaspaAvailableKas = null; // available balance for the Max button
 // True while the amount field holds an untouched Max fill — the send then goes through the
 // exact-fee single-output max path instead of the normal amount+change build.
 let sendKaspaMaxMode = false;
+// The Max on screen is what one transaction can carry, not the whole balance (iOS 3942a5b7): the
+// address holds more coins than one transaction can spend.
+let sendKaspaMaxCapped = false;
+const MAX_CAPPED_NOTE = `Max is what one transaction can carry: its largest ${MAX_SEND_INPUT_LIMIT} coins. Compound UTXOs combines the rest.`;
 // What a Max fill was computed from (audit DSK-043): { source, selectionKey, totalFeeKas,
 // amountSompi, outpoints }. The send pays exactly amountSompi from exactly those coins, or refuses.
 let sendKaspaMaxPin = null;
@@ -13377,7 +13453,8 @@ function paintSendKaspaAmountStep() {
     const error = errorEl && !errorEl.hidden ? errorEl.textContent : "";
     const exceeds = sendKaspaExceedsBalance();
     note.textContent = error || (exceeds ? "This is more than the address you're sending from holds."
-      : (sendKaspaAvailableKas != null ? `Available: ${trimKas8(sendKaspaAvailableKas)} ${KAS_UNIT}` : " "));
+      : (sendKaspaMaxMode && sendKaspaMaxCapped ? MAX_CAPPED_NOTE
+        : (sendKaspaAvailableKas != null ? `Available: ${trimKas8(sendKaspaAvailableKas)} ${KAS_UNIT}` : " ")));
     note.classList.toggle("error", Boolean(error || exceeds));
   }
   sendKaspaSteps.refresh();
@@ -13448,7 +13525,17 @@ function trimKas8(n) {
 }
 
 // Amount to actually send, always KAS (converts from fiat when in fiat mode).
+// A unit switch only changes what's shown, never the amount (iOS 3942a5b7 KaspaFiatAmountState
+// kasText): the KAS typed before switching to a currency is what is sent, and what comes back on
+// the switch back, while the currency figure shown is still the one the switch put there.
+let sendKaspaKasPin = null; // { shown: the currency text the switch showed, kas: the KAS text }
+function sendKaspaPinnedKas() {
+  return sendKaspaKasPin && sendKaspaUnit === "fiat" && String(sendKaspaAmountInput?.value || "") === sendKaspaKasPin.shown
+    ? sendKaspaKasPin.kas : null;
+}
 function sendKaspaResolveAmountKas() {
+  const pinned = sendKaspaPinnedKas();
+  if (pinned != null) return pinned;
   const raw = Number(sendKaspaAmountInput?.value);
   if (!isFinite(raw) || raw <= 0) return sendKaspaAmountInput?.value || "";
   if (sendKaspaUnit === "fiat") {
@@ -13469,9 +13556,10 @@ function updateSendKaspaFiatHint() {
   let text = "";
   if (isFinite(raw) && raw > 0 && sendKaspaPrice) {
     // No "≈": the converted value as it is (iOS conversionLabelText).
+    // the KAS that will be sent, exactly
     text = sendKaspaUnit === "kas"
       ? formatFiatValue(raw, sendKaspaPrice)
-      : `${trimKas8(raw / sendKaspaPrice)} ${KAS_UNIT}`;
+      : `${sendKaspaPinnedKas() ?? trimKas8(raw / sendKaspaPrice)} ${KAS_UNIT}`;
   }
   sendKaspaFiatHint.textContent = text || (sendKaspaUnit === "kas" ? sendKaspaCurrencyCode() : KAS_UNIT);
 }
@@ -13500,9 +13588,14 @@ sendKaspaUnitButton?.addEventListener("click", () => {
       ? fiatTextFloorFromSompi(pinnedMax.amountSompi, sendKaspaPrice, selectedCurrency === "btc" ? 8 : 2)
       : kasTextFromSompi(pinnedMax.amountSompi);
   } else if (isFinite(raw) && raw > 0) {
-    sendKaspaAmountInput.value = sendKaspaUnit === "kas"
-      ? (raw * sendKaspaPrice).toFixed(selectedCurrency === "btc" ? 8 : 2)
-      : trimKas8(raw / sendKaspaPrice);
+    const pinnedKas = sendKaspaPinnedKas();
+    if (sendKaspaUnit === "kas") {
+      const kas = String(sendKaspaAmountInput.value);
+      sendKaspaAmountInput.value = (raw * sendKaspaPrice).toFixed(selectedCurrency === "btc" ? 8 : 2);
+      sendKaspaKasPin = { shown: sendKaspaAmountInput.value, kas };
+    } else {
+      sendKaspaAmountInput.value = pinnedKas ?? trimKas8(raw / sendKaspaPrice);
+    }
   }
   sendKaspaUnit = sendKaspaUnit === "kas" ? "fiat" : "kas";
   applySendKaspaUnit();
@@ -13551,6 +13644,7 @@ function updateSendKaspaFeeSummary() {
 }
 function applySendKaspaFeeField() {
   updateSendKaspaFeeSummary();
+  refreshSendKaspaSwipe(); // a fee now known (or lost) changes whether the swipe can send
 }
 function selectSendKaspaFeeTier(tier) {
   sendKaspaFeeTier = tier;
@@ -13662,6 +13756,8 @@ let sendKaspaMaxBusy = 0;
 function updateSendKaspaMaxButton() {
   if (!sendKaspaMaxButton) return;
   const busy = sendKaspaMaxBusy > 0;
+  sendKaspaSwipeWait.max = busy;
+  refreshSendKaspaSwipe();
   sendKaspaMaxButton.disabled = !sendKaspaRecipient || busy;
   sendKaspaMaxButton.innerHTML = busy ? '<span class="sk-spinner" aria-hidden="true"></span>' : "Max";
   sendKaspaSteps?.refresh();
@@ -13773,7 +13869,8 @@ async function fillMaxAmountNow() {
   // spendable-0.01 — on addresses with many UTXOs the true all-input fee exceeds that 0.01
   // headroom, the generator throws, the error was swallowed, and the fee silently stayed at
   // the 0.002 placeholder, so Max always produced a send that failed.
-  const inputCount = selection.length || (sendKaspaUtxos || []).length || 1;
+  // Past one transaction's coins, Max spends the largest MAX_SEND_INPUT_LIMIT (Compound chunks).
+  const inputCount = selection.length || (sendKaspaCompound ? (sendKaspaUtxos || []).length : Math.min((sendKaspaUtxos || []).length, MAX_SEND_INPUT_LIMIT)) || 1;
   try {
     const feeRate = await fetchQuotedFeeRateSompiPerGram();
     // A quantum-safe source's inputs push their redeem script too: 101-byte signature scripts
@@ -13807,6 +13904,7 @@ async function fillMaxAmountNow() {
     updateSendKaspaFiatHint();
     sendKaspaAmountInput.dispatchEvent(new Event("input"));
     sendKaspaMaxMode = true;
+    sendKaspaMaxCapped = false; // Compound goes through every coin, 80 at a time
     stopSendKaspaFeeEstimate();
     return;
   }
@@ -13841,7 +13939,9 @@ async function fillMaxAmountNow() {
   // Route the actual send through the exact-fee max path (set AFTER the dispatch above —
   // the amount listener clears this flag on every USER edit).
   sendKaspaMaxMode = true;
+  sendKaspaMaxCapped = Boolean(plan.cappedAtInputLimit);
   stopSendKaspaFeeEstimate();
+  paintSendKaspaAmountStep();
   sendKaspaMaxPin = {
     source,
     selectionKey: sendKaspaSelectionKey(selectedOutpoints),
@@ -13931,7 +14031,9 @@ sendKaspaModal?.querySelector("[data-send-kaspa-address-book]")?.addEventListene
 function resetSendKaspaExtras() {
   sendKaspaUnit = "kas";
   sendKaspaMaxMode = false;
+  sendKaspaMaxCapped = false;
   sendKaspaMaxPin = null;
+  sendKaspaKasPin = null;
   sendKaspaMaxToken += 1; // a Max still computing for the previous screen must not land here
   applySendKaspaUnit();
   // No fee before a recipient and an amount: "--" (iOS), estimated once both are in.
@@ -19787,6 +19889,10 @@ function estimateTipPayloadBytes(memo, amountSompi) {
   return "kchat:1:tip:".length + 66 + 128 + 64 + 66 + 4 + sealedBytes * 2;
 }
 
+// Posts whose instant tip is going out now, by post id (the address for a tip naming no post): a
+// second Tip tap meanwhile would send a second tip (iOS e5a9b11 tipsInFlight).
+const instantTipsInFlight = new Set();
+
 // The default tip, sent at once: same contact creation, funding source and destination rules
 // as a payment in that person's chat (and as the tip sheet's Send), with a toast and no screen.
 // With `tip` ({ postId, authorPubkey }) it names the post (iOS a6bd60a sendDefaultTip(tip:)).
@@ -19994,7 +20100,13 @@ async function tipLoadAvailable(tip) {
     await ensureRuntimes({ quiet: true });
     const balance = tip.fundingAddress ? await engine.balanceForAddress(tip.fundingAddress) : await engine.balance();
     if (tipState !== tip || tip.fundingIndex !== source) return; // the sheet closed or the From changed meanwhile
-    tip.availableSompi = BigInt(balance?.totalSompi ?? (sompiFromUserText(String(balance?.totalKas ?? "")) ?? 0n));
+    // Coins a scheduled KaPost holds are not the tip's to spend, so they are not Available (iOS
+    // e5a9b11 KaPostsScheduledStore.filterReserved).
+    let sompi = 0n;
+    for (const entry of excludeReservedUtxos(balance?.entries || [])) {
+      try { sompi += BigInt(entry.amount || 0); } catch { /* an unreadable coin counts as nothing */ }
+    }
+    tip.availableSompi = sompi;
   } catch {
     if (tipState !== tip || tip.fundingIndex !== source) return;
     tip.availableFailed = true;
@@ -22780,6 +22892,7 @@ function queueConversationMessage(conversationId, text, { feeOverrideKas = null 
   setStatus("Queued for real Kaspa payload transaction");
   window.setTimeout(() => runEngineSendPipeline(conversationEntry.id, message.id), 0);
   window.setTimeout(persistState, 0);
+  return message;
 }
 
 
@@ -22962,6 +23075,7 @@ let paymentManualUtxos = null;
 // `text`, the amount IS amountSompi (also in a currency) and the payment goes out as one exact
 // output from exactly those coins.
 let paymentMax = null;
+let paymentKasPin = null; // { text: the currency figure a unit switch showed, amountSompi: the KAS typed }
 let paymentMaxToken = 0;
 let paymentMaxTimer = null;
 
@@ -23128,6 +23242,8 @@ function paymentSompiFromInput() {
   const pinned = activePaymentMax();
   if (pinned) return pinned.amountSompi;
   const text = String(payAmountInput?.value || "");
+  // the KAS typed before a switch to a currency, while the figure the switch showed is still there
+  if (paymentKasPin && paymentUnit === "fiat" && text === paymentKasPin.text) return paymentKasPin.amountSompi;
   if (paymentUnit !== "fiat") {
     const sompi = sompiFromUserText(text);
     return sompi != null && sompi > 0n ? sompi : null;
@@ -23198,7 +23314,7 @@ function refreshPaymentSheetState() {
     }
   }
   if (paySlider.busy !== Boolean(paymentSendInFlight)) paySlider.setBusy(paymentSendInFlight);
-  paySlider.setEnabled(sompi > 0 && !paymentSendInFlight);
+  paySlider.setEnabled(paySwipeCanSend());
   payFromCtl.setDisabled(Boolean(paymentSendInFlight));
   renderPaymentFromWarning();
   paintPayAmountStep();
@@ -23252,6 +23368,12 @@ function renderPaymentFeePill(feeSompi, { estimating = false } = {}) {
   paymentFeeEstimating = Boolean(estimating);
   if (!estimating) paymentBaseFeeSompi = feeSompi == null ? null : BigInt(feeSompi);
   renderPaymentFeeCard();
+  paySlider.setEnabled(paySwipeCanSend());
+}
+// Not while Max or the fee is still being worked out (iOS 3942a5b7): the Review would show a fee
+// other than the one sent.
+function paySwipeCanSend() {
+  return Number(paymentSompiFromInput() ?? 0n) > 0 && !paymentSendInFlight && !paymentFeeEstimating;
 }
 function selectPaymentFeeTier(tier) {
   if (!PAYMENT_FEE_MULTIPLIERS[tier]) return;
@@ -23452,6 +23574,7 @@ function resetPaymentSheetFields() {
   paymentCustomExtraFeeSompi = null;
   paymentManualUtxos = null;
   paymentMax = null;
+  paymentKasPin = null;
   paymentMaxToken += 1;
   if (paymentMaxTimer) window.clearTimeout(paymentMaxTimer);
   paymentMaxTimer = null;
@@ -23534,7 +23657,7 @@ payMemoInput?.addEventListener("keydown", (event) => {
 });
 paymentUnitToggle?.addEventListener("click", () => {
   if (!(paymentPrice > 0)) return;
-  const kas = paymentKasFromInput();
+  const sompi = paymentSompiFromInput();
   const pinned = activePaymentMax();
   paymentUnit = paymentUnit === "fiat" ? "kas" : "fiat";
   if (pinned && payAmountInput) {
@@ -23542,7 +23665,12 @@ paymentUnitToggle?.addEventListener("click", () => {
     pinned.text = paymentUnit === "fiat" ? fiatTextFloorFromSompi(pinned.amountSompi, paymentPrice, 2) : kasTextFromSompi(pinned.amountSompi);
     pinned.unit = paymentUnit;
     payAmountInput.value = pinned.text;
-  } else if (payAmountInput) payAmountInput.value = kas == null ? "" : (paymentUnit === "fiat" ? (kas * paymentPrice).toFixed(2) : formatKasPlain(kas));
+  } else if (payAmountInput) {
+    // A switch only changes what's shown (iOS 3942a5b7): the exact KAS stays what is sent, and
+    // comes back on the switch back.
+    payAmountInput.value = sompi == null ? "" : (paymentUnit === "fiat" ? (Number(sompi) / 1e8 * paymentPrice).toFixed(2) : kasTextFromSompi(sompi));
+    paymentKasPin = sompi != null && paymentUnit === "fiat" ? { text: payAmountInput.value, amountSompi: sompi } : null;
+  }
   refreshPaymentUnitUi();
   payAmountInput?.focus();
 });
@@ -24375,16 +24503,44 @@ function stopChessClockTimer() {
   chessClockTimer = 0;
 }
 
-// Flagging: my clock hit zero on my turn. Sends exactly one resign carrying reason "timeout";
-// the result then renders through the normal derived-state pipeline ("You lost on time").
+// Flagging: my clock hit zero on my turn. Sends a resign carrying reason "timeout"; the result then
+// renders through the normal derived-state pipeline ("You lost on time"). A send that fails is
+// tried again, a little later each time (iOS 3942a5b7): dropped once, the opponent waited on a
+// move that could never come. If every try fails, the next clock tick starts over.
 function sendChessTimeoutResign() {
   if (!chessState || chessState.timeoutSent) return;
   chessState.timeoutSent = true;
   chessState.selected = null;
   chessState.legalDests = [];
-  chessSendEnvelope(Chess.chessResign(chessState.gameId, "timeout"));
-  clearChessClock(chessState.gameId);
+  const gameId = chessState.gameId;
+  const conversationId = activeConversationId;
+  const message = conversationId ? queueConversationMessage(conversationId, Chess.chessResign(gameId, "timeout")) : null;
+  clearChessClock(gameId);
+  if (message) retryChessTimeoutResign(conversationId, message.id, gameId);
   refreshChessOverlay();
+}
+const CHESS_TIMEOUT_RESIGN_RETRY_MS = [3000, 10000, 30000];
+const CHESS_SEND_SETTLE_POLL_MS = 1000;
+function retryChessTimeoutResign(conversationId, messageId, gameId, attempt = 0) {
+  const check = () => {
+    const message = state.conversations.find((entry) => entry.id === conversationId)?.messages.find((entry) => entry.id === messageId);
+    if (!message || message.status !== MESSAGE_STATUSES.FAILED) {
+      // still on its way: look again once it has settled; sent (or gone): done
+      if (message && !message.txid && [MESSAGE_STATUSES.PENDING, MESSAGE_STATUSES.BUILDING, MESSAGE_STATUSES.SIGNING, MESSAGE_STATUSES.BROADCASTING].includes(message.status)) {
+        window.setTimeout(check, CHESS_SEND_SETTLE_POLL_MS);
+      }
+      return;
+    }
+    if (attempt >= CHESS_TIMEOUT_RESIGN_RETRY_MS.length) {
+      if (chessState?.gameId === gameId) chessState.timeoutSent = false;
+      return;
+    }
+    window.setTimeout(() => {
+      runEngineSendPipeline(conversationId, messageId);
+      retryChessTimeoutResign(conversationId, messageId, gameId, attempt + 1);
+    }, CHESS_TIMEOUT_RESIGN_RETRY_MS[attempt]);
+  };
+  window.setTimeout(check, CHESS_SEND_SETTLE_POLL_MS);
 }
 
 function renderChessClocks() {
@@ -27240,6 +27396,14 @@ function passphrasePreviewNodes(flow) {
 // PassphraseAddressPreview.selectedIndex). What's picked here is what commitImport imports onto.
 let importFoundAddresses = [];
 let importChattingIndex = 0;
+// That search is running: Import waits for it, or it would import onto #0 while the funds sit on
+// another address (iOS 3942a5b7 isSearchingAddresses). Held from the first keystroke, not only
+// once the lookup starts: an Import clicked in the pause would otherwise go to #0.
+let importAddressSearching = false;
+function setImportAddressSearching(searching) {
+  importAddressSearching = Boolean(searching);
+  updateImportPassphraseSubmitEnabled();
+}
 
 function clearImportFoundAddresses(nodes) {
   importFoundAddresses = [];
@@ -27294,7 +27458,7 @@ function schedulePassphrasePreview(flow) {
   const phrase = passphrasePreviewPhrase(flow);
   // Nothing to derive from yet: hide rather than show a permanent "Checking...".
   nodes.root.hidden = !phrase;
-  if (!phrase) return;
+  if (!phrase) { if (flow === "import") setImportAddressSearching(false); return; }
 
   const input = flow === "create" ? createPassphraseInput : importPassphraseInput;
   const passphrase = input?.value || "";
@@ -27306,7 +27470,7 @@ function schedulePassphrasePreview(flow) {
   const token = ++passphrasePreviewTokens[flow];
   nodes.address.dataset.pending = "1";
   renderPassphrasePreviewBalance(nodes, flow, { looking: true });
-  if (flow === "import") clearImportFoundAddresses(nodes);
+  if (flow === "import") { clearImportFoundAddresses(nodes); setImportAddressSearching(true); }
   passphrasePreviewTimers[flow] = setTimeout(async () => {
     try {
       const derived = await engine.deriveIdentityAddressRange(phrase, passphrase, {
@@ -27348,6 +27512,9 @@ function schedulePassphrasePreview(flow) {
       if (nodes.address.dataset.pending) nodes.address.textContent = "Could not derive an address from these words.";
       renderPassphrasePreviewBalance(nodes, flow, { failed: true });
       appendEngineLog(`Passphrase preview failed: ${error.message}`);
+    } finally {
+      // the search this call started is over (a later keystroke's call holds it instead)
+      if (flow === "import" && token === passphrasePreviewTokens[flow]) setImportAddressSearching(false);
     }
   }, 250);
 }
@@ -27378,7 +27545,7 @@ function resetPassphrasePreview(flow) {
   nodes.address.textContent = "Checking...";
   nodes.address.dataset.pending = "1";
   renderPassphrasePreviewBalance(nodes, flow, { looking: true });
-  if (flow === "import") clearImportFoundAddresses(nodes);
+  if (flow === "import") { clearImportFoundAddresses(nodes); setImportAddressSearching(false); }
 }
 
 /// The passphrase fields' eye (iOS eye / eye.slash): shows or hides both fields at once.
@@ -27408,14 +27575,12 @@ function nextNewAccountName() {
 // Create New Account is one tap (iOS d063b897 / KaPay 99ab88a OnboardingView.createAccount): 24
 // words, no passphrase, the next free name, then the Welcome Guide. On Desktop the same tap also
 // asks for this account's password (finalizeNewAccount), since its keys are encrypted with it.
-let creatingAccount = false;
+// One create, sign-in or removal at a time (beginSavedAccountAction): the sign-in screen's other
+// buttons are off while it runs.
 async function createNewAccount() {
-  if (creatingAccount) return;
-  creatingAccount = true;
+  if (!beginSavedAccountAction("create")) return;
   const createButton = document.querySelector("[data-logged-out-create]");
-  const others = [document.querySelector("[data-logged-out-import]"), document.querySelector("[data-logged-out-create-passphrase]")];
-  if (createButton) { createButton.disabled = true; createButton.classList.add("is-busy"); }
-  others.forEach((button) => { if (button) button.disabled = true; });
+  createButton?.classList.add("is-busy");
   try {
     const phrase = await generateNewAccountPhrase();
     await enterNewAccount({ name: nextNewAccountName(), phrase, passphrase: "", wordCount: 24 });
@@ -27423,9 +27588,8 @@ async function createNewAccount() {
     appendEngineLog(`Create account failed: ${error.message}`);
     alertDialog({ title: "Couldn't Create Account", message: userFacingError(error) });
   } finally {
-    creatingAccount = false;
-    if (createButton) { createButton.disabled = false; createButton.classList.remove("is-busy"); }
-    others.forEach((button) => { if (button) button.disabled = false; });
+    createButton?.classList.remove("is-busy");
+    endSavedAccountAction("create");
   }
 }
 
@@ -27492,7 +27656,13 @@ async function finalizeNewAccount({ name, phrase, passphrase, wordCount }) {
   // nobody has seen these words yet: the banner stays until they're backed up (iOS d063b897).
   // Before the keys are saved, so no saved account was ever created without owing one.
   accountBackupStatus.markPending(wallet.address);
-  persistTestingWallet({ mnemonic: wallet.mnemonic, passphrase, passphraseForm: "nfkd", derivationPath: wallet.derivationPath, wordCount });
+  try {
+    persistTestingWallet({ mnemonic: wallet.mnemonic, passphrase, passphraseForm: "nfkd", derivationPath: wallet.derivationPath, wordCount });
+  } catch (error) {
+    // nothing was created, so nothing is owed (iOS 3942a5b7) - unless the keys got as far as storage
+    if (!accountKeysStoredFor(wallet.address)) accountBackupStatus.markDone(wallet.address);
+    throw error;
+  }
 
   if (accountShellPrefs.saveAccount !== false) {
     const saved = loadSavedAccounts().find((entry) => entry.address === wallet.address);
@@ -27560,8 +27730,8 @@ async function enterNewAccount(account) {
 async function commitPendingAccount(passphrase) {
   if (!pendingNewAccount) return;
   const account = { ...pendingNewAccount, name: nextNewAccountName(), passphrase };
-  // iOS: Continue and Back are off while it commits.
-  const buttons = [continueWithPassphraseBtn, document.querySelector("[data-create-passphrase-back]")];
+  // iOS: Continue, Back, "What is a passphrase?" and the fields are off while it commits (3942a5b7).
+  const buttons = [continueWithPassphraseBtn, createPassphraseInput, createPassphraseConfirm, ...document.querySelectorAll("[data-create-passphrase-back], [data-create-passphrase-explain]")];
   buttons.forEach((b) => { if (b) b.disabled = true; });
   if (createAccountModal) createAccountModal.dataset.busy = "1";
   if (createPassphraseError) createPassphraseError.hidden = true;
@@ -27585,6 +27755,15 @@ async function commitPendingAccount(passphrase) {
 // Back: out of Create Account, to the sign-in screen (iOS d1844582 dismiss). What was typed goes
 // with it.
 document.querySelector("[data-create-passphrase-back]")?.addEventListener("click", closeCreateAccountModal);
+// "What is a passphrase?" on the entry screen, creating's only way to the explainer; its Back
+// returns to the entry, what was typed still there (iOS 3942a5b7).
+document.querySelector("[data-create-passphrase-explain]")?.addEventListener("click", () => {
+  if (createAccountModal?.dataset.busy === "1") return;
+  showPassphraseScreen("create", "explainer");
+});
+document.querySelector("[data-create-passphrase-explain-back]")?.addEventListener("click", () => {
+  showPassphraseScreen("create", "entry");
+});
 
 // iOS PassphraseOptionView.submitFromEntry: the problems come up as an "Error" alert.
 continueWithPassphraseBtn?.addEventListener("click", () => {
@@ -28436,17 +28615,22 @@ document.querySelector("[data-copy-seed-phrase]")?.addEventListener("click", asy
   }, 30_000);
 });
 
-// Paste on Import: 12 or 24 words, any spacing; the clipboard is cleared after.
+// Paste on Import: 12 or 24 words, any spacing. The clipboard is cleared as soon as it is read, and
+// an error never repeats what was pasted (iOS 3942a5b7).
 document.querySelector("[data-import-seed-paste]")?.addEventListener("click", async () => {
   // iOS ImportWalletView.pasteSeedPhrase: problems come up as an "Error" alert; success is silent.
   const pasteError = (message) => alertDialog({ title: "Error", message });
   let text = "";
   try { text = await navigator.clipboard.readText(); } catch { pasteError("Nothing to paste."); return; }
+  // Cleared whether or not the words are accepted: secret words don't belong on the clipboard
+  // either way.
+  if (text) { try { await navigator.clipboard.writeText(""); } catch { /* the browser won't: fine */ } }
   const pasted = String(text || "").toLowerCase().split(/[^a-z]+/).filter(Boolean);
   if (!pasted.length) { pasteError("Nothing to paste."); return; }
   if (pasted.length !== 12 && pasted.length !== 24) { pasteError(`You need 12 or 24 words - the clipboard holds ${pasted.length}.`); return; }
   const unknown = pasted.filter((w) => !isBip39Word(w));
-  if (unknown.length) { pasteError(`Not a valid word: ${unknown.slice(0, 3).join(", ")}.`); return; }
+  // only a count: the message must never repeat what was pasted
+  if (unknown.length) { pasteError(pastedWordsInvalidMessage(unknown.length)); return; }
   importWordCount = pasted.length;
   importWords = Array(24).fill("");
   pasted.forEach((w, i) => { importWords[i] = w; });
@@ -28454,7 +28638,6 @@ document.querySelector("[data-import-seed-paste]")?.addEventListener("click", as
   renderImportLengthChoice();
   importActiveSlot = importWordCount - 1;
   renderImportSeedGrid();
-  try { await navigator.clipboard.writeText(""); } catch { /* fine */ }
 });
 
 function focusImportSlot(i) {
@@ -28570,11 +28753,20 @@ document.querySelector("[data-import-passphrase-yes]")?.addEventListener("click"
   schedulePassphrasePreview("import");
   importPassphraseInput?.focus();
 });
+// The explainer's Back returns where it was opened from: the question, or the entry screen, which
+// links it too (iOS 3942a5b7 explainerReturnStep).
+let importExplainerReturnScreen = "question";
 document.querySelector("[data-import-passphrase-explain]")?.addEventListener("click", () => {
+  importExplainerReturnScreen = "question";
+  showPassphraseScreen("import", "explainer");
+});
+document.querySelector("[data-import-passphrase-entry-explain]")?.addEventListener("click", () => {
+  if (importAccountModal?.dataset.busy === "1") return;
+  importExplainerReturnScreen = "entry";
   showPassphraseScreen("import", "explainer");
 });
 document.querySelector("[data-import-passphrase-explain-back]")?.addEventListener("click", () => {
-  showPassphraseScreen("import", "question");
+  showPassphraseScreen("import", importExplainerReturnScreen);
 });
 document.querySelector("[data-import-passphrase-back]")?.addEventListener("click", () => {
   if (importPassphraseInput) importPassphraseInput.value = "";
@@ -28889,9 +29081,17 @@ importPassphraseToggle?.addEventListener("click", () => {
   importPassphraseInput.type = show ? "text" : "password";
   setPassphraseEye(importPassphraseToggle, show);
 });
-// iOS canSubmitPassphrase: Import stays off while the passphrase is empty.
+// iOS canSubmitPassphrase: Import stays off while the passphrase is empty, and while the search for
+// the address holding funds runs, saying so (iOS 3942a5b7).
 function updateImportPassphraseSubmitEnabled() {
-  if (importWithPassphraseBtn && importAccountModal?.dataset.busy !== "1") importWithPassphraseBtn.disabled = !String(importPassphraseInput?.value || "");
+  if (!importWithPassphraseBtn) return;
+  const typed = Boolean(String(importPassphraseInput?.value || ""));
+  const finding = importAddressSearching && typed;
+  if (importWithPassphraseBtn.dataset.finding !== String(finding)) {
+    importWithPassphraseBtn.dataset.finding = String(finding);
+    importWithPassphraseBtn.innerHTML = finding ? '<span class="sk-spinner" aria-hidden="true"></span>Finding your address...' : "Import";
+  }
+  if (importAccountModal?.dataset.busy !== "1") importWithPassphraseBtn.disabled = !typed || importAddressSearching;
 }
 importPassphraseInput?.addEventListener("input", updateImportPassphraseSubmitEnabled);
 // Back on the passphrase question (iOS navigation back): to the words, still filled in.
@@ -28907,7 +29107,8 @@ document.querySelector("[data-import-passphrase-question-back]")?.addEventListen
 async function commitImport(passphrase) {
   if (!pendingImport) return;
   // iOS: Yes, No and "What is a passphrase?" (and Back) are all off while it imports.
-  const buttons = [importWithPassphraseBtn, importSkipPassphraseBtn, ...document.querySelectorAll("[data-import-passphrase-yes], [data-import-passphrase-explain], [data-import-passphrase-question-back], [data-import-passphrase-back]")];
+  // The passphrase field too: nothing changes the account once it is being made (iOS 3942a5b7).
+  const buttons = [importWithPassphraseBtn, importSkipPassphraseBtn, importPassphraseInput, ...document.querySelectorAll("[data-import-passphrase-yes], [data-import-passphrase-explain], [data-import-passphrase-entry-explain], [data-import-passphrase-question-back], [data-import-passphrase-back]")];
   buttons.forEach((b) => { if (b) b.disabled = true; });
   if (importAccountModal) importAccountModal.dataset.busy = "1";
   if (importPassphraseError) importPassphraseError.hidden = true;
@@ -28942,6 +29143,7 @@ async function commitImport(passphrase) {
   }
 }
 importWithPassphraseBtn?.addEventListener("click", () => {
+  if (importAddressSearching) return; // the funded address isn't picked yet
   const pass = String(importPassphraseInput?.value || "");
   if (!pass) {
     alertDialog({ title: "Error", message: "Enter a passphrase, or go back and choose No." });
@@ -29545,6 +29747,7 @@ Object.entries(DANGER_ZONE_ACTIONS).forEach(([action, handler]) => {
 // (finalizeNewAccount / importAndEnterAccount), so adding one never asks for another account's.
 // A password left over from deleted accounts is dropped on the way.
 async function unlockBeforeAddingAccount(open) {
+  if (savedAccountActionRunning) return; // one account action at a time (iOS 3942a5b7)
   if (releaseAppPasswordIfUnused()) refreshPasswordStatus();
   open();
 }
@@ -30148,23 +30351,38 @@ queueMicrotask(async () => {
       // A default tip set in a currency sends what it is worth in KAS right now (iOS 4c0d5a8); with
       // no price yet it says so on the amount screen.
       tipUser: async (address, name, tip = null, onTipped = null) => {
+        // A second tap while this post's instant tip is going out is ignored (iOS e5a9b11).
+        const inFlightKey = tip?.postId || `address:${address}`;
+        if (instantTipsInFlight.has(inFlightKey)) return;
         const defaultTip = kaPostsDefaultTip();
         if (!defaultTip) { openTipModal({ address, name, tip, onTipped }); return; }
         const fiatText = defaultTip.fiat ? fiatAmountText(defaultTip.fiat, defaultTip.currency) : null;
-        const price = defaultTip.fiat ? await fetchKasPrice(defaultTip.currency).catch(() => null) : null;
-        const sompi = kapostsDefaultTipSompi(defaultTip, price);
-        if (!sompi) {
-          await openTipModal({ address, name, tip, onTipped, error: `Tip didn't send: there is no KAS price yet to turn ${fiatText} into KAS.` });
-          return;
-        }
-        sendInstantTip(address, name, sompi / 1e8, tip, fiatText)
-          .then(() => { try { onTipped?.(); } catch { /* the feed moved on */ } })
+        let failure = null;
+        // Held from the price lookup on, so a tap during it can't start a second send either.
+        instantTipsInFlight.add(inFlightKey);
+        try {
+          const price = defaultTip.fiat ? await fetchKasPrice(defaultTip.currency).catch(() => null) : null;
+          const sompi = kapostsDefaultTipSompi(defaultTip, price);
+          if (!sompi) {
+            failure = `Tip didn't send: there is no recent KAS price to turn ${fiatText} into KAS.`;
+          } else {
+            await sendInstantTip(address, name, sompi / 1e8, tip, fiatText);
+            try { onTipped?.(); } catch { /* the feed moved on */ }
+          }
+        } catch (error) {
+          if (error?.code === "SEND_CANCELLED") return; // cancelled at Face ID / the password
+          if (error?.code === SEND_OUTCOME_UNKNOWN) {
+            // It may have gone through: no amount screen, which would invite a second tip (iOS e5a9b11).
+            appendEngineLog("Instant tip outcome unknown");
+            showKaPostsActionToast(SEND_OUTCOME_UNKNOWN_MESSAGE);
+            return;
+          }
           // iOS: "Tip didn't send: <why>", then the amount screen so it can go by hand.
-          .catch(async (error) => {
-            if (error?.code === "SEND_CANCELLED") return; // cancelled at Face ID / the password
-            const why = `Tip didn't send: ${userFacingError(error) || "Send failed."}`;
-            await openTipModal({ address, name, tip, onTipped, error: why });
-          });
+          failure = `Tip didn't send: ${userFacingError(error) || "Send failed."}`;
+        } finally {
+          instantTipsInFlight.delete(inFlightKey);
+        }
+        if (failure) await openTipModal({ address, name, tip, onTipped, error: failure });
       },
       // KaPost Settings > Cool down before post (iOS 4c0d5a8): off, actions go at once.
       kaPostsCooldownEnabled,

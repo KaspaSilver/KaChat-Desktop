@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import * as K from "../engine/kns-write.js";
-import { sendPayloadToSelf, sendPayloadTransaction, submitConfirmingAcceptance, isOrphanRejection, estimateMaxSend, sendMaxKaspa, sendMaxWithPayload, setReservedOutpoints, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, MAX_PIN_FEE_SLACK_SOMPI } from "../engine/transactions.js";
+import { sendPayloadToSelf, sendPayloadTransaction, submitConfirmingAcceptance, isOrphanRejection, estimateMaxSend, sendMaxKaspa, sendMaxWithPayload, setReservedOutpoints, clearJustSpentOutpoints, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, MAX_PIN_FEE_SLACK_SOMPI } from "../engine/transactions.js";
 import { fiatTextFloorFromSompi } from "../engine/amounts.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -62,6 +62,9 @@ function stubRpc() {
     attempts: [],
     async getUtxosByAddresses(addresses) {
       const list = (Array.isArray(addresses) ? addresses : addresses?.addresses || []).map(String);
+      // This node's coins never move, so a coin one check spent is the next check's coin too:
+      // the hold on just-spent coins (iOS 3942a5b7) is a different test's business.
+      if (!rpc.holdSpent) clearJustSpentOutpoints();
       return { entries: list.flatMap((a) => rpc.utxos.get(a) || []) };
     },
     async submitTransaction({ transaction, allowOrphan = false }) {
@@ -519,6 +522,33 @@ async function main() {
     const sent2 = await sendMaxWithPayload({ kaspa, rpc: rpc2, privateKey: ownerKey, sourceAddress: ownerAddress, destinationAddress: recipientAddress, payload: new Uint8Array(150).fill(3), expectedAmountSompi: est2.amountSompi, expectedOutpoints: est2.outpoints });
     r.eq(sent2.amountSompi, est2.amountSompi, "pin: a slightly shorter payload still sends the shown amount");
     r.eq(BigInt(rpc2.submitted[0].outputs[0].value), est2.amountSompi, "pin: output = shown amount");
+  }
+
+  // MARK: iOS 3942a5b7 - a sent transaction's coins stay out of the next build; Max past 80 coins
+  {
+    const rpc = stubRpc();
+    rpc.holdSpent = true;
+    const spent = utxo(ownerAddress, 2n * KAS);
+    const other = utxo(ownerAddress, 1n * KAS);
+    rpc.utxos.set(ownerAddress, [spent]);
+    clearJustSpentOutpoints();
+    const est = await estimateMaxSend({ kaspa, rpc, sourceAddress: ownerAddress, destinationAddress: recipientAddress });
+    await sendMaxKaspa({ kaspa, rpc, privateKey: ownerKey, sourceAddress: ownerAddress, destinationAddress: recipientAddress, expectedAmountSompi: est.amountSompi, expectedOutpoints: est.outpoints });
+    // the node still lists the spent coin, as a real one does until the spend is in a block
+    rpc.utxos.set(ownerAddress, [spent, other]);
+    const next = await estimateMaxSend({ kaspa, rpc, sourceAddress: ownerAddress, destinationAddress: recipientAddress });
+    r.eq(next.outpoints.length, 1, "just spent: Max leaves out the coin a send just spent");
+    r.eq(next.totalSompi, 1n * KAS, "just spent: only the other coin counts");
+    clearJustSpentOutpoints();
+
+    const many = stubRpc();
+    many.utxos.set(ownerAddress, Array.from({ length: 85 }, (_, i) => utxo(ownerAddress, KAS + BigInt(i) * 1000n)));
+    const capped = await estimateMaxSend({ kaspa, rpc: many, sourceAddress: ownerAddress, destinationAddress: recipientAddress });
+    r.eq(capped.inputCount, 80, "Max past 80 coins: one transaction's largest 80");
+    r.check(capped.cappedAtInputLimit === true, "Max past 80 coins: says it is capped");
+    const sentCapped = await sendMaxKaspa({ kaspa, rpc: many, privateKey: ownerKey, sourceAddress: ownerAddress, destinationAddress: recipientAddress, expectedAmountSompi: capped.amountSompi, expectedOutpoints: capped.outpoints });
+    r.eq(sentCapped.amountSompi, capped.amountSompi, "Max past 80 coins: sends what was shown");
+    r.eq(many.submitted[0].inputs.length, 80, "Max past 80 coins: 80 inputs");
   }
 
   for (const f of r.failures) console.log(`FAIL ${f}`);

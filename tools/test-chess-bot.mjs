@@ -357,14 +357,15 @@ const sq = Chess.squareFromAlgebraic;
 }
 
 {
-  // A stamp that keeps failing: five retries, then it holds until Retry. Then it counts.
+  // A stamp that keeps failing with a retryable error: five retries, then it holds until Retry.
+  // Then it counts.
   let attempts = 0;
   let failing = true;
   const sleeps = [];
   const stamped = [];
   const game = new ChessBotGame({
     bot: chessBot(1), playerColor: Chess.WHITE,
-    send: async () => { attempts += 1; if (failing) throw new Error("no spendable UTXO"); },
+    send: async () => { attempts += 1; if (failing) throw new Error("no spendable UTXOs available"); },
     think: async () => null,
     recordStampedWin: (moves) => stamped.push(moves),
     sleep: async (ms) => { sleeps.push(ms); },
@@ -378,7 +379,7 @@ const sq = Chess.squareFromAlgebraic;
   r.eq(attempts, 1 + BOT_SEND_RETRIES, "one send and five retries");
   r.check(sleeps.filter((ms) => ms === 1_200).length === BOT_SEND_RETRIES, "1.2 s between retries");
   r.eq(game.stamp, "failed", "the stamp failed");
-  r.eq(game.stampError, "no spendable UTXO", "the error is held");
+  r.eq(game.stampError, "no spendable UTXOs available", "the error is held");
   r.eq(stamped.length, 0, "a win that is not on chain does not count");
   failing = false;
   game.retry();
@@ -390,6 +391,36 @@ const sq = Chess.squareFromAlgebraic;
   game.retry();
   await settle();
   r.eq(attempts, 1 + BOT_SEND_RETRIES + 1, "Retry does nothing once it is stamped");
+}
+
+{
+  // Errors that are not retried (iOS 8d5f925): an unknown outcome, no coins at all, a refused
+  // double spend - one attempt each, no sleep, and the error mapped for display.
+  const cases = [
+    [Object.assign(new Error("This may have gone through, but the network didn't confirm it."), { code: "SEND_OUTCOME_UNKNOWN" }), "This may have gone through, but the network didn't confirm it."],
+    [new Error("No UTXOs found. Fund the receive address first."), "Not enough KAS on your Chatting Address. Add some and try again."],
+    [new Error("Insufficient funds: need 0.1 KAS"), "Not enough KAS on your Chatting Address. Add some and try again."],
+    [new Error("transaction rejected: double spend in mempool"), "The network is still confirming your previous send. Please try again in a few seconds."],
+  ];
+  for (const [thrown, shown] of cases) {
+    let attempts = 0;
+    const sleeps = [];
+    const game = new ChessBotGame({
+      bot: chessBot(1), playerColor: Chess.WHITE,
+      send: async () => { attempts += 1; throw thrown; },
+      think: async () => null,
+      recordStampedWin: () => {},
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+    game.board = fen("6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1");
+    game.start();
+    game.play({ from: sq("a1"), to: sq("a8"), promotion: null });
+    await settle(20);
+    r.eq(attempts, 1, `not retried: ${thrown.message}`);
+    r.eq(sleeps.filter((ms) => ms === 1_200).length, 0, `no retry wait: ${thrown.message}`);
+    r.eq(game.stamp, "failed", `failed at once: ${thrown.message}`);
+    r.eq(game.stampError, shown, `shown as: ${shown}`);
+  }
 }
 
 {

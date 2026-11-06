@@ -38,7 +38,7 @@ import {
 import { KachatSocialImageResolver, socialFreshForMs } from "../engine/kachat-names/social-image-resolver.js";
 import { ProfileIdentityStore } from "../engine/kachat-names/profile-cache.js";
 import { KachatOwnedNamesCache } from "../engine/kachat-names/owned-names-cache.js";
-import { unnamedSweepDue, nextUnnamedAnswers, unnamedSweepPass } from "./kachat-unnamed-sweep.js";
+import { unnamedSweepDue, nextUnnamedAnswers, unnamedSweepPass, identityBatchFlush, IDENTITY_BATCH_DELAY_MS } from "./kachat-unnamed-sweep.js";
 import { isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { normalize, p2pkScript, bytesEqual, hex, utf8, unhex32, yearMs, tier } from "../engine/kachat-names/codec.js";
 import { isRegistryUpgrading, registryUpgradingMessage } from "../engine/kachat-names/service.js";
@@ -4421,8 +4421,48 @@ export function kachatCachedIdentity(address) {
   const own = key === String(rt.engine?.address || "").toLowerCase();
   const stale = !entry || age > IDENTITY_MAX_AGE_MS
     || (entry.revision !== registry.revision && (own || age > IDENTITY_RECHECK_MIN_AGE_MS));
-  if (stale && !identityLookups.has(key)) lookUpIdentity(registry, key);
+  if (stale && !identityLookups.has(key)) queueIdentityLookup(registry, key);
   return entry?.identity ?? null;
+}
+
+// Addresses kachatCachedIdentity wants looked up, collected for one batched request. It runs from
+// renders, once per author drawn, so a screen of posts was a request per author (iOS e5a9b11
+// KachatNamesRegistry.scheduleIdentityBatch). Queued addresses count as in flight.
+const identityBatchQueue = new Set();
+let identityBatchTimer = null;
+let identityBatchRegistry = null;
+
+function queueIdentityLookup(registry, key) {
+  identityLookups.add(key);
+  identityBatchQueue.add(key);
+  identityBatchRegistry = registry;
+  if (identityBatchTimer) return;
+  identityBatchTimer = setTimeout(flushIdentityBatchQueue, IDENTITY_BATCH_DELAY_MS);
+}
+
+async function flushIdentityBatchQueue() {
+  identityBatchTimer = null;
+  const registry = identityBatchRegistry;
+  const keys = [...identityBatchQueue];
+  identityBatchQueue.clear();
+  if (!registry || keys.length === 0) { for (const key of keys) identityLookups.delete(key); return; }
+  try {
+    try { await registry.refreshIfStale({ maxAge: IDENTITY_MAX_AGE_MS / 1000 }); } catch { /* use what we have */ }
+    await identityBatchFlush(keys, {
+      batch: (list) => registry.identities(list),
+      // this device's own saved profile for an address still wins, as in lookUpIdentity
+      store: async (key, identity) => {
+        let own = null;
+        try { own = (await registry.ownProfile(key))?.profile ?? null; } catch { own = null; }
+        return storeFetchedIdentity(registry, key, identity, own);
+      },
+      notify: () => scheduleIdentityNotify(),
+      // the whole batch failed: one lookup per address, as before (it marks itself in flight)
+      lookUp: (key) => { identityLookups.delete(key); return lookUpIdentity(registry, key); },
+    });
+  } finally {
+    for (const key of keys) identityLookups.delete(key);
+  }
 }
 
 /** User Info > Rescan Profile (iOS bc95d17): the address's on-chain profile asked for again, each

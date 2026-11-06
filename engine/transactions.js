@@ -71,14 +71,33 @@ export function totalUtxoSompi(entries) {
 }
 const bySompiAsc = (a, b) => { const x = utxoAmountSompi(a) ?? 0n; const y = utxoAmountSompi(b) ?? 0n; return x > y ? 1 : (x < y ? -1 : 0); };
 const bySompiDesc = (a, b) => bySompiAsc(b, a);
-/** The address's UTXOs, sanitized, through `withRpc` when given (a node failover) else `rpc`. */
+/** The address's UTXOs, sanitized, through `withRpc` when given (a node failover) else `rpc`.
+ *  Coins a send from here has just spent are left out (see noteSpentOutpoints). */
 async function fetchUtxoEntries({ rpc, withRpc, sourceAddress, label }) {
   const fetchUtxos = async (activeRpc) => checkedUtxoAnswer(await activeRpc.getUtxosByAddresses([sourceAddress]));
   const response = withRpc ? await withRpc(fetchUtxos, { retries: 1, label }) : await fetchUtxos(rpc);
-  const entries = sanitizeUtxoEntries(response?.entries);
+  const entries = excludeJustSpentUtxos(sanitizeUtxoEntries(response?.entries));
   totalUtxoSompi(entries);
   return entries;
 }
+
+// Coins a transaction from this app has just spent (iOS 3942a5b7 reservedMessageOutpoints): the
+// node goes on listing them until that spend is in a block, so the next send, Max or fee estimate
+// would pick a coin already spent - refused, or a Max bigger than the address holds. Held back for
+// JUST_SPENT_HOLD_MS after a send that went out or whose outcome is unknown; never after a rejection.
+export const JUST_SPENT_HOLD_MS = 120_000;
+const justSpent = new Map(); // "txid:index" -> held until (ms)
+/** Holds back these outpoints ("txid:index" keys) from the next builds. */
+export function noteSpentOutpoints(keys, now = Date.now()) {
+  for (const key of keys || []) if (key && !String(key).startsWith("undefined:")) justSpent.set(String(key), now + JUST_SPENT_HOLD_MS);
+}
+export function excludeJustSpentUtxos(entries, now = Date.now()) {
+  if (!justSpent.size) return entries;
+  for (const [key, until] of justSpent) if (until <= now) justSpent.delete(key);
+  return (entries || []).filter((entry) => !justSpent.has(`${entry?.outpoint?.transactionId}:${entry?.outpoint?.index}`));
+}
+/** Test hook: forgets every held-back coin. */
+export function clearJustSpentOutpoints() { justSpent.clear(); }
 
 // A failed submit is not always a failed send (iOS IOS-014): a node can accept the transaction
 // while its answer is lost, and the retry on the standby (or the transient-UTXO retry below) then
@@ -182,14 +201,33 @@ export function isOrphanRejection(error) {
  * above). On any other error, a transaction the network already has (`txid`, computed locally)
  * counts as sent, one a node may have received without answering ends in SEND_OUTCOME_UNKNOWN unless
  * a longer look finds it, and anything else is rethrown. A node's answer only counts if its id is
- * `txid`. Every submit in this file goes through here.
+ * `txid`. Every submit in this file goes through here. `spends`: the "txid:index" keys of the coins
+ * it spends, held back from the next builds once it went out or its outcome is unknown.
  */
-export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, label = "Transaction broadcast", log = () => {}, orphanWaitMs = ORPHAN_WAIT_MS, lostAnswerWaitMs = LOST_ANSWER_WAIT_MS, recheckMs = SUBMIT_RECHECK_MS }) {
+export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, spends = null, label = "Transaction broadcast", log = () => {}, orphanWaitMs = ORPHAN_WAIT_MS, lostAnswerWaitMs = LOST_ANSWER_WAIT_MS, recheckMs = SUBMIT_RECHECK_MS }) {
+  try {
+    const sent = await submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, orphanWaitMs, lostAnswerWaitMs, recheckMs });
+    noteSpentOutpoints(spends);
+    return sent;
+  } catch (error) {
+    // It may have landed: its coins stay out of the next send too (iOS 3942a5b7).
+    if (error?.code === SEND_OUTCOME_UNKNOWN) noteSpentOutpoints(spends);
+    throw error;
+  }
+}
+async function submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, orphanWaitMs, lostAnswerWaitMs, recheckMs }) {
   let answerLost = false;
+  // A node that rejected the transaction gave its verdict on it: the answer isn't lost even if
+  // another node timed out, and "may have gone through" would be wrong (iOS 3942a5b7).
+  let rejected = false;
   const submitOnce = async (allowOrphan) => {
     const run = async (activeRpc) => {
       try { return await submit(activeRpc, { allowOrphan }); }
-      catch (error) { answerLost = answerLost || isLostSubmitAnswer(error); throw error; }
+      catch (error) {
+        if (isLostSubmitAnswer(error)) answerLost = true;
+        else if (!isRpcConnectionError(error) && !isOrphanRejection(error)) rejected = true;
+        throw error;
+      }
     };
     const response = withRpc ? await withRpc(run, { retries: 1, label }) : await run(rpc);
     const returned = typeof response === "string" ? response : response?.transactionId;
@@ -223,7 +261,7 @@ export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, s
       log(`${label}: the submit reported "${error?.message || error}" but the network has ${txid}; treated as sent.`);
       return String(txid);
     }
-    if (txid && answerLost) return confirmAfterLostAnswer({ rpc, withRpc, txid, log, waitMs: lostAnswerWaitMs });
+    if (txid && answerLost && !rejected) return confirmAfterLostAnswer({ rpc, withRpc, txid, log, waitMs: lostAnswerWaitMs });
     throw error;
   }
   return checked(sent);
@@ -333,7 +371,7 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
     const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
     let txid;
     try {
-      txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Compound broadcast", log });
+      txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, spends: chunk.map(outpointKeyOf), label: "Compound broadcast", log });
     } catch (error) {
       // Earlier chunks already went out: say so, and never let a retry compound them again.
       if (txids.length) { error.submittedTxids = [...txids]; error.message = `${error.message} (${txids.length} of ${chunks.length} compound transactions were sent)`; }
@@ -375,7 +413,10 @@ const TOO_MANY_COINS_FOR_MAX = "Too many coins for one transaction. Run Compound
 const outpointKeyOf = (entry) => `${entry?.outpoint?.transactionId}:${entry?.outpoint?.index}`;
 
 /** The coins a Max send spends from the address's sanitized entries: reserved coins dropped, then
- *  narrowed to the coin-control pick when there is one. Throws when nothing is left. */
+ *  narrowed to the coin-control pick when there is one. Without a pick, an address holding more
+ *  coins than one transaction can spend sends its largest MAX_SEND_INPUT_LIMIT (iOS 3942a5b7
+ *  oneTransactionChunk): Max is what one transaction can carry, not the whole balance. Throws when
+ *  nothing is left. */
 export function maxSendEntries(entries, selectedOutpoints = null) {
   let list = Array.isArray(entries) ? [...entries] : [];
   if (list.length === 0) throw new Error("No UTXOs to send.");
@@ -385,6 +426,8 @@ export function maxSendEntries(entries, selectedOutpoints = null) {
     const wanted = new Set(selectedOutpoints);
     list = list.filter((entry) => wanted.has(outpointKeyOf(entry)));
     if (list.length === 0) throw new Error("The selected coins are no longer available.");
+  } else if (list.length > MAX_SEND_INPUT_LIMIT) {
+    list = list.sort(bySompiDesc).slice(0, MAX_SEND_INPUT_LIMIT);
   }
   return list.sort(bySompiAsc);
 }
@@ -463,8 +506,11 @@ function maxPickFrom(selectedOutpoints, manualUtxos) {
 export async function estimateMaxSend({ kaspa, rpc, withRpc = null, sourceAddress, destinationAddress = null, selectedOutpoints = null, manualUtxos = null, payload = null, payloadBytes = 0, payloadFor = null, totalFeeSompi = null, extraFeeSompi = 0 }) {
   const picked = maxPickFrom(selectedOutpoints, manualUtxos);
   const fetched = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Max estimate UTXO fetch" });
-  const availableSompi = totalUtxoSompi(excludeReservedUtxos(fetched));
+  const unreserved = excludeReservedUtxos(fetched);
+  const availableSompi = totalUtxoSompi(unreserved);
   const entries = maxSendEntries(fetched, picked);
+  // more coins than one transaction spends: the Max shown is its largest coins' (say so)
+  const cappedAtInputLimit = !picked && unreserved.length > MAX_SEND_INPUT_LIMIT;
   const length = Math.max(0, Number(payloadBytes) || 0);
   // `payloadFor(totalSompi)`: the payload built for the chosen coins' total (iOS prices a payment
   // payload with the whole balance as its amount: never shorter than the real one).
@@ -479,6 +525,7 @@ export async function estimateMaxSend({ kaspa, rpc, withRpc = null, sourceAddres
   return {
     outpoints: plan.outpoints, totalSompi: plan.totalSompi, floorFeeSompi: plan.floorFeeSompi,
     feeSompi: plan.feeSompi, amountSompi: plan.amountSompi, inputCount: plan.outpoints.length, availableSompi,
+    cappedAtInputLimit,
   };
 }
 
@@ -511,7 +558,7 @@ async function sendMaxKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceA
   if (finalFloor > feeSompi) throw new Error("Balance too low after network fees.");
   const signed = signSdkTransaction(kaspa, tx, privateKey, redeemScript);
   const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
-  const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: "Max send broadcast", log });
+  const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, spends: plan.outpoints, label: "Max send broadcast", log });
   log("Max send txid:", txid, `(${plan.entries.length} input${plan.entries.length === 1 ? "" : "s"}, one output, fee ${feeSompi} sompi)`);
   return { txids: [txid], amountSompi: amount, feeSompi, outpoints: plan.outpoints };
 }
@@ -615,7 +662,7 @@ async function sendSelfPayloadFromEntries({ kaspa, rpc, withRpc, privateKey, sou
     if (finalFee == null || BigInt(finalFee) > BigInt(draftFee)) continue;
     const signed = kaspa.signTransaction(tx, [signingKeyArg(privateKey)], true);
     const submit = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
-    const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, label: `${label} broadcast`, log });
+    const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit, txid: signed.id, spends: chosen.map(outpointKeyOf), label: `${label} broadcast`, log });
     log(`${label} txid:`, txid, `(${chosen.length} input${chosen.length === 1 ? "" : "s"}, one output, fee ${fee} sompi)`);
     return { txids: [txid], amountSompi: amount, feeSompi: fee };
   }
@@ -829,7 +876,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
         const tx = kaspa.createTransaction(entries, [{ address: to, amount: reduced }], 0n, payload || undefined);
         const signed = signSdkTransaction(kaspa, tx, privateKey, redeemScript);
         const submitReduced = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
-        const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitReduced, txid: signed.id, label: "Transaction broadcast", log });
+        const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitReduced, txid: signed.id, spends: entries.map(outpointKeyOf), label: "Transaction broadcast", log });
         log("Broadcast txid:", txid);
         return { result: { summary: { reduced: true, amountSompi: reduced, feeSompi: totalFee } }, txids: [txid] };
       }
@@ -873,7 +920,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
     try { localId = pending.id ? String(pending.id) : null; } catch { localId = null; }
     let txid;
     try {
-      txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitSignedTransaction, txid: localId, label: "Transaction broadcast", log });
+      txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitSignedTransaction, txid: localId, spends: pendingSpends(pending), label: "Transaction broadcast", log });
     } catch (error) {
       // A chained send whose earlier transactions went out: never retried (that would pay again).
       if (txids.length) error.submittedTxids = [...txids];
@@ -885,6 +932,11 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
   return { result, txids };
 }
 
+
+/** The "txid:index" keys of the coins a generator's pending transaction spends; none if unreadable. */
+function pendingSpends(pending) {
+  try { return (pending.getUtxoEntries() || []).map(outpointKeyOf); } catch { return []; }
+}
 
 // Builds (but never signs or submits) a representative transaction to read
 // its real, SDK-calculated network fee back out of the generator summary —

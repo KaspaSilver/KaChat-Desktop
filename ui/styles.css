@@ -10353,6 +10353,10 @@ html.standalone .ios-install-hint { display: none; }
 .kaposts-delivery.failed { display: inline-flex; align-items: center; }
 .kaposts-delivery.failed button svg circle { fill: currentColor; stroke: none; }
 .kaposts-delivery.failed button svg path { stroke: var(--bg); }
+/* Not confirmed: an orange filled question mark and a bold caption, no button (iOS e5a9b11). */
+.kaposts-delivery.unconfirmed { display: inline-flex; align-items: center; gap: 4px; color: var(--ios-orange); font-weight: 800; font-size: 12px; }
+.kaposts-delivery.unconfirmed svg circle { fill: currentColor; stroke: none; }
+.kaposts-delivery.unconfirmed svg path { stroke: var(--bg); }
 /* A held action (5 s undo): the undo arrow in an orange capsule, no seconds (iOS countdownButton). */
 .kaposts-action.kaposts-undo-pill { padding: 3px 7px; margin: 0 2px; border: 1px solid rgba(255,149,0,.55); border-radius: 999px; color: var(--ios-orange); }
 .kaposts-action.kaposts-undo-pill svg { width: 12px; height: 12px; stroke-width: 2.6; }

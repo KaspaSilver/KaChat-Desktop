@@ -242,10 +242,12 @@ function backupGoBack() {
       flow.wordPage = wordPageCount(flow.seed.words.length) - 1;
       goTo("words");
       break;
-    case "passphrase": startWordCheck(); break;
+    // Back to a check already passed keeps its words and answers: going back is for looking
+    // again, not for being tested on new words (iOS 3942a5b7).
+    case "passphrase": goTo("wordCheck"); break;
     case "passphraseCheck": goTo("passphrase"); break;
     case "tips":
-      if (hasPassphrase()) { flow.passphraseAnswer = ""; goTo("passphraseCheck"); } else startWordCheck();
+      if (hasPassphrase()) goTo("passphraseCheck"); else goTo("wordCheck");
       break;
     default: break;
   }
@@ -405,13 +407,14 @@ function renderPassphraseCheck(body, foot) {
     error.hidden = true;
     if (button) button.disabled = !value;
   });
+  // Back from the tips finds what was typed still there (iOS 3942a5b7).
+  input.value = flow.passphraseAnswer;
   body.append(wrap, error);
   const check = () => {
     if (!passphraseMatches(flow.passphraseAnswer, flow.seed.passphrase, flow.seed.passphraseForm)) { error.hidden = false; return; }
-    flow.passphraseAnswer = "";
     goTo("tips");
   };
-  button = addFootButton(foot, "Check My Passphrase", { enabled: false, action: check });
+  button = addFootButton(foot, "Check My Passphrase", { enabled: Boolean(flow.passphraseAnswer), action: check });
   input.addEventListener("keydown", (event) => { if (event.key === "Enter" && !button.disabled) check(); });
   input.focus();
 }

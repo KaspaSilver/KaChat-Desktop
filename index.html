@@ -1728,7 +1728,24 @@
         <p class="field-error" data-create-passphrase-error hidden></p>
         <div class="modal-actions passphrase-actions">
           <button class="primary-button full" type="button" data-create-passphrase-submit>Continue</button>
+          <!-- Creating opens here, past the question, so this is its only way to the explainer (iOS 3942a5b7). -->
+          <button class="linklike-button full" type="button" data-create-passphrase-explain>What is a passphrase?</button>
           <button class="secondary-button full" type="button" data-create-passphrase-back>Back</button>
+        </div>
+      </div>
+
+      <div data-create-passphrase-screen="explainer" hidden>
+        <h3 class="create-step-title">What is a passphrase?</h3>
+        <div class="passphrase-explainer">
+          <section><h4>The short version</h4><p>A passphrase is an extra word or sentence you add on top of your 12 or 24 words. It is optional, and most people do not use one.</p></section>
+          <section><h4>It does not lock your account</h4><p>This is the part people get wrong. A passphrase does not put a password on your account. It opens a completely different account. Your 12 or 24 words with no passphrase open one account. The same words with the word &quot;apple&quot; opens another one. With &quot;banana&quot;, another one again. Every passphrase is its own separate account, with its own address and its own balance.</p></section>
+          <section><h4>Why anyone bothers</h4><p>If someone finds your written 12 or 24 words, they get the account those words open on their own. They do not get the one behind your passphrase, because they do not know there is one, and they could not guess it anyway.</p></section>
+          <section><h4>The catch</h4><p>There is no reset and no recovery. If you forget your passphrase, the account it opened is gone for good. Your 12 or 24 words alone will not bring it back, and nobody can help you. Treat it exactly like the words themselves: written down, somewhere safe, before you rely on it.</p></section>
+          <section><h4>One more thing to know</h4><p>If you type the wrong passphrase, nothing will tell you. You will simply land in a different account, and it will look empty. That is not a bug and your money is not lost - it just means you are in the wrong account.</p></section>
+          <section><h4>So do you need one?</h4><p>If you are not sure, you do not need one: go back to the start and tap Create New Account, which makes an account without a passphrase. It is still protected by your 12 or 24 words, and you can always create another account with a passphrase later.</p></section>
+        </div>
+        <div class="modal-actions passphrase-actions">
+          <button class="secondary-button full" type="button" data-create-passphrase-explain-back>Back</button>
         </div>
       </div>
       </div>
@@ -1872,6 +1889,8 @@
         <p class="field-error" data-import-passphrase-error hidden></p>
         <div class="modal-actions passphrase-actions">
           <button class="primary-button full" type="button" data-import-passphrase-submit>Import</button>
+          <!-- The entry screen links the explainer too; its Back returns here (iOS 3942a5b7). -->
+          <button class="linklike-button full" type="button" data-import-passphrase-entry-explain>What is a passphrase?</button>
           <button class="secondary-button full" type="button" data-import-passphrase-back>Back</button>
         </div>
       </div>

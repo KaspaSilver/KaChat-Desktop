@@ -33,3 +33,12 @@ export function rediscoveredGroupIsRead({ inviteAtMs, importedAtMs }) {
   const imported = Number(importedAtMs) || 0;
   return invite > 0 && imported > 0 && invite < imported;
 }
+
+/** Import's Paste, when some of the pasted words aren't recovery words: only how many, never which,
+ *  so a message on screen never repeats what was pasted (iOS 3942a5b7 pasteSeedPhrase). */
+export function pastedWordsInvalidMessage(count) {
+  const n = Math.max(1, Math.floor(Number(count) || 0));
+  return n === 1
+    ? "One of the pasted words isn't a valid word. Check your copy and try again."
+    : `${n} of the pasted words aren't valid words. Check your copy and try again.`;
+}

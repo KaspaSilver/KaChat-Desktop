@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { sendKaspa } from "../engine/transactions.js";
+import { sendKaspa, clearJustSpentOutpoints } from "../engine/transactions.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -38,7 +38,9 @@ const coin = (sompi) => ({
 function stubRpc(coins) {
   const rpc = {
     submitted: [],
-    async getUtxosByAddresses() { return { entries: coins }; },
+    // These coins never move, so one check's spent coin is the next check's coin too: the hold on
+    // just-spent coins (iOS 3942a5b7) is tested in test-amounts and test-onchain-builds.
+    async getUtxosByAddresses() { clearJustSpentOutpoints(); return { entries: coins }; },
     async submitTransaction({ transaction }) { rpc.submitted.push(transaction); return { transactionId: transaction.id }; },
   };
   return rpc;

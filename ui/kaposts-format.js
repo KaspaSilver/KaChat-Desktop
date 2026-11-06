@@ -1,6 +1,34 @@
 // Pure text/time and gesture helpers for the KaPosts screens, kept out of ui/kaposts.js so they can
 // be tested in node (tools/test-kaposts-format.mjs). Each one names the iOS piece it mirrors.
 
+import { SEND_OUTCOME_UNKNOWN } from "../engine/transactions.js";
+
+// --- Delivery (iOS e5a9b11) ------------------------------------------------------------------------
+
+/** How a post that didn't go through is shown (iOS KaPostsView.failureStatus): "failed" with
+ *  Retry, or "unconfirmed" with none when the network never answered - it may have landed, and a
+ *  Retry could post and pay twice. */
+export function kapostsFailureDelivery(error) {
+  return error?.code === SEND_OUTCOME_UNKNOWN ? "unconfirmed" : "failed";
+}
+
+/** Runs `op`, again up to `retries` times after `delayMs` when it throws (rapid sequential sends hit
+ *  "UTXO already spent / none spendable" until the node indexes the previous change). Never after
+ *  an unknown outcome: the first one may have landed (iOS submitWithUtxoRetry). */
+export async function kapostsSubmitWithUtxoRetry(op, { retries = 4, delayMs = 1500, onRetry = null } = {}) {
+  let attempt = 0;
+  for (;;) {
+    try { return await op(); }
+    catch (error) {
+      if (error?.code === SEND_OUTCOME_UNKNOWN) throw error;
+      attempt += 1;
+      if (attempt > retries) throw error;
+      onRetry?.(attempt, error);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 /** Characters as the composer counts them: code points, so an emoji is one, not two UTF-16
  *  units (iOS counts `text.count`). */
 export function kapostsCharCount(text) {

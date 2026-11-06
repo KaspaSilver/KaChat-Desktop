@@ -81,3 +81,37 @@ export async function unnamedSweepPass(targets, { batch, store, miss, answered, 
   }
   return "each";
 }
+
+/** What an address the render-time batch left out of its answer is stored as: no names and no
+ *  profile (iOS e5a9b11 KachatNamesRegistry.scheduleIdentityBatch). */
+export function emptyKachatIdentity(address) {
+  return { address, label: null, names: [], profile: null };
+}
+
+/** How long the render-time queue collects addresses before one batched request: the rest of the
+ *  screen asks in the same moment (iOS e5a9b11, 150 ms). */
+export const IDENTITY_BATCH_DELAY_MS = 150;
+
+/**
+ * One flush of the render-time lookup queue (iOS e5a9b11): every address `kachatCachedIdentity`
+ * found stale in the last `IDENTITY_BATCH_DELAY_MS`, in one `batch(keys)` (the registry's
+ * `identities`). Each is filed with `store(key, identity)` (true when it changed what the app
+ * shows) - an address the answer left out as `emptyKachatIdentity` - and `notify()` runs once, only
+ * if anything changed. A null batch (the whole request failed, or no indexer to ask) falls back to
+ * `lookUp(key)` for each, side by side, as before batching. -> "batch" | "each" | "none".
+ */
+export async function identityBatchFlush(keys, { batch, store, notify, lookUp }) {
+  if (!keys?.length) return "none";
+  let found = null;
+  try { found = await batch(keys); } catch { found = null; }
+  if (!found) {
+    await Promise.all(keys.map((key) => Promise.resolve().then(() => lookUp(key)).catch(() => {})));
+    return "each";
+  }
+  let anyChanged = false;
+  for (const key of keys) {
+    try { if (await store(key, found.get(key) ?? emptyKachatIdentity(key))) anyChanged = true; } catch { /* the next render asks again */ }
+  }
+  if (anyChanged) notify();
+  return "batch";
+}

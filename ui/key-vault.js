@@ -353,6 +353,18 @@ export function lockKeyVault() {
   clearSessionCopies();
   if (wasOpen) notifyStateListeners();
 }
+/** An account deleted from this device: its opened secrets (private key, recovery phrase,
+ *  passphrase) must not outlive it in memory (iOS 3942a5b7 cachedPrivateKey). Every other
+ *  account's, and every data key, stay as they are. True when anything was dropped. */
+export function forgetAccountSecrets(address) {
+  const id = canon(address);
+  if (!id) return false;
+  let dropped = false;
+  for (const cacheKey of [...vault.opened.keys()]) {
+    if (cacheKey.startsWith(`${id}|`)) { vault.opened.delete(cacheKey); dropped = true; }
+  }
+  return dropped;
+}
 /** Forgets one vault's key (its password was removed or reset); the others stay open. */
 function forgetVaultKey(id) {
   if (!vault.keys.has(id) && !(id === SHARED && vault.legacyVerified)) return;

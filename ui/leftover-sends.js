@@ -48,3 +48,27 @@ export function settleLeftoverGroupRows(messages, { mine, runStartedAt = RUN_STA
   }
   return changed;
 }
+
+// A room's delivered copy may carry a block time a little before the pending row's clock time.
+const ROOM_COPY_SLACK_MS = 300_000;
+
+/** Room rows still "pending" that no send of this run is working on (`keeping` holds the pending
+ *  ids this run started): one whose delivered copy is here (same sender and content, sent, block
+ *  time at most five minutes before the row's) goes, and the rest are marked failed so Retry
+ *  appears instead of Sending forever (iOS e5a9b11 PublicChatStore.settlePendingMessages). Changes
+ *  `messages` in place and returns how many rows changed. */
+export function settleLeftoverRoomRows(messages, { keeping = new Set() } = {}) {
+  let changed = 0;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const row = messages[index];
+    if (row?.status !== "pending" || keeping.has(row.txId)) continue;
+    const delivered = messages.some((other) => other !== row && !other.status
+      && other.senderAddress === row.senderAddress
+      && String(other.content ?? "") === String(row.content ?? "")
+      && Number(other.blockTime || 0) >= Number(row.blockTime || 0) - ROOM_COPY_SLACK_MS);
+    if (delivered) messages.splice(index, 1);
+    else row.status = FAILED;
+    changed += 1;
+  }
+  return changed;
+}

@@ -30,6 +30,8 @@ import {
 import { confirmDialog, promptDialog, PROMPT_EXTRA, alertDialog, chooseDialog, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 import { askKaPostTerms, kaPostTermsAccepted, roomHiddenSenders, roomMessageReportBody, sendContentReport } from "./kapost-moderation.js";
+import { SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
+import { settleLeftoverRoomRows } from "./leftover-sends.js";
 
 // Public chain data caches are global but per network: a testnet room is not the mainnet room.
 const NET_SUFFIX = IS_TESTNET ? "-testnet" : "";
@@ -992,6 +994,26 @@ function mergeMessages(channel, rows) {
 // Channels that already did the full historical page-back this session — the 8s poll
 // afterwards only needs the newest page.
 const deepBackfilled = new Set();
+// ...and of those, the ones whose page-back ran to the end: their whole history is in.
+const deepBackfillDone = new Set();
+
+// Sends started in this run, by pending id. A row still pending that isn't one of these was left by
+// a run that ended mid-send, and nothing is working on it (iOS e5a9b11 PublicChatService).
+const pendingSendsThisRun = new Set();
+// Rooms already checked for those rows: once per account per run, cleared on an account switch.
+const settledPendingRooms = new Set();
+
+/** Settles the room's pending rows from an earlier run (settleLeftoverRoomRows), once. For a room
+ *  the indexer tracks only after its full history is in, so a send that did land has its copy to
+ *  match; a room with no indexer has no history coming, so on opening. Returns whether rows changed. */
+function settlePendingFromEarlierRuns(channel) {
+  if (!channel || settledPendingRooms.has(channel)) return false;
+  settledPendingRooms.add(channel);
+  const rows = messageCache[channel];
+  if (!rows?.length || settleLeftoverRoomRows(rows, { keeping: pendingSendsThisRun }) === 0) return false;
+  saveCache();
+  return true;
+}
 
 async function backfillChannel(channel, { quiet = true } = {}) {
   try {
@@ -1000,6 +1022,8 @@ async function backfillChannel(channel, { quiet = true } = {}) {
     if (deepBackfilled.has(channel)) {
       const result = await fetchBroadcastHistory({ channel, baseUrl });
       added = mergeMessages(channel, result.messages);
+      // After an account switch the room's history is already in, so its next poll settles it.
+      if (deepBackfillDone.has(channel) && settlePendingFromEarlierRuns(channel)) added += 1;
     } else {
       // First open this session: page backwards through the indexer's full history
       // (newest-first, `before` = oldest blockTime seen) so the room shows every
@@ -1020,6 +1044,9 @@ async function backfillChannel(channel, { quiet = true } = {}) {
         before = oldest;
       }
       } finally { listRenderSuppressed = false; }
+      // The whole history is in, so a send that did land has its copy to match (iOS e5a9b11).
+      deepBackfillDone.add(channel);
+      if (settlePendingFromEarlierRuns(channel)) added += 1;
     }
     if (added > 0) {
       if (activeChannel === channel) renderRoom();
@@ -1053,11 +1080,24 @@ function enqueueBroadcastSend(task) {
   return run;
 }
 
+// When the chatting address has no coins at all (iOS d816404 notEnoughKasMessage).
+const ROOM_NOT_ENOUGH_KAS = "Not enough KAS on your Chatting Address. Add some and try again.";
+
+/** What a room send's toast says. A send that may have landed says so and no more: "Failed to
+ *  send" would invite sending it again (iOS e5a9b11). `prefix` leads any other reason. */
+function roomSendErrorText(error, prefix = "") {
+  if (error?.code === SEND_OUTCOME_UNKNOWN) return SEND_OUTCOME_UNKNOWN_MESSAGE;
+  const raw = String(error?.message ?? error ?? "");
+  const text = /no utxos found|insufficient funds/i.test(raw) ? ROOM_NOT_ENOUGH_KAS : userFacingError(error);
+  return `${prefix}${text}`;
+}
+
 /** Shared send pipeline used by the composer, voice-note share links, and reactions
  *  (reactions pass showBubble:false — they never get a message row). */
 async function sendBroadcastText(channel, text, { showBubble = true, feeKas = null } = {}) {
   const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   if (showBubble) {
+    pendingSendsThisRun.add(pendingId);
     (messageCache[channel] ||= []).push({
       txId: pendingId,
       senderAddress: deps.engine.address || "",
@@ -1081,7 +1121,12 @@ async function sendBroadcastText(channel, text, { showBubble = true, feeKas = nu
     }
     return txid;
   } catch (error) {
-    if (showBubble) {
+    if (showBubble && error?.code === SEND_OUTCOME_UNKNOWN) {
+      // It may have landed, so no Retry, which would post and pay twice (iOS e5a9b11). It stays
+      // pending until its chain copy replaces it (mergeMessages), or the next run settles it -
+      // saved, so a reload still has it to settle.
+      saveCache();
+    } else if (showBubble) {
       messageCache[channel] = (messageCache[channel] || []).map((m) =>
         m.txId === pendingId ? { ...m, status: "failed" } : m);
     }
@@ -1545,7 +1590,7 @@ function retryBroadcastMessage(m) {
   messageCache[activeChannel] = (messageCache[activeChannel] || []).filter((row) => row.txId !== m.txId);
   renderRoom();
   sendBroadcastText(activeChannel, m.content).then(() => renderChannelList()).catch((error) => {
-    deps.showToast?.(userFacingError(error));
+    deps.showToast?.(roomSendErrorText(error));
   });
 }
 
@@ -1860,10 +1905,15 @@ function renderRoom() {
       const { height, top } = keepInPlaceAfterOlderLoad;
       keepInPlaceAfterOlderLoad = null;
       roomBodyEl.scrollTop = roomBodyEl.scrollHeight - height + top;
-    } else if (lastRenderedNewestKey === null || wasAtBottom || newestKey !== lastRenderedNewestKey) {
-      // First paint, a reader already at the bottom, or a new newest message from anyone: to the
-      // bottom (iOS onChange of messages.last?.id).
+    } else if (lastRenderedNewestKey === null || wasAtBottom
+      || (newestKey !== lastRenderedNewestKey && newest?.senderAddress === deps.engine.address)) {
+      // First paint, a reader already at the bottom, or a new newest message of your own: to the
+      // bottom (iOS onChange of messages.last?.id). Someone reading further up stays where they
+      // are when someone else's message comes in (iOS e5a9b11).
       roomBodyEl.scrollTop = roomBodyEl.scrollHeight;
+    } else if (newestKey !== lastRenderedNewestKey) {
+      // The new rows landed below what is on screen: it stays put.
+      roomBodyEl.scrollTop = before.top;
     } else if (messages.length !== lastRenderedCount) {
       roomBodyEl.scrollTop = before.top + (roomBodyEl.scrollHeight - before.height);
     } else {
@@ -2172,7 +2222,7 @@ async function sendBroadcastVoice({ blob, mimeType, channel, seconds }) {
     feeOverrideKas = null;
     renderChannelList();
   } catch (error) {
-    deps.showToast?.(`Failed to send voice message: ${userFacingError(error)}`);
+    deps.showToast?.(roomSendErrorText(error, "Failed to send voice message: "));
     deps.appendEngineLog?.(`Broadcast voice note failed: ${error.message}`);
   }
 }
@@ -2219,6 +2269,8 @@ function openRoom(channel) {
     startPolling(activeChannel);
   } else {
     stopPolling();
+    // A room with no indexer has no history coming to wait for (iOS e5a9b11).
+    if (settlePendingFromEarlierRuns(activeChannel)) renderRoom();
     probeIndexerForRoom(activeChannel);
   }
   syncScanWanted();
@@ -2378,7 +2430,7 @@ async function sendCurrentMessage() {
     await sendBroadcastText(channel, content, { feeKas });
     renderChannelList();
   } catch (error) {
-    deps.showToast?.(`Failed to send: ${userFacingError(error)}`);
+    deps.showToast?.(roomSendErrorText(error, "Failed to send: "));
     deps.appendEngineLog?.(`Broadcast send failed: ${error.message}`);
   } finally {
     sendInFlight = false;
@@ -2424,6 +2476,12 @@ async function sendBroadcastReaction(targetTxId, emoji) {
       if (action === "remove") { broadcastReactionStatus.delete(statusKey); renderRoom(); }
       else setBroadcastReactionStatus(statusKey, "sent");
     } catch (error) {
+      if (error?.code === SEND_OUTCOME_UNKNOWN) {
+        // It may have landed: left as it is, with no red mark and no Retry that could send it
+        // twice (iOS e5a9b11). Its chain copy, if it lands, is applied like any other.
+        deps.appendEngineLog?.("Broadcast reaction outcome unknown (left as it is)");
+        return;
+      }
       // No toast (iOS): the pill turns red and "Retry" shows under the message.
       deps.appendEngineLog?.(`Broadcast reaction send failed (local state already applied): ${error.message}`);
       if (statusKey) setBroadcastReactionStatus(statusKey, "failed", attempt);
@@ -2735,6 +2793,8 @@ export function resetBroadcastsForAccount() {
   stopPolling();
   // Each wallet has its own store: rows the last wallet applied are not applied for this one.
   appliedRowsByChannel.clear();
+  // Leftover pending rows are checked again for this account (iOS e5a9b11 setCurrentWallet).
+  settledPendingRooms.clear();
   activeChannel = null;
   loadState();
   syncScanWanted();

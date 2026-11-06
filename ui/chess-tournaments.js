@@ -65,8 +65,26 @@ let historyDeadline = 0;
 let now = Date.now();
 let lastError = "";
 const pendingMoveGames = new Set();   // "<tournament>|<game>" sent and not yet seen back
-const claimedGames = new Set();       // game keys whose claim was posted - one is enough; the chain confirms it (iOS)
+/** When each pending move went out (wall ms): one the chain has not shown after
+ *  T.PENDING_MOVE_TIMEOUT_MS can be played again (iOS 8d5f925). */
+const pendingMoveSentAt = new Map();
+/** When a claim was last posted for a game (wall ms). One is enough when it takes; one the chain
+ *  voided or that failed to send goes again after T.CLAIM_RETRY_MS while the game is still
+ *  undecided on chain (iOS 8d5f925). */
+const claimedGames = new Map();
 let queuedPublicRoomId = null;
+/** A bot challenge link that came while this player was seated or playing online: it waits
+ *  until that is over and Chess's home is showing (iOS 8d5f925 ChessHomeView.takeChallenge). */
+let heldBotChallenge = null;
+/** The waiting room on screen (iOS 8d5f925 ChessWaitingRoomView): the reducer has shown this
+ *  player seated there; their Leave went out; when it opened. */
+let waitingWasSeated = false;
+let waitingLeftByChoice = false;
+let waitingAppearedAt = 0;
+/** A join that never shows up (ignored, or never mined) does not hold the waiting room forever. */
+const SEAT_WAIT_MS = 30_000;
+/** What the game screen was last painted for: a flag decided on the clock re-paints it. */
+let paintedGameState = "";
 let joinFeeText = null;               // "0.0017 KAS" once estimated this session
 
 // Navigation. mode: "duel" | "tournament". tab: play | active | finished.
@@ -223,11 +241,16 @@ function reduceArena() {
 }
 function reduceArenaNow() {
   const events = [];
+  const localStamps = new Set();
   for (const r of rows.values()) {
     const message = T.decodeMessage(r.content);
-    if (message) events.push({ txId: r.txId, sender: r.senderAddress, blockTime: r.blockTime, message });
+    if (!message) continue;
+    events.push({ txId: r.txId, sender: r.senderAddress, blockTime: r.blockTime, message });
+    if (r.local) localStamps.add(r.txId);
   }
-  tournaments = T.reduce(events);
+  // Our own moves still on this device's clock sit between their game's moves by ply (iOS
+  // 8d5f925): this view only, the chain's times replace them when they land.
+  tournaments = T.reduce(T.orderingLocalStamps(events, localStamps));
   recomputeLocalBoards();
   const my = me();
   // Asked to join a public room that filled first: queue into the next one, once.
@@ -248,6 +271,7 @@ function reduceArenaNow() {
     if (!game) continue;
     if (!(T.playerToMove(game) === my && !game.winner)) pendingMoveGames.delete(key);
   }
+  for (const key of [...pendingMoveSentAt.keys()]) if (!pendingMoveGames.has(key)) pendingMoveSentAt.delete(key);
   if (active) {
     rememberRecord();
     render();
@@ -393,31 +417,37 @@ const joinLabel = () => (joinFeeText ? `Join (Fee: ${joinFeeText})` : "Join");
 
 /** One broadcast transaction, with the retries a fast sequence of sends needs: the change of the
  *  previous transaction is not spendable until it is mined, so a move sent within a second of
- *  the last one can hit "no spendable UTXO" - the same retry KaPosts threads use. */
+ *  the last one can hit "no spendable UTXO" - the same retry KaPosts threads use. Only that kind
+ *  of error is retried (T.isRetryableSendError): no KAS on the chatting address, or a send whose
+ *  outcome is unknown (SEND_OUTCOME_UNKNOWN), fails at once with its message (iOS 8d5f925). */
 async function send(message) {
   if (deps.isChattingBalanceZero?.()) { deps.showFundingGate?.(); return false; }
   const content = T.encodeMessage(message);
+  const sender = me();
   let attempt = 0;
   for (;;) {
     try {
       // One input, like every arena send on the phones: the fee is the one the Join button showed.
       const txid = await sendBroadcastMessage({ engine: deps.engine, channel: T.ARENA_CHANNEL, content, feeKas: "0", singleInput: true });
       // Applied at once with this device's clock; the chain's row replaces the time when it lands.
-      rows.set(txid, { txId: txid, senderAddress: me(), content, blockTime: Date.now(), local: true });
+      rows.set(txid, { txId: txid, senderAddress: sender, content, blockTime: Date.now(), local: true });
       saveCache();
       reduceArena();
       lastError = "";
       return true;
     } catch (error) {
       attempt += 1;
-      if (attempt > SEND_ATTEMPTS) {
-        lastError = error?.message || String(error);
-        deps.appendEngineLog?.(`Chess send failed after retries: ${lastError}`);
+      // A switched account: nothing more goes out for the old one.
+      if (me() !== sender) return false;
+      if (attempt > SEND_ATTEMPTS || !T.isRetryableSendError(error)) {
+        lastError = T.friendlySendErrorMessage(error);
+        deps.appendEngineLog?.(`Chess send failed: ${error?.message || String(error)}`);
         deps.showToast?.(lastError);
         render();
         return false;
       }
       await new Promise((resolve) => window.setTimeout(resolve, SEND_RETRY_MS));
+      if (me() !== sender) return false;
     }
   }
 }
@@ -431,6 +461,8 @@ async function joinPublicRoom(duel) {
   if (!my) return false;
   if (!historyReady) { deps.showToast?.("Still loading the rooms - try again in a moment."); return false; }
   await backfill();
+  // The account may have changed while the rooms loaded (iOS 8d5f925).
+  if (me() !== my) return false;
   const id = duel ? currentDuelRoomId() : currentPublicRoomId();
   const busyIn = myActiveTournament();
   if (busyIn) {
@@ -440,7 +472,10 @@ async function joinPublicRoom(duel) {
   const room = tournaments[id];
   if (room && T.isSeated(room, my, now)) { deps.showToast?.("You're already in this room."); return false; }
   queuedPublicRoomId = id;
-  return send(T.messages.join(id));
+  // A join that did not go out queues nothing: the next room must not be joined for it (iOS 8d5f925).
+  const ok = await send(T.messages.join(id));
+  if (!ok) queuedPublicRoomId = null;
+  return ok;
 }
 
 /** The create alert (iOS ChessTournamentsView): for a tournament the Creator code, Cancel or
@@ -525,10 +560,12 @@ async function joinPrivate() {
   if (ok) openWaitingRoom(id); else render();
 }
 
+/** True when the player is seated or the join went out; false (with a toast) when nothing was
+ *  sent. Already seated opens the room quietly (iOS 8d5f925 join). */
 async function joinTournament(t) {
   const my = me();
   if (!my || T.tournamentStatus(t) !== "open") return false;
-  if (T.isSeated(t, my, now)) { deps.showToast?.("You're already in this room."); return false; }
+  if (T.isSeated(t, my, now)) return true;
   const busyIn = myActiveTournament();
   if (busyIn && busyIn.id !== t.id) {
     deps.showToast?.(T.tournamentStatus(busyIn) === "open" ? `You're already waiting in ${busyIn.name}.` : `You're still playing in ${busyIn.name}.`);
@@ -551,7 +588,10 @@ async function leaveTournament(t) {
   busy = true; render();
   const sent = await send(T.messages.leave(t.id));
   busy = false;
+  // The waiting room reads "Leaving…" until the chain shows the seat given back (iOS 8d5f925).
+  if (sent && view.name === "waiting" && view.tournamentId === t.id) waitingLeftByChoice = true;
   render();
+  checkWaitingRoom();
   return sent;
 }
 
@@ -572,7 +612,30 @@ async function play(t, game, mv) {
   pendingMoveGames.add(key);
   render();
   const sent = await send(T.messages.move(t.id, game.id, game.moves.length + 1, Chess.algebraic(normalized.from), Chess.algebraic(normalized.to), normalized.promotion ? Chess.promotionLetter(normalized.promotion) : null));
-  if (!sent) { pendingMoveGames.delete(key); render(); }
+  // Another account now: its state was reset, nothing of this one's is kept (iOS 8d5f925).
+  if (me() !== my) return;
+  if (sent) {
+    // Timed from the moment it went out, if the chain has not shown it already (iOS 8d5f925).
+    if (pendingMoveGames.has(key)) pendingMoveSentAt.set(key, Date.now());
+  } else {
+    pendingMoveGames.delete(key);
+    pendingMoveSentAt.delete(key);
+    render();
+  }
+}
+
+/** A move the chain never showed (the network dropped it): the board offers the move again
+ *  instead of "Sending your move…" until the clock runs out (iOS 8d5f925 expirePendingMoves). */
+function expirePendingMoves() {
+  let expired = false;
+  for (const [key, sentAt] of [...pendingMoveSentAt]) {
+    if (now - sentAt <= T.PENDING_MOVE_TIMEOUT_MS) continue;
+    pendingMoveSentAt.delete(key);
+    pendingMoveGames.delete(key);
+    lastError = T.PENDING_MOVE_EXPIRED_MESSAGE;
+    expired = true;
+  }
+  if (expired && active) render();
 }
 
 /** Resign asks on a sheet that says what resigning means (iOS 30d0cca); behind the back button
@@ -595,7 +658,8 @@ async function resign(t, game, { leaving = false } = {}) {
   return true;
 }
 
-/** The opponent flagged in one of our games: post the claim (once). Runs on every tick. */
+/** The opponent flagged in one of our games, lately: post the claim. Runs on every tick; a claim
+ *  that has not taken after T.CLAIM_RETRY_MS (voided, or not sent) goes again (iOS 8d5f925). */
 function claimTimeoutsIfDue() {
   const my = me();
   if (!my) return;
@@ -605,14 +669,36 @@ function claimTimeoutsIfDue() {
       if (game.winner) continue;
       const mine = T.colorOf(game, my);
       if (!mine || game.board.sideToMove === mine) continue;
-      const key = keyOf(t.id, game.id);
-      if (claimedGames.has(key)) continue;
-      // A second's margin past zero, so the claim's block time is safely after.
-      if (T.remainingMs(game, game.board.sideToMove, now - 1_500) !== 0) continue;
-      claimedGames.add(key);
-      send(T.messages.claim(t.id, game.id)).catch(() => {});
+      // A second and a half past the flag, so the claim's block time is safely after; and only
+      // a recent flag - an old abandoned game is left to the board's Claim win.
+      if (!T.autoClaimDue(T.flagAt(game), now)) continue;
+      // Our own last move still carries this device's clock: the opponent's clock started at
+      // an instant the chain has not confirmed yet - wait for it.
+      const last = game.moves.at(-1);
+      if (last && rows.get(last.txId)?.local) continue;
+      // Nothing to pay with: no funding sheet every 30 s from a tick; Claim win still asks.
+      if (deps.isChattingBalanceZero?.()) continue;
+      postClaim(t, game);
     }
   }
+}
+
+/** Won on time, the claim not on chain yet: the app posts it by itself, and this is the board's
+ *  button for when it has not taken (iOS 8d5f925 canClaimWin). */
+function canClaimWin(game) {
+  const my = me();
+  return Boolean(game && my && !game.winner && T.decidedWinner(game, now) === my);
+}
+/** The board's Claim win - the way off the board for its winner that is not Resign. */
+function claimWin(t, game) {
+  if (!canClaimWin(game)) return;
+  postClaim(t, game, { force: true });
+}
+function postClaim(t, game, { force = false } = {}) {
+  const key = keyOf(t.id, game.id);
+  if (!T.claimMayPost(claimedGames.get(key), now, force)) return;
+  claimedGames.set(key, now);
+  send(T.messages.claim(t.id, game.id)).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1034,7 +1120,7 @@ function renderWaitingRoom() {
           <div><b>${esc(t.id)}</b><button class="secondary-button" type="button" data-chess-t-copy="${esc(t.id)}">Copy</button><button class="secondary-button" type="button" data-chess-t-share="${esc(t.id)}" data-kind="${duel ? "1v1" : "Tournaments"}">Share</button></div>
         </div>`}
       <p class="field-hint center">${duel ? "You're paired with the next person who joins. The game starts by itself." : "The tournament starts by itself when all eight seats are taken."}</p>
-      <button class="secondary-button chess-t-cta danger" type="button" data-chess-t-leave="${esc(t.id)}" ${busy ? "disabled" : ""}>${busy ? "Leaving…" : "Leave"}</button>
+      <button class="secondary-button chess-t-cta danger" type="button" data-chess-t-leave="${esc(t.id)}" ${busy || waitingLeftByChoice ? "disabled" : ""}>${busy || waitingLeftByChoice ? "Leaving…" : "Leave"}</button>
       ${errorHtml()}
     </div>`;
 }
@@ -1066,9 +1152,17 @@ function checkWaitingRoom() {
     const game = T.currentGameFor(t, my);
     if (game && !game.winner) { autoOpenedGameId = game.id; openGame(t.id, game.id); }
     else openTournament(t.id);
-  } else if (status === "cancelled" || !T.isSeated(t, my, now)) {
-    // iOS: a toast on the 1v1 / Tournaments screen.
-    if (status !== "cancelled") deps.showToast?.("No one joined in time. You're out of the queue - join again whenever you like.");
+  } else if (status === "cancelled") {
+    view = { ...view, name: "kind", tournamentId: null, gameId: null };
+    render();
+  } else if (T.isSeated(t, my, now)) {
+    waitingWasSeated = true;
+  } else if (waitingWasSeated || now - (waitingAppearedAt || now) > SEAT_WAIT_MS) {
+    // Not seated: only after the reducer showed the seat does that mean it ran out or was given
+    // back, not "the join has not landed yet" - and a Leave that went out closes the room here,
+    // by what the chain says, never by itself (iOS 8d5f925). The toast is for a seat that ran
+    // out (iOS: on the 1v1 / Tournaments screen).
+    if (waitingWasSeated && !waitingLeftByChoice) deps.showToast?.("No one joined in time. You're out of the queue - join again whenever you like.");
     view = { ...view, name: "kind", tournamentId: null, gameId: null };
     render();
   }
@@ -1201,22 +1295,31 @@ function bracketHtml_(t) {
 
 // --- Game: board and clocks (iOS b27b4c8, 759a2d3, 4152bf0, 01af8bc; no chat since KaPlay 45f28d9) ---
 
+/** A player in a game that is still on: no wandering off. A spectator, or a game that is over, is
+ *  free - and so is a game decided on the clock with the claim still to come: its winner must not
+ *  have only Resign, which would hand the opponent the win (iOS 8d5f925). */
 function isLockedIn() {
   const t = tournaments[view.tournamentId];
   const game = t?.games[view.gameId];
-  return Boolean(game && !game.winner && T.colorOf(game, me()));
+  return Boolean(game && T.colorOf(game, me()) && !T.isDecided(game, now));
+}
+/** What the game screen's lock, Claim win and waiting overlay were painted for. */
+function gameScreenState(game) {
+  return game ? `${T.isDecided(game, now)}|${canClaimWin(game)}` : "";
 }
 
 function renderGame() {
   const t = tournaments[view.tournamentId];
   const game = t?.games[view.gameId];
+  paintedGameState = gameScreenState(game);
   if (!t || !game) return `${headerHtml("Game", { back: true })}<div class="chess-t-body"><p class="field-hint">Loading…</p></div>`;
   const my = me();
   const myColor = my ? T.colorOf(game, my) : null;
   const pendingKey = keyOf(t.id, game.id);
   const isMyTurn = Boolean(myColor) && !game.winner && game.board.sideToMove === myColor && !pendingMoveGames.has(pendingKey);
   const flipped = myColor === Chess.BLACK;
-  const locked = Boolean(myColor) && !game.winner;
+  const locked = Boolean(myColor) && !T.isDecided(game, now);
+  const claimable = canClaimWin(game);
 
   const clockChip = (color) => {
     const address = T.addressOf(game, color);
@@ -1246,7 +1349,8 @@ function renderGame() {
       board += `<div class="${classes.join(" ")}" data-chess-t-sq="${file},${rank}">${piece ? `<span class="chess-piece ${piece.color}">${Chess.PIECE_GLYPHS[piece.type]}</span>` : ""}${legalKeys.has(`${file},${rank}`) ? `<span class="chess-dot${piece ? " capture" : ""}"></span>` : ""}</div>`;
     }
   }
-  const waitingOverlay = myColor && !game.winner && game.board.sideToMove !== myColor
+  // Not over a game decided on the clock, its claim still to come (iOS 8d5f925).
+  const waitingOverlay = myColor && !T.isDecided(game, now) && game.board.sideToMove !== myColor
     ? `<div class="chess-waiting"><span data-chess-t-waiting-dots>${waitingOnOpponentText()}</span></div>` : "";
   let endOverlay = "";
   if (endOverlayFor === pendingKey && game.winner) {
@@ -1269,7 +1373,9 @@ function renderGame() {
   return `
     ${headerHtml(roundName(game, t), {
       back: true,
-      trailing: locked ? `<button class="chess-t-resign" type="button" data-chess-t-resign>Resign</button>` : "",
+      // Won on time with the claim not on chain yet: Claim win, past the 30 s throttle (iOS 8d5f925).
+      trailing: locked ? `<button class="chess-t-resign" type="button" data-chess-t-resign>Resign</button>`
+        : claimable ? `<button class="chess-t-resign" style="color: var(--accent)" type="button" data-chess-t-claim>Claim win</button>` : "",
     })}
     <div class="chess-t-body chess-t-game">
       <div class="chess-t-game-head">
@@ -1411,6 +1517,11 @@ function openKind(mode) {
   showWaitingRoomIfSeated();
 }
 function openWaitingRoom(id) {
+  if (view.name !== "waiting" || view.tournamentId !== id) {
+    waitingWasSeated = false;
+    waitingLeftByChoice = false;
+    waitingAppearedAt = now;
+  }
   view = { ...view, name: "waiting", tournamentId: id, gameId: null };
   render();
   checkWaitingRoom();
@@ -1631,7 +1742,16 @@ function onClick(event) {
   const leave = event.target.closest("[data-chess-t-leave]");
   if (leave) {
     const t = tournaments[leave.dataset.chessTLeave];
-    if (t) leaveTournament(t).then((ok) => { if (ok && view.name === "waiting") { view = { ...view, name: "kind", tournamentId: null, gameId: null }; render(); } }).catch(() => {});
+    // Not closed here: a leave that failed (the error shows) keeps the player waiting, and one
+    // beaten by the last join is a game - checkWaitingRoom closes the room, or opens the board,
+    // by what the chain says (iOS 8d5f925).
+    if (t) leaveTournament(t).catch(() => {});
+    return;
+  }
+  if (event.target.closest("[data-chess-t-claim]")) {
+    const t = tournaments[view.tournamentId];
+    const g = t?.games[view.gameId];
+    if (t && g) claimWin(t, g);
     return;
   }
   const cancel = event.target.closest("[data-chess-t-cancel]");
@@ -1712,11 +1832,15 @@ export function showChessTournaments() {
   tickTimer = window.setInterval(() => {
     now = Date.now();
     if (!historyReady && Date.now() > historyDeadline) { historyReady = true; render(); }
+    expirePendingMoves();
     claimTimeoutsIfDue();
     checkMonthRollover();
     if (document.hidden || !screenEl) return;
     checkWaitingRoom();
     if (view.name === "tournament" || view.name === "game") autoOpenMyGameIfNeeded();
+    takeHeldBotChallengeIfReady();
+    // A flag on the clock frees the board, shows Claim win and lifts the waiting overlay.
+    if (view.name === "game" && gameScreenState(tournaments[view.tournamentId]?.games[view.gameId]) !== paintedGameState) render();
     renderClocks();
   }, TICK_MS);
   showWaitingRoomIfSeated();
@@ -1728,8 +1852,11 @@ export function showChessTournaments() {
  * button asking first because leaving means resigning.) Resolves false in the waiting room -
  * Leave is the way out - and, on a live board of theirs, asks the leave-means-resign question:
  * true once they chose "Resign and leave", false for "Stay". Free everywhere else.
+ * For a bot challenge link (`challenge`): while this player is seated or playing online the link
+ * is held instead - false, and nothing is asked (iOS 8d5f925; see holdBotChallengeIfBusy).
  */
-export async function chessTournamentsMayLeave() {
+export async function chessTournamentsMayLeave({ challenge = null } = {}) {
+  if (challenge && holdBotChallengeIfBusy(challenge)) return false;
   if (!active) return true;
   // A bot game on: leaving means resigning, and it asks (ui/chess-bots.js).
   if (view.name === "bots") return chessBotsMayLeave();
@@ -1744,10 +1871,32 @@ export async function chessTournamentsMayLeave() {
   return true;
 }
 
+/**
+ * A bot challenge link never pops a board or a waiting room (iOS 8d5f925 ChessHomeView
+ * .takeChallenge): while this player is seated or playing online it waits here until that is
+ * over and Chess's home is showing, then opens. True when it was held. Play's top screen goes on
+ * to Chess's home, as iOS's GamesView does for a challenge.
+ */
+function holdBotChallengeIfBusy(link) {
+  if (!deps || !link) return false;
+  now = Date.now();
+  if (!myActiveTournament()) return false;
+  heldBotChallenge = link;
+  if (view.name === "games") { view = { ...view, name: "home", tournamentId: null, gameId: null }; render(); }
+  return true;
+}
+function takeHeldBotChallengeIfReady() {
+  if (!heldBotChallenge) return;
+  if (view.name === "games") { view = { ...view, name: "home", tournamentId: null, gameId: null }; render(); }
+  if (view.name !== "home" || myActiveTournament()) return;
+  openChessBotChallenge(heldBotChallenge);
+}
+
 /** A bot challenge link (KaPlay ddec987): the caller has the dock on KaPlay, and has asked
- *  chessTournamentsMayLeave first. */
+ *  chessTournamentsMayLeave({ challenge }) first. */
 export function openChessBotChallenge(link) {
   if (!deps) return;
+  heldBotChallenge = null;
   view = { ...view, name: "bots", tournamentId: null, gameId: null };
   selectedSquare = null;
   pendingPromotion = null;
@@ -1768,10 +1917,16 @@ export function hideChessTournaments() {
 export function resetChessTournamentsForAccount() {
   resetChessBotsForAccount();
   pendingMoveGames.clear();
+  pendingMoveSentAt.clear();
   claimedGames.clear();
   spectatorSwitchedFor = null;
   queuedPublicRoomId = null;
   joinFeeText = null;
+  // The old account's error is not the next one's (iOS 8d5f925 accountChanged).
+  lastError = "";
+  waitingWasSeated = false;
+  waitingLeftByChoice = false;
+  paintedGameState = "";
   view = { name: "games", mode: "duel", tab: "play", tournamentId: null, gameId: null };
   leaderboardPeriod = "month";
   selectedSquare = null;
