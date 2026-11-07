@@ -20,9 +20,14 @@
 //   * Loopback, link-local/cloud metadata, unspecified, multicast/reserved, NAT64, 6to4/Teredo
 //     and documentation ranges are never reachable. Private ranges (RFC1918, CGNAT, ULA) are
 //     reachable only when the caller opts in (a LAN Nextcloud behind a private dev server).
-//   * The relay answers fetch() calls, never a page: document/frame loads are refused, and every
-//     relayed answer carries `content-security-policy: sandbox` + `x-content-type-options: nosniff`,
-//     with cookies, auth challenges, refresh/link, clear-site-data and hop-by-hop headers removed.
+//   * A self-hosted relay (the dev / preview server) answers only requests addressed to localhost,
+//     an IP address or a name in KACHAT_ALLOWED_HOSTS: a website reaching it through DNS rebinding
+//     arrives under its own name and is refused (parseAllowedHosts).
+//   * The relay answers fetch() calls only (Sec-Fetch-Dest: empty): page, frame, script, style,
+//     worker, image and media loads are refused, and every relayed answer carries
+//     `content-security-policy: sandbox` + `x-content-type-options: nosniff`, never a script or
+//     style type, with cookies, auth challenges, refresh/link, clear-site-data and hop-by-hop
+//     headers removed.
 //   * The browser's cookies for THIS origin never leave, and nothing that identifies the reader
 //     (forwarding headers, cf-*) is passed on.
 //   * Write methods go only where the app writes: its own API hosts, or the ONE Nextcloud the app
@@ -46,8 +51,8 @@ import https from "node:https";
 import dns from "node:dns";
 import net from "node:net";
 import {
-  PROBE_REPLY, HOP_BY_HOP, STRIPPED_RESPONSE_HEADERS, CLIENT_IDENTITY_HEADERS, NAVIGATION_DESTS,
-  WRITE_API_HOST_RE, NEXTCLOUD_WRITE_PATH_RE, NEXTCLOUD_REFUSED_MESSAGE, isNextcloudRelayRequest,
+  PROBE_REPLY, HOP_BY_HOP, STRIPPED_RESPONSE_HEADERS, CLIENT_IDENTITY_HEADERS, relayFetchKindAllowed,
+  safeRelayContentType, WRITE_API_HOST_RE, NEXTCLOUD_WRITE_PATH_RE, NEXTCLOUD_REFUSED_MESSAGE, isNextcloudRelayRequest,
   JAR_ID_RE, NEXTCLOUD_ORIGIN_HEADER, RATE_MAX_KEYS, CHANGENOW_ORIGIN, CHANGENOW_KEY_HEADER,
   CHANGENOW_KEY_ROUTES, SWAP_UNAVAILABLE_MESSAGE, SWAP_PROBE_PATH, CHANGENOW_CLIENT_KEY_HEADER,
   CHANGENOW_CLIENT_KEY_RE, EXTENSION_ID_HEADER, parseExtensionIds, listedExtensionCaller, ipv4Octets,
@@ -174,6 +179,52 @@ export function parseTrustedProxies(spec) {
   };
 }
 
+// --- Host names the relay answers on (DNS rebinding) -----------------------------------------
+
+/** The name part of a Host / X-Forwarded-Host value: lower-case, port, brackets and trailing dot
+ *  dropped ("[::1]:5173" -> "::1", "Example.com.:443" -> "example.com"). "" when there is none. */
+export function hostNameOf(host) {
+  let h = String(host || "").trim().toLowerCase();
+  const bracketed = /^\[([^\]]+)\](?::\d*)?$/.exec(h);
+  if (bracketed) h = bracketed[1];
+  else if (!net.isIP(h)) h = h.replace(/:\d*$/, "");
+  return h.replace(/\.+$/, "");
+}
+
+/**
+ * KACHAT_ALLOWED_HOSTS: the host names a self-hosted relay (the dev / preview server: Docker, Kaspa
+ * Quick Start) answers on, comma or space separated, without ports. ".example.com" also allows every
+ * name under example.com; "*" allows any name (only behind a reverse proxy that checks the name
+ * itself). Always allowed, whatever the setting: localhost (and *.localhost), any IP address
+ * literal, and `alwaysAllowed` (this machine's own name). A website reaching the relay through DNS
+ * rebinding (its own name pointed at this machine) arrives under that website's name, and the relay
+ * would otherwise act for it: reach the LAN with KACHAT_RELAY_ALLOW_PRIVATE=1, read a Nextcloud on
+ * it, and pass the same-origin check that guards the ChangeNOW key (its Origin matches the Host it
+ * chose). An IP literal cannot be rebound - a page served from it IS this server - so a Docker
+ * install opened by address keeps working with nothing set.
+ * Returns (hostHeaderValue) => boolean.
+ */
+export function parseAllowedHosts(spec, { alwaysAllowed = [] } = {}) {
+  const names = new Set();
+  const suffixes = [];
+  let any = false;
+  for (const token of [String(spec ?? ""), ...alwaysAllowed].join(",").split(/[\s,]+/)) {
+    if (token.trim() === "*") { any = true; continue; }
+    const name = hostNameOf(token.trim().replace(/^\*(?=\.)/, ""));
+    if (!name) continue;
+    if (name.startsWith(".")) suffixes.push(name);
+    else names.add(name);
+  }
+  return (host) => {
+    const h = hostNameOf(host);
+    if (!h) return false;
+    if (any) return true;
+    if (net.isIP(h)) return true;
+    if (h === "localhost" || h.endsWith(".localhost")) return true;
+    return names.has(h) || suffixes.some((suffix) => h.endsWith(suffix));
+  };
+}
+
 // --- The relay -------------------------------------------------------------------------------
 
 /**
@@ -194,6 +245,10 @@ export function parseTrustedProxies(spec) {
  * @param {number}  [options.changenowRateMax] key-attached ChangeNOW calls per client per minute (30)
  * @param {string}  [options.kapayExtensionIds] KAPAY_EXTENSION_IDS syntax: the KaPay Extension IDs
  *                  whose Swap may use the server's key (listedExtensionCaller); empty: none
+ * @param {string}  [options.allowedHosts]     KACHAT_ALLOWED_HOSTS syntax (parseAllowedHosts). Given
+ *                  (even ""), the relay answers only requests addressed to an allowed host name;
+ *                  left out, it answers any (the sidecar, which sits behind its own nginx).
+ * @param {string[]} [options.alwaysAllowedHosts] names allowed besides those (this machine's own)
  * @param {string}  [options.changenowOrigin]  where the key routes live - tests only
  * @param {function} [options.resolveAllowed]  (hostname) => {address,family}|null - tests only
  * @param {function} [options.log]
@@ -222,6 +277,11 @@ export function createRelay(options = {}) {
   // off on such sites too; this also stops an old, cached copy of the page from using the relay.
   const refuseNextcloud = Boolean(options.refuseNextcloud);
   const MAX_REDIRECT_HOPS = 5;
+  // A self-hosted relay answers only on the names it is published under (parseAllowedHosts).
+  const hostAllowed = options.allowedHosts === undefined || options.allowedHosts === null
+    ? null
+    : parseAllowedHosts(options.allowedHosts, { alwaysAllowed: options.alwaysAllowedHosts || [] });
+  const hostRefusalsLogged = new Map(); // host name -> last time it was logged
 
   // Cookie jars for Nextcloud Talk. Cookies never travel between the browser and a target, but a
   // Talk GUEST session lives in the PHP session cookie. A request carrying x-proxy-jar: <id> gets
@@ -288,6 +348,26 @@ export function createRelay(options = {}) {
     return (forwarded || String(req.headers.host || "")).trim().toLowerCase();
   };
 
+  /** Is this request addressed to a host name the relay answers on? The Host header must be one,
+   *  and so must a trusted proxy's X-Forwarded-Host when there is one (a proxy that passes the
+   *  client's own X-Forwarded-Host through must not let a rebinding page name "localhost"). Logs a
+   *  refused name once a minute, with what the operator sets to allow it. */
+  const addressedHostAllowed = (req) => {
+    if (!hostAllowed) return true;
+    const host = String(req.headers.host || "");
+    const forwarded = isTrustedProxy(req.socket?.remoteAddress) ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim() : "";
+    const refused = !hostAllowed(host) ? host : (forwarded && !hostAllowed(forwarded) ? forwarded : null);
+    if (refused === null) return true;
+    const name = hostNameOf(refused).replace(/[^a-z0-9.:_-]/g, "").slice(0, 253) || "(none)";
+    const now = Date.now();
+    if (now - (hostRefusalsLogged.get(name) || 0) > 60_000) {
+      if (hostRefusalsLogged.size >= 100) hostRefusalsLogged.clear();
+      hostRefusalsLogged.set(name, now);
+      log(`nc-proxy: refused a request addressed to host "${name}": the relay answers only on localhost, an IP address and the names in KACHAT_ALLOWED_HOSTS. If KaChat is published under that name, set KACHAT_ALLOWED_HOSTS=${name} (comma-separate several) and restart.`);
+    }
+    return false;
+  };
+
   /** A same-origin call from the page itself: Fetch Metadata says so AND the Origin (or, for a
    *  GET, which carries none, the Referer) names the host the request was sent to. */
   const sameOriginCaller = (req) => {
@@ -327,7 +407,13 @@ export function createRelay(options = {}) {
 
   /** Handle one relay request. `url` is the part after the mount: "/<origin>/<path>?<query>". */
   const handle = (req, res, url) => {
-    // "Are you there?" (engine/endpoints.js) - answered before anything else.
+    // Not one of the names this relay is published under: refused before anything else, the probe
+    // included, so a page reached under another name finds no relay at all (DNS rebinding).
+    if (!addressedHostAllowed(req)) {
+      refuse(res, 403, "This relay does not answer on this host name. Its operator can allow it with KACHAT_ALLOWED_HOSTS.");
+      return;
+    }
+    // "Are you there?" (engine/endpoints.js) - answered first.
     const probePath = String(url || "").split("?")[0].replace(/\/+$/, "");
     if (probePath === "/__probe") {
       res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-store" });
@@ -341,11 +427,11 @@ export function createRelay(options = {}) {
       res.end(changenowKey() ? "on" : (acceptClientChangenowKey ? "bring-your-own" : "off"));
       return;
     }
-    // Never a page of this origin: a top-level or framed load of a relayed URL would render
-    // someone else's HTML here, with this origin's storage in reach.
-    const fetchDest = String(req.headers["sec-fetch-dest"] || "").toLowerCase();
-    const fetchMode = String(req.headers["sec-fetch-mode"] || "").toLowerCase();
-    if (NAVIGATION_DESTS.has(fetchDest) || fetchMode === "navigate" || fetchMode === "nested-navigate") {
+    // Never a page of this origin, nor a script, style or worker of it: a top-level or framed load
+    // of a relayed URL would render someone else's HTML here, with this origin's storage in reach,
+    // and a <script src> of one would run someone else's code as this origin's (CSP 'self').
+    // Only fetch() is answered (relayFetchKindAllowed).
+    if (!relayFetchKindAllowed(req.headers)) {
       refuse(res, 403, "Proxy target not allowed");
       return;
     }
@@ -502,6 +588,7 @@ export function createRelay(options = {}) {
         // Data for fetch(), never a page of this origin.
         responseHeaders["content-security-policy"] = "sandbox";
         responseHeaders["x-content-type-options"] = "nosniff";
+        if (responseHeaders["content-type"] !== undefined) responseHeaders["content-type"] = safeRelayContentType(responseHeaders["content-type"]);
         const mask404 = soft404 && status === 404;
         if (mask404) responseHeaders["x-upstream-status"] = "404";
         res.writeHead(mask404 ? 200 : status, responseHeaders);
@@ -522,5 +609,5 @@ export function createRelay(options = {}) {
     forward(target, 0).catch(() => fail(502, "Proxy error"));
   };
 
-  return { handle, clientKey, writeAllowed, overRate, isChangenowKeyRoute, sameOriginCaller };
+  return { handle, clientKey, writeAllowed, overRate, isChangenowKeyRoute, sameOriginCaller, addressedHostAllowed };
 }

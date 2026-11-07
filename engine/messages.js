@@ -129,9 +129,21 @@ export async function sendMessagePreview({ envelope, onStatus = () => {} }) {
   return { status: "confirmed", txid, daaScore, envelope };
 }
 
-export async function sendMessageOnchain({ engine, envelope, amountKas = KASIA_INTEGRATION_STATUS.defaultMessageAmountKas, feeKas = "0", onStatus = () => {} }) {
+/** Why a message or request is refused once the active account is no longer the one it was
+ *  written in (an in-place create / import while it was on its way). */
+export const SEND_ACCOUNT_CHANGED = "The account changed before this was sent; it was not sent.";
+
+/** True when `ownerAddress` (the account a send started in) is no longer `activeAddress`: the
+ *  send would be signed and paid for by the next account (iOS dfaba68). No owner: not checked. */
+export function sendAccountMismatch(ownerAddress, activeAddress) {
+  const owner = String(ownerAddress || "").trim();
+  return owner !== "" && owner !== String(activeAddress || "").trim();
+}
+
+export async function sendMessageOnchain({ engine, envelope, amountKas = KASIA_INTEGRATION_STATUS.defaultMessageAmountKas, feeKas = "0", onStatus = () => {}, ownerAddress = null }) {
   if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load WASM and generate/import a wallet first.");
   if (!envelope?.toAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("A valid kaspa: contact address is required.");
+  if (sendAccountMismatch(ownerAddress, engine.address)) throw new Error(SEND_ACCOUNT_CHANGED);
 
   onStatus({
     status: "pending",
@@ -156,6 +168,8 @@ export async function sendMessageOnchain({ engine, envelope, amountKas = KASIA_I
   // query), not by the recipient being a transaction output. The real cost
   // is just the network fee, not the nominal output amount.
   await engine.connect();
+  // The connect may have spanned a switch too: checked again right before the keys are used.
+  if (sendAccountMismatch(ownerAddress, engine.address)) throw new Error(SEND_ACCOUNT_CHANGED);
   const sendResult = await sendPayloadTransaction({
     kaspa: engine.kaspa,
     rpc: engine.rpc,
@@ -220,11 +234,13 @@ export async function createEncryptedHandshakeEnvelope({
   };
 }
 
-export async function sendHandshakeOnchain({ engine, envelope, amountKas = "0.2", feeKas = "0", onStatus = () => {} }) {
+export async function sendHandshakeOnchain({ engine, envelope, amountKas = "0.2", feeKas = "0", onStatus = () => {}, ownerAddress = null }) {
   if (!engine?.kaspa || !engine?.privateKey || !engine?.address) throw new Error("Load a wallet before sending a communication request.");
   if (!envelope?.toAddress?.startsWith(ADDRESS_PREFIX)) throw new Error("A valid kaspa: recipient address is required.");
+  if (sendAccountMismatch(ownerAddress, engine.address)) throw new Error(SEND_ACCOUNT_CHANGED);
   onStatus({ status: "pending", note: "Creating encrypted KaChat communication request.", messageType: "handshake", transport: "onchain" });
   await engine.connect();
+  if (sendAccountMismatch(ownerAddress, engine.address)) throw new Error(SEND_ACCOUNT_CHANGED);
   const sendResult = await sendPayloadTransaction({
     kaspa: engine.kaspa,
     rpc: engine.rpc,

@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import * as K from "../engine/kns-write.js";
-import { sendPayloadToSelf, sendPayloadTransaction, submitConfirmingAcceptance, isOrphanRejection, estimateMaxSend, sendMaxKaspa, sendMaxWithPayload, setReservedOutpoints, clearJustSpentOutpoints, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, MAX_PIN_FEE_SLACK_SOMPI } from "../engine/transactions.js";
+import { sendPayloadToSelf, sendPayloadTransaction, submitConfirmingAcceptance, isOrphanRejection, estimateMaxSend, sendMaxKaspa, sendMaxWithPayload, setReservedOutpoints, clearJustSpentOutpoints, transactionSpends, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, MAX_PIN_FEE_SLACK_SOMPI } from "../engine/transactions.js";
+import { KaspaEngine } from "../engine/index.js";
 import { fiatTextFloorFromSompi } from "../engine/amounts.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -549,6 +550,26 @@ async function main() {
     const sentCapped = await sendMaxKaspa({ kaspa, rpc: many, privateKey: ownerKey, sourceAddress: ownerAddress, destinationAddress: recipientAddress, expectedAmountSompi: capped.amountSompi, expectedOutpoints: capped.outpoints });
     r.eq(sentCapped.amountSompi, capped.amountSompi, "Max past 80 coins: sends what was shown");
     r.eq(many.submitted[0].inputs.length, 80, "Max past 80 coins: 80 inputs");
+  }
+
+  // MARK: iOS 3942a5b7 - .kachat name transactions (engine.submitRpcTransaction) hold their coins
+  // too, and engine.getUtxosWithCovenants leaves just-spent coins out
+  {
+    const rpc = stubRpc();
+    rpc.holdSpent = true;
+    clearJustSpentOutpoints();
+    const spent = utxo(ownerAddress, 2n * KAS);
+    const other = utxo(ownerAddress, 1n * KAS);
+    rpc.utxos.set(ownerAddress, [spent, other]);
+    const fakeEngine = { requireSdk() {}, withRpc: async (fn) => fn(rpc), log: () => {} };
+    const tx = kaspa.createTransaction([spent], [{ address: recipientAddress, amount: KAS }], 0n);
+    r.eq(transactionSpends(tx).join(","), `${spent.outpoint.transactionId}:0`, "transactionSpends reads an SDK transaction's inputs");
+    r.eq(transactionSpends(null).length, 0, "transactionSpends: nothing to read, nothing held");
+    r.eq((await KaspaEngine.prototype.getUtxosWithCovenants.call(fakeEngine, [ownerAddress])).length, 2, "names: both coins before the send");
+    await KaspaEngine.prototype.submitRpcTransaction.call(fakeEngine, tx);
+    const after = await KaspaEngine.prototype.getUtxosWithCovenants.call(fakeEngine, [ownerAddress]);
+    r.eq(after.map((u) => `${u.outpoint.transactionId}:${u.outpoint.index}`).join(","), `${other.outpoint.transactionId}:0`, "names: the coin a name transaction just spent is left out");
+    clearJustSpentOutpoints();
   }
 
   for (const f of r.failures) console.log(`FAIL ${f}`);

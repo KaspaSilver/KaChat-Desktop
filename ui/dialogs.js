@@ -11,13 +11,23 @@
 
 let host = null;
 let settle = null;
+// What had the focus before the dialog opened (the button that opened it, usually): it gets the
+// focus back once the dialog closes.
+let returnFocus = null;
+
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+function focusableIn(root) {
+  return [...root.querySelectorAll(FOCUSABLE)].filter((el) => !el.hidden && (el.getClientRects?.().length ?? 1) > 0);
+}
 
 function ensureHost() {
   if (host) return host;
   host = document.createElement("div");
   host.className = "modal-backdrop app-dialog-backdrop";
   host.hidden = true;
-  host.innerHTML = `<div class="contact-modal app-dialog" role="dialog" aria-modal="true" data-app-dialog-body></div>`;
+  // tabindex -1: a sheet with no OK button (the choices) takes the focus itself, so Escape reaches
+  // it and Enter no longer lands on whatever opened it.
+  host.innerHTML = `<div class="contact-modal app-dialog" role="dialog" aria-modal="true" tabindex="-1" style="outline: none" data-app-dialog-body></div>`;
   document.body.appendChild(host);
 
   // A click on the backdrop itself cancels; a click inside must not.
@@ -34,7 +44,25 @@ function ensureHost() {
     if (choice) finish(choice.dataset.appDialogChoice);
   });
   host.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") finish(null);
+    if (event.key === "Escape") {
+      // Handled here: the page's own Escape (a group chat or sheet beneath) must not close too.
+      event.preventDefault();
+      event.stopPropagation();
+      finish(null);
+      return;
+    }
+    // Tab stays inside the dialog (aria-modal): from the last control back to the first, and back.
+    if (event.key === "Tab") {
+      const items = focusableIn(host);
+      if (!items.length) { event.preventDefault(); return; }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      const outside = !items.includes(active);
+      if (event.shiftKey && (active === first || outside)) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (active === last || (outside && !host.contains(active)))) { event.preventDefault(); first.focus(); }
+      return;
+    }
     if (event.key === "Enter" && host.querySelector("[data-app-dialog-input]")) {
       event.preventDefault();
       finish(String(host.querySelector("[data-app-dialog-input]").value));
@@ -47,7 +75,23 @@ function finish(result) {
   if (host) host.hidden = true;
   const resolve = settle;
   settle = null;
+  const back = returnFocus;
+  returnFocus = null;
+  restoreFocus(back);
   resolve?.(result);
+}
+
+// Back to the opener, if it is still on the page and nothing else took the focus meanwhile. Not
+// into a text field on a touch screen, where focusing it would raise the keyboard by itself.
+function restoreFocus(el) {
+  if (!el || !el.isConnected || typeof el.focus !== "function") return;
+  const active = document.activeElement;
+  if (active && active !== document.body && !host?.contains(active)) return;
+  const typing = el.matches?.("input, textarea, [contenteditable]:not([contenteditable='false'])");
+  let touch = false;
+  try { touch = Boolean(window.matchMedia?.("(pointer: coarse)").matches); } catch { touch = false; }
+  if (typing && touch) return;
+  try { el.focus({ preventScroll: true }); } catch { /* it can't take the focus */ }
 }
 
 function escape(value) {
@@ -79,15 +123,22 @@ function bodyHtml(message) {
 /// sheets rise from the bottom there instead (ui/sheets.js).
 function present(html, focusSelector, variantClass = "", { alert = false } = {}) {
   const el = ensureHost();
+  // Opening over nothing: remember where the focus was, to hand it back on close. (A dialog that
+  // replaces one still up keeps the first one's opener.)
+  if (el.hidden) {
+    const active = document.activeElement;
+    returnFocus = active && active !== document.body && !el.contains(active) ? active : null;
+  }
   el.classList.toggle("is-alert", alert);
   const body = el.querySelector("[data-app-dialog-body]");
   // One host serves every dialog, so a variant (the tiles sheet) is set per presentation.
   body.classList.toggle("app-dialog-tiles", variantClass === "app-dialog-tiles");
   body.innerHTML = html;
   el.hidden = false;
-  const focus = focusSelector ? el.querySelector(focusSelector) : el.querySelector("[data-app-dialog-ok]");
-  focus?.focus();
-  if (focus?.select) focus.select();
+  // The field or OK button; a sheet without one (the choices) focuses itself.
+  const focus = (focusSelector ? el.querySelector(focusSelector) : el.querySelector("[data-app-dialog-ok]")) || body;
+  focus.focus?.({ preventScroll: true });
+  if (focus !== body && focus.select) focus.select();
 }
 
 /// Resolves true when confirmed, false otherwise - never rejects, so callers read as an `if`.

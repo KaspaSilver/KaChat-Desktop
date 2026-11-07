@@ -39,6 +39,37 @@ export const CLIENT_IDENTITY_HEADERS = [
 
 // Request kinds a browser uses to RENDER a response. The relay never serves those.
 export const NAVIGATION_DESTS = new Set(["document", "iframe", "frame", "embed", "object"]);
+// The only request kind the app makes of the relay: fetch() (Sec-Fetch-Dest: empty). Every caller
+// (engine/endpoints.js, engine/kns.js, ui/nextcloud.js, ui/talk.js, ui/swaps.js, link previews in
+// ui/app.js and ui/kachat-names-live.js) fetches and reads the body as JSON, text or a blob; images
+// and media are shown from blob: URLs or straight from their own server, never from a relay URL.
+// Anything else - script, style, worker, image, audio, font, manifest ... - would let a page load
+// someone else's bytes as if this origin had served them, which is what CSP 'self' relies on not
+// happening. A request with no Sec-Fetch-Dest (a non-browser client, a browser without Fetch
+// Metadata) is let through: it is not a page of this origin loading something.
+export const RELAY_FETCH_DESTS = new Set(["empty"]);
+
+/** May this request kind use the relay? `headers` is a plain object with lower-case names. */
+export function relayFetchKindAllowed(headers) {
+  const dest = String(headers?.["sec-fetch-dest"] || "").toLowerCase();
+  const mode = String(headers?.["sec-fetch-mode"] || "").toLowerCase();
+  if (mode === "navigate" || mode === "nested-navigate" || NAVIGATION_DESTS.has(dest)) return false;
+  return dest === "" || RELAY_FETCH_DESTS.has(dest);
+}
+
+// Types a browser runs or applies as code (JavaScript, CSS, WebAssembly, XSLT) when something gets
+// it to load a URL as a script, style sheet, worker or transform. A relayed answer is data for
+// fetch(), so it never goes out under one of those: with nosniff, text/plain is refused as all of
+// them. The app reads relayed answers as JSON, text or bytes, which the type does not change.
+const CODE_TYPE_RE = /script|css|wasm|xsl/i;
+
+/** The Content-Type a relayed answer goes out with: `value` as sent, unless it names a type a
+ *  browser would execute or apply, which becomes text/plain. */
+export function safeRelayContentType(value) {
+  const type = Array.isArray(value) ? value.join(", ") : value;
+  if (type === undefined || type === null) return type;
+  return CODE_TYPE_RE.test(String(type).split(";")[0]) ? "text/plain" : type;
+}
 
 // Hosts the app itself writes to (the hosts engine/endpoints.js relays, plus KNS).
 export const WRITE_API_HOST_RE = /(^|\.)kasia\.wtf$|^indexer\.kachat\.app$|^api(-tn\d+)?\.kaspa\.org$|(^|\.)kaspa\.(green|red|stream|blue|ws)$|^api\.knsdomains\.org$/i;

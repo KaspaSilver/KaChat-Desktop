@@ -16,6 +16,10 @@
 //     counted per Cloudflare isolate, so they are a backstop; a WAF rate-limiting rule on /nc-proxy/
 //     is the real limit.
 //   * The timeout covers waiting for the answer to start, not the whole download.
+//   * Open to the internet by nature (no Host to check: this IS the public site), so it refuses what
+//     only another website's page would send - Sec-Fetch-Site: cross-site, or an Origin of another
+//     site (crossSiteCaller) - and answers fetch() only (relayFetchKindAllowed). A non-browser client
+//     can send anything; the WAF rule and the rate limit are what bound those.
 //
 // Environment (Pages project settings):
 //   CHANGENOW_API_KEY           secret: the server's ChangeNOW key. Unset: Swap is "not available".
@@ -25,8 +29,8 @@
 //                               Store ID; Brave shares it). Unset: only this site's own pages swap.
 //   NC_PROXY_UPSTREAM_TIMEOUT_MS  wait for a read to start answering (default 30000; writes 120000)
 import {
-  PROBE_REPLY, HOP_BY_HOP, STRIPPED_RESPONSE_HEADERS, CLIENT_IDENTITY_HEADERS, NAVIGATION_DESTS,
-  WRITE_API_HOST_RE, NEXTCLOUD_REFUSED_MESSAGE, isNextcloudRelayRequest, NEXTCLOUD_ORIGIN_HEADER,
+  PROBE_REPLY, HOP_BY_HOP, STRIPPED_RESPONSE_HEADERS, CLIENT_IDENTITY_HEADERS, relayFetchKindAllowed,
+  safeRelayContentType, WRITE_API_HOST_RE, NEXTCLOUD_REFUSED_MESSAGE, isNextcloudRelayRequest, NEXTCLOUD_ORIGIN_HEADER,
   CHANGENOW_ORIGIN, CHANGENOW_KEY_HEADER, CHANGENOW_KEY_ROUTES, SWAP_UNAVAILABLE_MESSAGE,
   SWAP_PROBE_PATH, CHANGENOW_CLIENT_KEY_HEADER, EXTENSION_ID_HEADER, parseExtensionIds,
   listedExtensionCaller, ipv6Bytes, isBlockedHost, createLimiter, applyPreviewHeaders,
@@ -85,6 +89,34 @@ const sameOriginCaller = (request, siteHost) => {
   return Boolean(referer) && hostOf(referer) === siteHost;
 };
 
+/** The site (registrable domain) of a host name, near enough for the names this relay serves:
+ *  the last two labels (desktop.kachat.app -> kachat.app), the last three under pages.dev (a
+ *  public suffix: every Pages project is a site of its own). An IP address is its own site. */
+const siteOf = (hostname) => {
+  const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+  if (isIpLiteral(h)) return h;
+  const labels = h.split(".");
+  return labels.slice(h.endsWith(".pages.dev") ? -3 : -2).join(".");
+};
+
+/**
+ * A request from another website's page. Browsers mark it themselves: Sec-Fetch-Site: cross-site,
+ * and an Origin naming that site on every cross-origin fetch() (an opaque "null" one from a
+ * sandboxed frame or data: page). No page can set or remove either. The app's own pages send
+ * same-origin, the KaPay Extension's pages "none" with a chrome-extension:// Origin. This makes the
+ * relay useless to other sites' pages; a client that is not a browser sends whatever it likes, and
+ * for those the WAF rate-limiting rule on /nc-proxy/ (and the per-client limit here) is the limit.
+ */
+export function crossSiteCaller(request, siteHostname) {
+  if (String(request.headers.get("sec-fetch-site") || "").toLowerCase() === "cross-site") return true;
+  const origin = request.headers.get("origin");
+  if (origin === null) return false;
+  let url = null;
+  try { url = new URL(origin); } catch { return true; } // "null": an opaque origin, never the app
+  if (url.protocol !== "https:" && url.protocol !== "http:") return false; // an extension's own page
+  return siteOf(url.hostname) !== siteOf(siteHostname);
+}
+
 /** A target the relay may connect to: a name, not one that must never be reached, and not the relay
  *  itself (relaying to /nc-proxy here would call this function again, and again). */
 const targetAllowed = (target, siteHost) => !isBlockedHost(target.hostname)
@@ -105,12 +137,13 @@ export async function onRequest({ request, env = {} }) {
     return new Response(changenowKey ? "on" : "off", { headers: { "content-type": "text/plain", "cache-control": "no-store" } });
   }
 
-  // Never a page of this origin.
-  const fetchDest = String(request.headers.get("sec-fetch-dest") || "").toLowerCase();
-  const fetchMode = String(request.headers.get("sec-fetch-mode") || "").toLowerCase();
-  if (NAVIGATION_DESTS.has(fetchDest) || fetchMode === "navigate" || fetchMode === "nested-navigate") {
+  // Never a page, script, style or worker of this origin: fetch() only (relayFetchKindAllowed).
+  if (!relayFetchKindAllowed({ "sec-fetch-dest": request.headers.get("sec-fetch-dest"), "sec-fetch-mode": request.headers.get("sec-fetch-mode") })) {
     return refuse(403, "Proxy target not allowed");
   }
+  // Not a relay for other websites: a browser marks another site's request Sec-Fetch-Site:
+  // cross-site and names that site in Origin, and no page can change either (crossSiteCaller).
+  if (crossSiteCaller(request, site.hostname)) return refuse(403, "This relay serves this site's own pages only");
   const who = clientKey(request);
   if (limiterFor("relay", numberSetting(env.KACHAT_RELAY_RATE_MAX, 600))(who)) {
     return refuse(429, "Too many requests", { "retry-after": "60" });
@@ -215,6 +248,7 @@ export async function onRequest({ request, env = {} }) {
     // Data for fetch(), never a page of this origin.
     responseHeaders.set("content-security-policy", "sandbox");
     responseHeaders.set("x-content-type-options", "nosniff");
+    if (responseHeaders.has("content-type")) responseHeaders.set("content-type", safeRelayContentType(responseHeaders.get("content-type")));
     const mask404 = soft404 && status === 404;
     if (mask404) responseHeaders.set("x-upstream-status", "404");
     const finalStatus = mask404 ? 200 : status;

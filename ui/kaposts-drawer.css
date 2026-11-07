@@ -163,6 +163,8 @@
   flex: 0 0 auto;
   padding-left: calc(var(--kaposts-action-gap) / 2); padding-right: calc(var(--kaposts-action-gap) / 2);
 }
+/* Reply on a post with no txid yet (pending / failed / not confirmed): nothing on chain to answer. */
+.kaposts-cell .kaposts-actions > .kaposts-action:disabled { opacity: .4; cursor: default; color: var(--muted); }
 .kaposts-cell .kaposts-actions.kaposts-actions > .kaposts-undo-pill {
   padding-left: 7px; padding-right: 7px;
   margin-left: calc(var(--kaposts-action-gap) / 2); margin-right: calc(var(--kaposts-action-gap) / 2);

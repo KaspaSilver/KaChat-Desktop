@@ -8,7 +8,7 @@ import {
 } from "../engine/amounts.js";
 
 globalThis.fetch = async () => new Response("", { status: 404 });
-const { sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, isTransactionKnown, sendKaspa, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE, isLostSubmitAnswer, excludeJustSpentUtxos, noteSpentOutpoints, clearJustSpentOutpoints, JUST_SPENT_HOLD_MS, maxSendEntries, MAX_SEND_INPUT_LIMIT } = await import("../engine/transactions.js");
+const { sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, isTransactionKnown, sendKaspa, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE, isLostSubmitAnswer, excludeJustSpentUtxos, noteSpentOutpoints, clearJustSpentOutpoints, JUST_SPENT_HOLD_MS, maxSendEntries, maxSendOutpointKeys, MAX_SEND_INPUT_LIMIT } = await import("../engine/transactions.js");
 
 let pass = 0;
 const tests = [];
@@ -353,6 +353,22 @@ test("Max past one transaction's coins spends the largest 80; a coin-control pic
   assert.equal(maxSendEntries(many.slice(0, 3)).length, 3);
   const pick = many.slice(0, MAX_SEND_INPUT_LIMIT + 2).map((c) => `${c.outpoint.transactionId}:0`);
   assert.equal(maxSendEntries(many, pick).length, MAX_SEND_INPUT_LIMIT + 2, "the pick is refused later, by the plan, never trimmed");
+});
+test("the app's Max coin check uses the send's rules: largest 80, just-spent left out", () => {
+  clearJustSpentOutpoints();
+  const many = Array.from({ length: MAX_SEND_INPUT_LIMIT + 5 }, (_, i) => heldCoin(`t${i}`, 0, 1000 + i));
+  const top = `t${MAX_SEND_INPUT_LIMIT + 4}:0`;
+  const keys = maxSendOutpointKeys(many);
+  assert.equal(keys.length, MAX_SEND_INPUT_LIMIT, "an address with more than 80 coins is not refused forever");
+  assert.ok(!keys.includes("t0:0") && keys.includes(top));
+  noteSpentOutpoints([top]);
+  const held = maxSendOutpointKeys(many);
+  assert.equal(held.length, MAX_SEND_INPUT_LIMIT);
+  assert.ok(!held.includes(top) && held.includes("t4:0"), "in the hold window the next largest coin steps in");
+  assert.deepEqual(maxSendOutpointKeys(many, ["t1:0", "t2:0"]).sort(), ["t1:0", "t2:0"], "a coin-control pick as is");
+  assert.deepEqual(maxSendOutpointKeys(many, [top]), [], "a picked coin just spent is gone");
+  assert.deepEqual(maxSendOutpointKeys([]), []);
+  clearJustSpentOutpoints();
 });
 
 for (const [name, fn] of tests) {

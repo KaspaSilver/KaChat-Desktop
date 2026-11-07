@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   mergePortfolioSync, mergePortfolioArchives, mergePortfolioTombstones, stampPortfolioChanges,
   portfolioSyncFromArchive, portfolioSyncToArchive, portfolioSyncFromDesktop, portfolioSyncToDesktop,
-  portfolioSyncForArchive, isPristinePortfolioSeed, newPortfolioUuid, PORTFOLIO_SEED_NAME, foldPortfolioEquivalents,
+  portfolioSyncForArchive, portfolioSyncForUpload, isPristinePortfolioSeed, newPortfolioUuid, PORTFOLIO_SEED_NAME, foldPortfolioEquivalents,
   portfolioBackupFileJson, parsePortfolioBackupFile, isOwnPortfolioFile, isPortfolioFileCandidate, portfolioFileNames, portfolioSyncFor,
 } from "../ui/portfolio-sync.js";
 
@@ -117,6 +117,18 @@ test("the untouched seed is never uploaded and is dropped when other portfolios 
   const real = side({ portfolios: [portfolio(P1, "Portfolio 1", { updatedAt: at(1) })] });
   assert.deepEqual(mergePortfolioSync([fresh, real]).portfolios.map((p) => p.id), [P1]);
   assert.deepEqual(mergePortfolioSync([fresh]).portfolios.map((p) => p.id), [P3]);
+});
+
+test("Nextcloud upload: the seed goes up only when it is the one file left to carry deletions", () => {
+  const seed = portfolio(P3, PORTFOLIO_SEED_NAME);
+  assert.equal(portfolioSyncForUpload(side({ portfolios: [seed] })).portfolios.length, 0, "no deletions: nothing to carry");
+  const deleted = side({ portfolios: [seed], tombstones: [tomb("portfolio", P1, at(5))] });
+  assert.deepEqual(portfolioSyncForUpload(deleted).portfolios.map((p) => p.id), [P3]);
+  assert.deepEqual(portfolioSyncFor(portfolioSyncForUpload(deleted), P3).tombstones.map((t) => t.id), [P1]);
+  assert.equal(portfolioSyncForArchive(deleted).portfolios.length, 0, "the archive keeps its own tombstone list");
+  // Another portfolio carries them: the seed stays home.
+  const other = side({ portfolios: [seed, portfolio(P2, "Long", { updatedAt: at(1) })], tombstones: [tomb("portfolio", P1, at(5))] });
+  assert.deepEqual(portfolioSyncForUpload(other).portfolios.map((p) => p.id), [P2]);
 });
 
 test("ordered by sortOrder (ties by createdAt) and renumbered 0..n-1", () => {

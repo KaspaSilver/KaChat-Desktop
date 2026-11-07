@@ -6,7 +6,9 @@
 // Covers DSK-001 (scheme-relative SSRF, blocked ranges, redirect hops), DSK-002 (navigation
 // refusal, response sandboxing/stripping, request cookie stripping) and DSK-003 (rate-limit key and
 // eviction, IPv6 /64 buckets, write gate bound to the declared Nextcloud origin), and the ChangeNOW
-// key gate (the server key only on the four swap calls, never a client's, its own rate limit).
+// key gate (the server key only on the four swap calls, never a client's, its own rate limit), the
+// fetch()-only rule (no script/style/worker/media loads, no script or style types out) and the
+// self-hosted relay's host-name guard against DNS rebinding (KACHAT_ALLOWED_HOSTS).
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -564,6 +566,74 @@ v6.server.close();
   check("a hosted relay never takes a pasted key", plainQuote.status === 503 && lastSeen === null && (await request(plainPort, "/nc-proxy/__swap")).body === "off", `${plainQuote.status}`);
   plain.server.close();
   cnServer.close();
+}
+
+// --- 7. fetch() only, and never a script or style type ----------------------------------------
+{
+  for (const dest of ["script", "style", "worker", "sharedworker", "serviceworker", "image", "audio", "video", "font", "manifest", "xslt"]) {
+    lastSeen = null;
+    const r = await request(relayPort, `/nc-proxy/${UP}/echo`, { headers: { "sec-fetch-dest": dest, "sec-fetch-mode": "no-cors" } });
+    check(`relay refuses sec-fetch-dest: ${dest}`, r.status === 403 && lastSeen === null, `got ${r.status}`);
+  }
+  const fetched = await request(relayPort, `/nc-proxy/${UP}/echo`, { headers: { "sec-fetch-dest": "empty", "sec-fetch-mode": "cors" } });
+  check("relay answers fetch() (sec-fetch-dest: empty)", fetched.status === 200);
+  const typed = http.createServer((req, res) => { res.writeHead(200, { "content-type": decodeURIComponent(req.url.slice(1)) }); res.end("x"); });
+  const typedPort = await listen(typed);
+  const TYPED = encodeURIComponent(`http://upstream.test:${typedPort}`);
+  for (const [type, want] of [
+    ["text/javascript; charset=utf-8", "text/plain"], ["application/javascript", "text/plain"], ["text/css", "text/plain"],
+    ["application/wasm", "text/plain"], ["text/xsl", "text/plain"], ["application/json", "application/json"],
+    ["image/png", "image/png"], ["text/html; charset=utf-8", "text/html; charset=utf-8"],
+  ]) {
+    const r = await request(relayPort, `/nc-proxy/${TYPED}/${encodeURIComponent(type)}`);
+    check(`relayed ${type} goes out as ${want}`, r.headers["content-type"] === want, r.headers["content-type"]);
+  }
+  typed.close();
+}
+
+// --- 8. Host names (DNS rebinding): a self-hosted relay answers only its own names -------------
+{
+  const logs = [];
+  const guarded = relayServer({ allowedHosts: "kachat.example.com, .home.example", alwaysAllowedHosts: ["mybox", "mybox.local"], log: (line) => logs.push(line) });
+  const gPort = await listen(guarded.server);
+  for (const host of ["localhost:5173", "127.0.0.1:5173", "[::1]:5173", "192.168.1.20:5173", "[fd00::5]", "kachat.localhost", "kachat.example.com", "KaChat.Example.com.:443", "nas.home.example:5173", "mybox:5173", "mybox.local"]) {
+    const r = await request(gPort, `/nc-proxy/${UP}/echo`, { headers: { host } });
+    check(`host guard: ${host} is answered`, r.status === 200, `got ${r.status}`);
+  }
+  for (const host of ["attacker.example", "attacker.example:5173", "kachat.example.com.attacker.example", "home.example", "localhost.attacker.example", "evilmybox"]) {
+    lastSeen = null;
+    const r = await request(gPort, `/nc-proxy/${UP}/echo`, { headers: { host } });
+    check(`host guard: ${host} is refused before anything goes out`, r.status === 403 && lastSeen === null && r.body.includes("KACHAT_ALLOWED_HOSTS"), `got ${r.status}`);
+  }
+  const probe = await request(gPort, "/nc-proxy/__probe", { headers: { host: "attacker.example" } });
+  check("host guard: a rebound name finds no relay (the probe is refused too)", probe.status === 403);
+  check("host guard: the refusal is logged with the setting to change", logs.some((l) => l.includes('"attacker.example"') && l.includes("KACHAT_ALLOWED_HOSTS=attacker.example")), logs[0]);
+  const before = logs.length;
+  await request(gPort, "/nc-proxy/__probe", { headers: { host: "attacker.example" } });
+  check("host guard: the same name is logged once a minute, not per request", logs.length === before);
+  // The request reaches us from loopback, a trusted proxy by default: its X-Forwarded-Host must be
+  // allowed as well, so a rebinding page cannot pass by naming localhost in it, nor the reverse.
+  const fwd = await request(gPort, `/nc-proxy/${UP}/echo`, { headers: { host: "127.0.0.1:5173", "x-forwarded-host": "attacker.example" } });
+  check("host guard: a trusted proxy's X-Forwarded-Host must be allowed too", fwd.status === 403, `got ${fwd.status}`);
+  const fwdOk = await request(gPort, `/nc-proxy/${UP}/echo`, { headers: { host: "127.0.0.1:5173", "x-forwarded-host": "kachat.example.com" } });
+  check("host guard: behind a proxy, an allowed X-Forwarded-Host is answered", fwdOk.status === 200, `got ${fwdOk.status}`);
+  const spoof = await request(gPort, `/nc-proxy/${UP}/echo`, { headers: { host: "attacker.example", "x-forwarded-host": "localhost" } });
+  check("host guard: naming localhost in X-Forwarded-Host does not help a rebound Host", spoof.status === 403, `got ${spoof.status}`);
+  // The ChangeNOW same-origin check can no longer be met under a rebound name: refused first.
+  const cnGuarded = relayServer({ allowedHosts: "", changenowApiKey: "k".repeat(32) });
+  const cnGPort = await listen(cnGuarded.server);
+  lastSeen = null;
+  const rebound = await request(cnGPort, `/nc-proxy/${encodeURIComponent("https://api.changenow.io")}/v2/exchange/min-amount?a=1`, { headers: { host: "attacker.example:5173", "sec-fetch-site": "same-origin", referer: "http://attacker.example:5173/" } });
+  check("host guard: a rebound page cannot reach the ChangeNOW key", rebound.status === 403 && rebound.body.includes("KACHAT_ALLOWED_HOSTS"), `got ${rebound.status}`);
+  const byIp = await request(cnGPort, "/nc-proxy/__probe", { headers: { host: "10.0.0.7:5173" } });
+  check("host guard: with nothing set, the Docker default opened by IP still works", byIp.status === 200 && byIp.body === "kachat-proxy");
+  cnGuarded.server.close();
+  const any = relayServer({ allowedHosts: "*" });
+  const anyPort = await listen(any.server);
+  check("host guard: \"*\" answers any name", (await request(anyPort, "/nc-proxy/__probe", { headers: { host: "anything.example" } })).status === 200);
+  any.server.close();
+  check("host guard: no allowedHosts option (the sidecar) answers any name", (await request(relayPort, "/nc-proxy/__probe", { headers: { host: "anything.example" } })).status === 200);
+  guarded.server.close();
 }
 
 server.close();

@@ -286,6 +286,23 @@ export function singleInputFor(entries, amountSompi, marginSompi = 300_000n) {
   return pick ? [pick] : null;
 }
 
+/** The "txid:index" coins a transaction spends, from its inputs' previous outpoints (a WASM SDK
+ *  Transaction, or its plain form). Unreadable inputs are left out; [] when there are none. */
+export function transactionSpends(transaction) {
+  let inputs = [];
+  try { inputs = Array.from(transaction?.inputs || []); } catch { return []; }
+  const keys = [];
+  for (const input of inputs) {
+    try {
+      const outpoint = input?.previousOutpoint ?? input?.outpoint ?? null;
+      const txid = outpoint?.transactionId;
+      const index = outpoint?.index;
+      if (txid != null && txid !== "" && index != null) keys.push(`${String(txid).toLowerCase()}:${Number(index)}`);
+    } catch { /* an input the SDK can't read back: not held */ }
+  }
+  return keys;
+}
+
 /** "txid:index" keys from a coin-control list: "txid:index" strings, { transactionId, index }
  *  outpoints, or UTXO entries carrying an `outpoint`. Anything unreadable is dropped. */
 export function outpointKeysFrom(list) {
@@ -430,6 +447,16 @@ export function maxSendEntries(entries, selectedOutpoints = null) {
     list = list.sort(bySompiDesc).slice(0, MAX_SEND_INPUT_LIMIT);
   }
   return list.sort(bySompiAsc);
+}
+
+/** The "txid:index" coins a Max send from `entries` (a balance read) would spend right now, by
+ *  the send's own rules: just-spent coins left out, then maxSendEntries (reserved coins dropped,
+ *  the coin-control pick or the largest MAX_SEND_INPUT_LIMIT). The app compares a pinned Max with
+ *  it before a bubble is written. Empty when nothing is left. */
+export function maxSendOutpointKeys(entries, selectedOutpoints = null, now = Date.now()) {
+  const picked = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints.map(String) : null;
+  try { return maxSendEntries(excludeJustSpentUtxos(sanitizeUtxoEntries(entries), now), picked).map(outpointKeyOf); }
+  catch { return []; }
 }
 
 /**

@@ -8,6 +8,7 @@ import {
   archiveAddressBook, importAddressBookArchive, mergeAddressBooks, mergeAddressBookArchives,
   normalizeAddressBookAddress, onAddressBookChange,
   addressBookExportJson, addressBookExportFileName, importAddressBookExport,
+  sharedContactsFileJson, mergeSharedContactsFile,
   ADDRESS_BOOK_ENTRIES_KEY, ADDRESS_BOOK_DELETED_KEY,
 } from "../ui/address-book-store.js";
 import { kaChatFolderFileName } from "../ui/nextcloud.js";
@@ -369,6 +370,31 @@ test("import: adds, updates only from a newer edit, lifts a tombstone, brings th
   wallet = WALLET_B;
   assert.deepEqual(importAddressBookExport(exported), { added: 5, updated: 0, skipped: 0 });
   assert.equal(addressBookPhoto(DAVE), PHOTO);
+});
+
+test("importing a contact deleted here stamps it now, so the server's older tombstone doesn't delete it again", () => {
+  fresh();
+  saveAddressBookEntry({ address: BOB, name: "Bob" });
+  const exported = addressBookExportJson(); // Bob, as of now
+  tick(86_400_000);
+  tick(400); // mid-second: the file keeps whole seconds
+  removeAddressBookEntry(BOB);
+  const serverFile = sharedContactsFileJson(); // the server now holds the tombstone
+  const deletedAt = clock;
+  tick(86_400_000);
+  assert.deepEqual(importAddressBookExport(exported), { added: 1, updated: 0, skipped: 0 });
+  assert.equal(addressBookEntry(BOB).updatedAt, clock, "an import that brings it back is an edit made now");
+  tick();
+  mergeSharedContactsFile(serverFile);
+  assert.equal(addressBookEntry(BOB)?.name, "Bob", "the older tombstone loses");
+  // Brought back in the same second it was deleted in: still past the tombstone's second.
+  removeAddressBookEntry(BOB);
+  const sameSecond = sharedContactsFileJson();
+  importAddressBookExport(exported);
+  assert.ok(addressBookEntry(BOB).updatedAt >= Math.floor(clock / 1000) * 1000 + 1000);
+  mergeSharedContactsFile(sameSecond);
+  assert.equal(addressBookEntry(BOB)?.name, "Bob");
+  assert.ok(deletedAt < clock);
 });
 
 test("import refuses: not an export, wrong type or version, no addresses, no wallet", () => {

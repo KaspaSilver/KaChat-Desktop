@@ -504,7 +504,15 @@ export function importAddressBookExport(input) {
       updated += 1;
     } else {
       const idTaken = [...c.entries.values()].some((e) => e.id === incoming.id);
-      c.entries.set(address, idTaken ? { ...incoming, id: newUuid() } : incoming);
+      let revived = idTaken ? { ...incoming, id: newUuid() } : incoming;
+      // Bringing back a contact deleted here is an edit made now: with the file's older
+      // updatedAt the deletion, already on the server, would win the next merge and delete it
+      // again. Past the tombstone's second too, since the files keep whole seconds.
+      const tombstone = c.deleted.get(address);
+      if (tombstone !== undefined) {
+        revived = { ...revived, updatedAt: Math.max(config.now(), (Math.floor(tombstone / 1000) + 1) * 1000) };
+      }
+      c.entries.set(address, revived);
       if (photo) { try { writePhoto(c.wallet, address, photo); } catch { /* storage full: keeps the entry */ } }
       added += 1;
     }

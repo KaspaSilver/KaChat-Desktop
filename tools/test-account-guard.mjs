@@ -11,7 +11,8 @@ import {
 } from "../ui/spending-discovery.js";
 import { spendingStateFromRecord, spendingRecordFromState } from "../engine/quantum.js";
 import { KaspaEngine } from "../engine/index.js";
-import { createSelfStashEnvelope, sendSelfStashOnchain, selfStashAccountMismatch, SELF_STASH_ACCOUNT_CHANGED } from "../engine/messages.js";
+import { createSelfStashEnvelope, sendSelfStashOnchain, selfStashAccountMismatch, SELF_STASH_ACCOUNT_CHANGED, sendMessageOnchain, sendHandshakeOnchain, sendAccountMismatch, SEND_ACCOUNT_CHANGED } from "../engine/messages.js";
+import { readFileSync } from "node:fs";
 
 let pass = 0;
 const tests = [];
@@ -113,6 +114,43 @@ test("the owner's own note goes on to the send", async () => {
   // which fails here on purpose rather than broadcasting anything.
   await assert.rejects(() => sendSelfStashOnchain({ engine, envelope }), (error) => error?.message !== SELF_STASH_ACCOUNT_CHANGED);
   assert.equal(engine.connected, 1);
+});
+
+// A 1:1 message or handshake started in A is never signed by B (iOS dfaba68): the owner read before
+// the build's awaits is checked before the connect and again right before the keys are used.
+test("a 1:1 send started in A is refused once B is active, before and after the connect", async () => {
+  assert.equal(sendAccountMismatch(A, B), true);
+  assert.equal(sendAccountMismatch(A, A), false);
+  assert.equal(sendAccountMismatch("", B), false, "no owner: not checked");
+  const envelope = { toAddress: PARTNER, protocolBytes: new Uint8Array([1]) };
+  for (const send of [sendMessageOnchain, sendHandshakeOnchain]) {
+    const before = fakeEngine(B);
+    const statuses = [];
+    await assert.rejects(() => send({ engine: before, envelope, ownerAddress: A, onStatus: (s) => statuses.push(s) }), { message: SEND_ACCOUNT_CHANGED });
+    assert.equal(before.connected, 0, `${send.name}: refused before connecting`);
+    assert.equal(statuses.length, 0, `${send.name}: nothing reported as sending`);
+    const during = fakeEngine(A, { switchTo: B });
+    await assert.rejects(() => send({ engine: during, envelope, ownerAddress: A }), { message: SEND_ACCOUNT_CHANGED });
+    assert.equal(during.connected, 1, `${send.name}: caught after the connect`);
+    // The owner's own send goes on to the transaction build (the fake has no node).
+    const own = fakeEngine(A);
+    await assert.rejects(() => send({ engine: own, envelope, ownerAddress: A }), (error) => error?.message !== SEND_ACCOUNT_CHANGED);
+  }
+});
+
+test("the app hands the owner to every 1:1 send and drops a group pass that spans a switch", () => {
+  const app = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  const pipeline = app.slice(app.indexOf("async function runEngineSendPipeline"), app.indexOf("function describeThrown"));
+  assert.ok(pipeline.indexOf("const ownerAddress = engine.address") > 0);
+  assert.ok(pipeline.indexOf("const ownerAddress = engine.address") < pipeline.search(/await [a-z]/), "owner read before any await");
+  assert.match(pipeline, /sendMessageOnchain\(\{[\s\S]*?ownerAddress,/);
+  const handshake = app.slice(app.indexOf("async function sendOutgoingHandshake"), app.indexOf("// --- Contact notes for chats without a handshake"));
+  assert.ok(handshake.indexOf("const ownerAddress = engine.address") > 0);
+  assert.ok(handshake.indexOf("const ownerAddress = engine.address") < handshake.search(/await [a-z]/), "owner read before any await");
+  assert.match(handshake, /sendHandshakeOnchain\(\{[\s\S]*?ownerAddress,/);
+  const groups = app.slice(app.indexOf("async function syncGroupsNow"), app.indexOf("const leftoverGroupSendsSettled"));
+  assert.ok(groups.indexOf("accountGuard(") < groups.indexOf("await mgr.syncGroups()"));
+  assert.match(groups, /if \(!account\.still\(\) \|\| result\?\.skipped === "account-changed"\) return 0;\s*const changed = applyGroupSyncResult/);
 });
 
 // The Discover sweep belongs to the account it started for (iOS e571f45, IOS-107, owner's Go Fix

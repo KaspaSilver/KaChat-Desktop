@@ -240,6 +240,49 @@ test("handshakes: paging stops at the 20-page cap and the cursor holds there", a
   assert.equal(result.nextCursor, DAY + (50 + 19 * 49) * 10);
 });
 
+test("handshakes: a failed first indexer page holds the cursor even when REST found newer rows", async () => {
+  resetIndexer();
+  const realFetch = globalThis.fetch;
+  const restTx = {
+    transaction_id: txidOf("r", 1), block_time: DAY + 900_000,
+    payload: hexOf("kchat:1:handshake:") + "ab".repeat(8),
+    inputs: [{ previous_outpoint_address: PEER }], outputs: [{ script_public_key_address: ME }],
+  };
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/handshakes/by-receiver")) return new Response(JSON.stringify({ error: "down" }), { status: 503 });
+    if (url.pathname.includes("/full-transactions")) return new Response(JSON.stringify([restTx]), { status: 200 });
+    return realFetch(input);
+  };
+  try {
+    const result = await syncHandshakes(DAY);
+    assert.deepEqual(result.handshakes.map((h) => h.txid), [txidOf("r", 1)], "the REST row still arrives");
+    assert.equal(result.indexerComplete, false);
+    assert.equal(result.nextCursor, DAY, "not past rows only the indexer can serve");
+    assert.ok(result.errors.some((e) => /Indexer/.test(e)));
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test("notes to self: a row read back before it was accepted is stored sent, never pending", async () => {
+  resetIndexer();
+  const row = { ...messageRow(1, DAY + 1000), sender: ME, accepting_daa_score: null };
+  const other = { ...messageRow(2, DAY + 2000), accepting_daa_score: null };
+  indexer.messages.push(row);
+  const self = await syncConversationFromIndexer({
+    conversationId: "self", contact: { id: "me", address: ME }, walletAddress: ME, privateKeyHex: "11".repeat(32),
+    decryptMessage, cursor: 0, indexerUrl: INDEXER, alias: ALIAS,
+  });
+  assert.equal(self.messages[0].direction, "outgoing");
+  assert.equal(self.messages[0].status, "confirmed", "a note to self on the chain is not \"Sending\"");
+  assert.equal(self.messages[0].daaScore, null);
+  // A peer's not-yet-accepted message keeps its pending state (it shows no delivery status).
+  resetIndexer();
+  indexer.messages.push(other);
+  const peer = await syncMessages(0);
+  assert.equal(peer.messages[0].direction, "incoming");
+  assert.equal(peer.messages[0].status, "pending");
+});
+
 test("outgoing handshakes: full pages are followed from the cursor (no rewind)", async () => {
   resetIndexer();
   for (let i = 1; i <= 75; i += 1) indexer.handshakesOut.push({ tx_id: txidOf("o", i), receiver: PEER, block_time: DAY + i * 1000, message_payload: "00" });
@@ -334,6 +377,25 @@ test("group since: the page cap holds the cursor where the next page would start
   // rows per page; after page 20 the next would start at T + 199 + 19 * 199.
   assert.equal(manager.sinceBlockTime, T + 199 + 19 * 199);
   assert.ok(manager.sinceBlockTime < T + 5000, "not past rows never read");
+});
+
+test("group pass: an account switch mid-pass returns nothing and writes nothing for the next account", async () => {
+  const T = DAY + 95_000;
+  const rows = Array.from({ length: 5 }, (_, i) => ({ txId: `s${i}`, blockTime: T + 1 + i, payloadString: "x" }));
+  const { manager } = groupHarness(rows);
+  const OTHER = `${ADDRESS_PREFIX}qpother0000000000000000000000000000000000000000000000000000`;
+  const engine = manager.engine;
+  const realSince = engine.scanGroupMessagesSince;
+  engine.scanGroupMessagesSince = async (...args) => { const page = await realSince(...args); engine.address = OTHER; return page; };
+  manager.sinceSupported = true;
+  manager.sinceBlockTime = T;
+  manager._sincePasses = 1;
+  const before = localStorage.getItem("kachat-groups-v1");
+  const result = await manager.syncGroups();
+  assert.equal(result.skipped, "account-changed");
+  assert.deepEqual(result.messages, []);
+  assert.deepEqual(result.controls, []);
+  assert.equal(localStorage.getItem("kachat-groups-v1"), before, "no group record written under either account");
 });
 
 // --- The helper on its own --------------------------------------------------------------------

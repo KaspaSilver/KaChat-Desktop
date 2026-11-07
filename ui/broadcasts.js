@@ -2137,7 +2137,8 @@ async function startVoiceRecording() {
     return;
   }
   const recorder = ensureVoiceRecorder();
-  if (!recorder || recorder.isRecording()) return;
+  // A second tap while the mic prompt is up is ignored rather than opening another stream.
+  if (!recorder || recorder.isRecording() || recorder.isStarting?.()) return;
   // With a Nextcloud server connected the mic asks on chain or via Nextcloud, like the "+" sheet's
   // Voice Message in 1:1 and group chats (iOS 8b13460); Back closes the question. Without one it
   // records on chain straight away.
@@ -2145,7 +2146,7 @@ async function startVoiceRecording() {
   if (deps.isNextcloudConnected?.() && deps.chooseMediaRoute) {
     const route = await deps.chooseMediaRoute("voice");
     if (route !== "chain" && route !== "nextcloud") return;
-    if (activeChannel !== channel || recorder.isRecording()) return;
+    if (activeChannel !== channel || recorder.isRecording() || recorder.isStarting?.()) return;
     voiceViaNextcloud = route === "nextcloud";
   } else {
     voiceViaNextcloud = false;
@@ -2159,6 +2160,8 @@ async function startVoiceRecording() {
     voiceViaNextcloud = false;
     return;
   }
+  // Cancelled (trash, room left) while the mic prompt was up: nothing is recording.
+  if (!recorder.isRecording()) return;
   showRecordingBar("recording");
   updateRecordingFeeEstimate(0);
 }
@@ -2229,7 +2232,8 @@ async function sendBroadcastVoice({ blob, mimeType, channel, seconds }) {
 let voiceRecordedSeconds = 0;
 
 function cancelVoiceRecordingIfActive() {
-  if (voiceRecorder?.isRecording()) voiceRecorder.stop(true);
+  // Also a start still on the mic prompt, so it can't go on to record with no bar showing it.
+  if (voiceRecorder?.isRecording() || voiceRecorder?.isStarting?.()) voiceRecorder.stop(true);
 }
 
 // ---------------------------------------------------------------------------

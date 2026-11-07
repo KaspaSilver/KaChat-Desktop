@@ -383,6 +383,10 @@ export async function syncConversationFromIndexer({
       // outgoing on every device — not "incoming from a stranger". Decryption already scopes the
       // by-sender(self) query to self→self messages (messages to others fail with your key).
       const isSelfChat = contact.address === walletAddress;
+      // A note to self read back from the chain went out: it is never "Sending". An incoming
+      // row's pending state shows nothing, but an outgoing one stored pending kept its clock
+      // forever, since the txid dedupe never lets a later read update it.
+      const accepted = row.accepting_daa_score != null || isSelfChat;
       messages.push({
         id: `indexer-${txid}`,
         conversationId,
@@ -391,10 +395,10 @@ export async function syncConversationFromIndexer({
         text: clearText,
         sender: row.sender || contact.address,
         receiver: walletAddress,
-        status: row.accepting_daa_score != null ? "confirmed" : "pending",
+        status: accepted ? "confirmed" : "pending",
         txid,
         daaScore: row.accepting_daa_score != null ? String(row.accepting_daa_score) : null,
-        confirmations: row.accepting_daa_score != null ? 1 : 0,
+        confirmations: accepted ? 1 : 0,
         network: NETWORK,
         payloadHex: String(row.message_payload || ""),
         payloadBytes: Math.ceil(String(row.message_payload || "").length / 2),
@@ -795,6 +799,9 @@ export async function syncIncomingHandshakesFromIndexer({
     if (paged.error) errors.push(`Indexer (page ${paged.pages + 1}): ${paged.error?.message || paged.error}`);
   } catch (error) {
     errors.push(`Indexer: ${error.message}`);
+    // The indexer served nothing this pass: the cursor stays where it was, so the rows REST did
+    // not see (a handshake without a payment output to us) are read once the indexer answers.
+    indexerIncompleteAt = 0;
   }
 
   // Original KaChat does not rely on the handshake indexer alone. It also

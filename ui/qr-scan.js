@@ -147,6 +147,11 @@ function openSession(options, resolve) {
     scanning: false,
     rafId: 0,
     stream: null,
+    // Bumped by every camera start and by every stop. "Enter it manually" then "Try the camera
+    // again" while the permission prompt is up leaves the first start in flight: a start whose
+    // token is no longer current stops its own stream and goes no further, so only one camera
+    // and one frame loop ever run.
+    startToken: 0,
   };
 
   // --- overlay ---------------------------------------------------------------
@@ -227,6 +232,7 @@ function openSession(options, resolve) {
   // Every path out of the scanner ends here. Idempotent, and it never throws, so a
   // failure while tidying up can't leave a track running.
   function stopCamera() {
+    state.startToken += 1; // any start still waiting on the prompt is superseded
     state.scanning = false;
     if (state.rafId) {
       try { cancelAnimationFrame(state.rafId); } catch { /* ignore */ }
@@ -293,26 +299,35 @@ function openSession(options, resolve) {
     const reason = cameraScanUnavailableReason();
     if (reason) { showManual(reason); return; }
     status.textContent = "Starting the camera...";
+    // Whatever an earlier start left running goes first (a no-op normally: showManual stopped it).
+    stopCamera();
+    const token = state.startToken;
+    const current = () => !state.closed && state.wantsCamera && token === state.startToken;
+    const release = (stream) => {
+      try { stream.getTracks().forEach((track) => track.stop()); } catch { /* ignore */ }
+    };
     let stream = null;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
     } catch (error) {
-      if (state.closed) return;
+      if (!current()) return; // dismissed or superseded: a newer start owns the screen
       showManual(describeCameraError(error));
       return;
     }
-    // The overlay may have been dismissed while the permission prompt was up. A stream
-    // that lands after that is nobody's, so stop it now rather than leaking the camera.
-    if (state.closed || !state.wantsCamera) {
-      try { stream.getTracks().forEach((track) => track.stop()); } catch { /* ignore */ }
-      return;
-    }
+    // The overlay may have been dismissed, or the camera started again, while the permission
+    // prompt was up. A stream that lands after that is nobody's: stop it rather than leak it.
+    if (!current()) { release(stream); return; }
     state.stream = stream;
     try { video.srcObject = stream; } catch { /* ignore */ }
     try { await video.play(); } catch { /* autoplay policies; the frame loop still reads it */ }
-    if (state.closed || !state.wantsCamera) { stopCamera(); return; }
+    if (!current()) {
+      if (state.stream === stream) stopCamera();
+      else release(stream);
+      return;
+    }
     status.textContent = hint;
     state.scanning = true;
+    if (state.rafId) { try { cancelAnimationFrame(state.rafId); } catch { /* ignore */ } state.rafId = 0; }
     tick();
   }
 

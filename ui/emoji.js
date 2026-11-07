@@ -148,7 +148,8 @@ export function openEmojiReactionPicker({ onPick, title = "React" }) {
     close();
     onPick?.(emoji);
   };
-  host.onkeydown = (event) => { if (event.key === "Escape") close(); };
+  // Handled here: the page's own Escape (a group chat or sheet beneath) must not close too.
+  host.onkeydown = (event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); } };
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +311,7 @@ export function openComposerEmojiPopover({ anchor, onSelect }) {
     if (button) onSelect?.(button.dataset.emoji);
   });
   const onDown = (event) => { if (!popover.contains(event.target) && event.target !== anchor && !anchor.contains(event.target)) closeComposerEmojiPopover(); };
-  const onKey = (event) => { if (event.key === "Escape") closeComposerEmojiPopover(); };
+  const onKey = (event) => { if (event.key === "Escape") { event.preventDefault(); closeComposerEmojiPopover(); } };
   setTimeout(() => {
     document.addEventListener("mousedown", onDown, true);
     document.addEventListener("keydown", onKey, true);

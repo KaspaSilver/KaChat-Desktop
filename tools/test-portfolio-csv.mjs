@@ -179,6 +179,33 @@ test("an unnamed row first fills the seed, so a later named row makes its own po
   assert.equal(portfolioCsvImportMessage(result), `Imported 2 transactions into ${PORTFOLIO_SEED_NAME}, Named`);
 });
 
+test("rows of one file in the same second are all kept: a buy and a sell never collapse into one", () => {
+  const state = { activeId: "A", portfolios: [p("A", "Alpha", { updatedAt: 1 })] };
+  const result = importPortfolioCsv(state, csv(HEADER,
+    row("2026-03-03 03:03:00", "buy", 50, 5, "", "Alpha"),
+    row("2026-03-03 03:03:00", "sell", 20, 3, "", "Alpha")), opts());
+  assert.equal(result.count, 2);
+  assert.deepEqual(state.portfolios[0].transactions.map((t) => [t.type, t.amountKas]), [["buy", 50], ["sell", 20]]);
+});
+
+test("re-importing an export is a no-op: milliseconds and same-second rows match the row they came from", () => {
+  const rows = [
+    tx("ms", ts("2026-04-04 04:04:04") + 123, { amountKas: 100, fiatValue: 10 }), // address import / Add to Portfolio
+    tx("b", ts("2026-04-04 04:05:00"), { amountKas: 50, fiatValue: 5 }),
+    tx("s", ts("2026-04-04 04:05:00"), { type: "sell", amountKas: 20, fiatValue: 3 }),
+  ];
+  const state = { activeId: "A", portfolios: [p("A", "Main", { updatedAt: 1, transactions: rows.map((r) => ({ ...r })) })] };
+  const result = importPortfolioCsv(state, portfolioCsvText(state.portfolios[0]), opts());
+  assert.equal(result.count, 3);
+  assert.deepEqual(state.portfolios[0].transactions, rows); // same ids, same milliseconds, no copies
+  // One old row in that second, two in the file: the first replaces it, the second is added.
+  const one = { activeId: "A", portfolios: [p("A", "Main", { updatedAt: 1, transactions: [tx("b", ts("2026-04-04 04:05:00"))] })] };
+  importPortfolioCsv(one, csv(HEADER,
+    row("2026-04-04 04:05:00", "buy", 9, 9, "", "Main"),
+    row("2026-04-04 04:05:00", "sell", 8, 8, "", "Main")), opts());
+  assert.deepEqual(one.portfolios[0].transactions.map((t) => [t.id === "b", t.type, t.amountKas]), [[true, "buy", 9], [false, "sell", 8]]);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try { fn(); console.log(`ok - ${name}`); }

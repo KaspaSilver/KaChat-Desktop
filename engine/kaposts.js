@@ -511,6 +511,9 @@ export async function submitKaPost({ engine, text, mentionedPubkeys = [] }) {
  * top-level posts.
  */
 export async function submitKaPostReply({ engine, text, postId, parentAuthorPubkey = null, mentionedPubkeys = [] }) {
+  // The parent is named by its txid. Without one the payload carries an empty post id: the fee is
+  // paid and the reply belongs to nothing - refused before anything is signed or sent.
+  if (!/^[0-9a-f]{64}$/i.test(String(postId || ""))) throw new Error("The post you're replying to isn't on the network yet.");
   const b64 = utf8ToBase64(KACHAT_MARKER + String(text || ""));
   const me = requesterPubkeyFor(engine);
   const clean = [...new Set([parentAuthorPubkey, ...(Array.isArray(mentionedPubkeys) ? mentionedPubkeys : [])]

@@ -316,10 +316,13 @@ a backup) and restore on the new address.
 
 - `ui/origin-migration.js`, called first thing from `ui/app.js` (`await originMigrationGate()`),
   before anything touches storage; `ui/pwa.js` registers no service worker on the old address.
-- Hand-off: the old page opens `https://desktop.kachat.app/?migrate=1`; the new page (only with
-  that parameter **and** a `window.opener`) sends `ready` with a fresh 32-byte nonce to exactly
-  `https://kachat.app`; the old page answers once, to exactly `https://desktop.kachat.app`, with the
-  nonce and a snapshot; the new page checks origin, source window, nonce, shapes and size
+- Hand-off: the old page opens `https://desktop.kachat.app/?migrate=1#kachat-move=<token>` (a
+  fresh 32-byte token of that move screen's, in the fragment); the new page (only with that
+  parameter, a well-formed token **and** a `window.opener`) drops both from the address bar and
+  sends `ready` with a fresh 32-byte nonce to exactly `https://kachat.app`; the old page answers
+  once, to exactly `https://desktop.kachat.app`, with the nonce, its token, its path and a
+  snapshot; the new page checks origin, source window, nonce, token, a path under `/desktop/`
+  (so another kachat.app page holding the opener window cannot push one), shapes and size
   (128 Mi characters), shows the accounts and asks the user, replaces its KaChat data, reads it
   back, and acknowledges with a SHA-256 of what it stored. Only a matching hash marks the old
   address "moved". No data in URLs, no `"*"` target origins, nothing decrypted.

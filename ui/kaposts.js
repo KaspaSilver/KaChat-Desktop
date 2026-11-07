@@ -63,6 +63,11 @@ import { KAS_UNIT } from "../engine/network.js";
 import { decodeAddress, AddressVersion } from "../engine/kachat-names/registry-state.js";
 import { kasTextFromSompi } from "../engine/amounts.js";
 import { renderKaPostsMarkdown, applyKaPostsMarkdownAction } from "./kaposts-markdown.js";
+import { accountGuard } from "./account-guard.js";
+import {
+  kapostsOwnedAction, dropKaPostsHeldActions, kapostsCanReplyTo, KAPOSTS_REPLY_NOT_ON_NETWORK,
+  KAPOSTS_ACCOUNT_CHANGED, kapostsAccountChangedError,
+} from "./kaposts-held.js";
 import {
   kapostsCharCount,
   kapostsClampChars,
@@ -743,11 +748,17 @@ async function checkForNewPosts() {
   if (deps.kaPostsSuppressed?.()) return;
   const source = feedSourceFor(activeFeedTab);
   if (source !== loadedFeedSource) return;
+  // The source alone is not enough: once the new account's first page is in after a switch, the
+  // source reads the same again ("following" for both, with the other wallet's follows), and a
+  // reload keeps it too. The feed generation moves on every reload, tab switch and account reset;
+  // the owner pins the account.
+  const generation = feedGeneration;
+  const owner = accountGuard(() => deps?.engine?.address);
   checkingForNewPosts = true;
   try {
     const result = await fetchFeedPage(null);
     // The feed may have been refreshed or switched while this was in flight.
-    if (source !== loadedFeedSource || feedLoading) return;
+    if (source !== loadedFeedSource || feedLoading || generation !== feedGeneration || !owner.still()) return;
     const known = new Set(remotePosts.map((post) => post.remoteId).filter(Boolean));
     // Page one against what is on screen, muted and blocked authors left out: the pill never
     // counts a post it would not show (iOS checkForNewPosts).
@@ -1349,6 +1360,12 @@ function scheduleUndoable(key, action, undo = null, label = null) {
     action();
     return;
   }
+  // The account that armed it, captured now: every submit signs with whatever key deps.engine
+  // holds when the countdown ends, so a hold that outlived an account switch must not go out as
+  // the new account. resetKaPostsForAccount drops every hold; this is the backstop.
+  const ownedAction = kapostsOwnedAction(action, () => deps?.engine?.address, (owner) => {
+    deps?.appendEngineLog?.(`KaPost ${key.split(":")[0]} dropped: armed by ${owner || "no account"}, which is no longer active`);
+  });
   const timer = setTimeout(() => {
     pendingActions.delete(key);
     stopTickerIfIdle();
@@ -1358,7 +1375,7 @@ function scheduleUndoable(key, action, undo = null, label = null) {
     // come back. The action re-renders at best one surface, and only after its network round
     // trip, which left a dead capsule on the cell.
     renderAll();
-    action();
+    ownedAction();
   }, UNDO_DELAY_MS);
   pendingActions.set(key, { deadline: Date.now() + UNDO_DELAY_MS, timer, undo, label });
   startTicker();
@@ -1391,6 +1408,14 @@ function stopTickerIfIdle() {
     clearInterval(countdownTicker);
     countdownTicker = null;
   }
+}
+
+// Account switch: every held post, like, repost, vote, reply, edit and delete was the previous
+// account's, and its countdown would end signing with the new one's key. Dropped outright, not
+// undone - see dropKaPostsHeldActions.
+function dropAllUndoables() {
+  dropKaPostsHeldActions(pendingActions, clearTimeout);
+  stopTickerIfIdle();
 }
 
 // ---------------------------------------------------------------------------
@@ -1869,7 +1894,9 @@ function postCellHtml(post, { inThread = false, isRoot = false, replyInline = tr
         <div class="kaposts-actions">
           ${/* The focused post of a thread has no reply button of its own: its reply box is pinned
                under the thread (iOS threadCell onComment: isRoot ? nil). */ ""}
-          ${showReply ? `<button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${pid}"` : `data-kaposts-open="${pid}"`} title="${replyInline ? "Reply" : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
+          ${/* Reply stays off on a post with no txid yet (pending, failed, not confirmed): there
+               is nothing on the network to answer, see submitReply. */ ""}
+          ${showReply ? `<button class="kaposts-action" type="button" ${replyInline ? `data-kaposts-reply-to="${pid}"${kapostsCanReplyTo(post) ? "" : " disabled"}` : `data-kaposts-open="${pid}"`} title="${replyInline ? (kapostsCanReplyTo(post) ? "Reply" : "Not on the network yet") : "Replies"}" aria-label="${replyInline ? "Reply to this post" : "Open replies"}">
             ${ICONS.comment}${commentCount > 0 ? `<span>${commentCount}</span>` : ""}
           </button>` : ""}
           ${pendingActionButtonHtml(`like:${post.id}`) ?? `<button class="kaposts-action${post.likedByMe ? " active-like" : ""}" type="button" data-kaposts-like="${pid}" title="Like">
@@ -2520,13 +2547,21 @@ function scheduleThread(segments) {
 async function continueThread(localId) {
   const state = threadRemainders.get(localId);
   if (!state) return;
+  // The chain belongs to the account that started it. Each segment is its own transaction, signed
+  // when it goes out, so a switch mid-chain would post the rest as the new account: stop at the
+  // next segment once the account changed or the reset dropped this chain's ledger.
+  const owner = accountGuard(() => deps?.engine?.address);
+  const stillOurs = () => owner.still() && threadRemainders.get(localId) === state;
   mutatePost(localId, (p) => { p.delivery = "pending"; });
   renderAll();
   try {
     if (state.rootText != null) {
       const rootText = state.rootText;
-      const txid = await submitWithUtxoRetry(async () =>
-        submitKaPost({ engine: deps.engine, text: rootText, mentionedPubkeys: await mentionedPubkeysFor(rootText) }));
+      const txid = await submitWithUtxoRetry(async () => {
+        const mentionedPubkeys = await mentionedPubkeysFor(rootText);
+        if (!stillOurs()) throw kapostsAccountChangedError();
+        return submitKaPost({ engine: deps.engine, text: rootText, mentionedPubkeys });
+      });
       mutatePost(localId, (p) => { p.remoteId = txid; });
       state.rootText = null;
       state.parentTxId = txid;
@@ -2534,18 +2569,27 @@ async function continueThread(localId) {
     const myPubkey = safeRequesterPubkey();
     while (state.segments.length && state.parentTxId) {
       await new Promise((resolve) => setTimeout(resolve, 1500)); // let the previous change settle
+      if (!stillOurs()) throw kapostsAccountChangedError();
       const segment = state.segments[0];
-      const txid = await submitWithUtxoRetry(async () =>
-        submitKaPostReply({
-          engine: deps.engine, text: segment, postId: state.parentTxId, parentAuthorPubkey: myPubkey,
-          mentionedPubkeys: await mentionedPubkeysFor(segment),
-        }));
+      const txid = await submitWithUtxoRetry(async () => {
+        const mentionedPubkeys = await mentionedPubkeysFor(segment);
+        // Re-checked on every try: a UTXO retry after a switch would sign with the new key.
+        if (!stillOurs()) throw kapostsAccountChangedError();
+        return submitKaPostReply({
+          engine: deps.engine, text: segment, postId: state.parentTxId, parentAuthorPubkey: myPubkey, mentionedPubkeys,
+        });
+      });
       state.segments.shift();
       state.parentTxId = txid;
     }
     threadRemainders.delete(localId);
     mutatePost(localId, (p) => { p.delivery = "sent"; });
   } catch (error) {
+    if (error?.code === KAPOSTS_ACCOUNT_CHANGED) {
+      // Nothing to show: the cards were the previous account's and left with it.
+      deps.appendEngineLog?.("KaPost thread stopped: the account changed before every segment went out");
+      return;
+    }
     // Not confirmed: the remainders stay, but with no Retry to resume them (iOS e5a9b11).
     mutatePost(localId, (p) => { p.delivery = kapostsFailureDelivery(error); p.failureReason = error?.message || String(error); });
     deps.appendEngineLog?.(`KaPost thread submit failed (resumable): ${error.message}`);
@@ -2789,6 +2833,16 @@ function loadMoreThreadReplies(postId) {
 }
 
 async function submitReply(parent, text) {
+  // A reply names its parent by txid. To a post of yours still pending, failed or not confirmed
+  // it would go out with no parent - the fee paid and the reply lost - so it waits, as Retry does
+  // (the composer and the pinned bar check first and keep the words; this is the backstop). The
+  // freshest copy is read: the one the composer captured may predate the parent landing.
+  const freshParent = findPost(parent?.id) || parent;
+  if (!kapostsCanReplyTo(freshParent)) {
+    deps.showToast?.(KAPOSTS_REPLY_NOT_ON_NETWORK);
+    return;
+  }
+  parent = freshParent;
   const comment = makeLocalPost(text);
   // The indexer orders replies newest first, so the new one goes to the TOP straight away
   // rather than out of view at the bottom (iOS 7f82118).
@@ -4314,11 +4368,16 @@ function kaPostsNotificationAction(n, text) {
 async function pollKaPostNotificationsForPings() {
   if (!deps?.engine?.address) return;
   if (deps.kaPostsSuppressed?.()) return;
+  // The notifications are the account's that asked. Landing after a switch they would be read
+  // against the new account's seen list - seeding it with ids that are not its own, or pinging
+  // the new account about the previous one's likes and replies - so they are dropped.
+  const owner = accountGuard(() => deps?.engine?.address);
   let raw;
   try { raw = (await fetchKaPostNotifications({ engine: deps.engine })).notifications; } catch { return; }
+  if (!owner.still()) return;
   if (!Array.isArray(raw) || !raw.length) return;
 
-  const my = deps.engine.address;
+  const my = owner.account;
   const seen = loadSeenKaPostNotificationIds().map(String);
   const seenSet = new Set(seen);
   const firstRun = seen.length === 0;
@@ -4334,6 +4393,7 @@ async function pollKaPostNotificationsForPings() {
     // Warm the KNS cache so posterName can use the actor's domain (peek is cache-only;
     // a cold cache would fall back to the short address even when they own a domain).
     try { await deps.engine.refreshKnsIfNeeded?.([actorAddress]); } catch { /* name falls back */ }
+    if (!owner.still()) return; // switched during the name lookup: nothing below is the new account's
     // The global notification center lists every fresh KaPosts action (mentions included),
     // independent of the per-type OS-ping gate below.
     const centerText = stripKaChatMarker(n.postContent ? (decodePostContent({ postContent: n.postContent }) || "") : "").trim();
@@ -5063,15 +5123,25 @@ function reservedOutpoints() {
 function publishReserved() { setReservedOutpoints(reservedOutpoints()); }
 
 async function scheduleForLater(text, notBefore) {
+  // Built, signed and stored for the account that pressed Post. An account switch during the
+  // build would file the transaction in the NEW account's list (and register it on the indexer
+  // under the new key) while it spends the previous account's coins - so it is dropped.
+  const owner = accountGuard(() => deps?.engine?.address);
   let built;
   try {
     built = await buildScheduledPost({ engine: deps.engine, text, mentionedPubkeys: await mentionedPubkeysFor(text), reservedOutpoints });
   } catch (error) {
+    if (!owner.still()) return; // the composer it would reopen in belongs to someone else now
     deps.appendEngineLog?.(`KaPost schedule build failed: ${error.message}`);
     // iOS scheduleDelayedPost reports both outcomes on the KaPosts confirmation toast, with no
     // explorer link: nothing is on chain until its time comes.
     showActionToast(`Couldn't schedule: ${userFacingError(error)}`);
     restoreComposerDraft(text);
+    return;
+  }
+  if (!owner.still()) {
+    deps.appendEngineLog?.("KaPost schedule dropped: the account changed while it was being built");
+    showActionToast("Not scheduled - the account changed");
     return;
   }
   const entry = { id: built.txId, text, notBefore, createdAt: Date.now(), spentOutpoints: built.spentOutpoints, serialized: built.serialized, safeJson: built.safeJson || null, restJson: built.restJson, onServer: false, status: "scheduled", error: null, submittedAt: null };
@@ -5081,10 +5151,14 @@ async function scheduleForLater(text, notBefore) {
   const when = new Date(notBefore).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   try {
     await scheduleOnServer({ engine: deps.engine, txId: built.txId, notBeforeMs: notBefore, restJson: built.restJson });
+    // Stored under the account that is active NOW: after a switch that is someone else's list.
+    // The entry stays saved in its own account as local-only, which sends the same transaction.
+    if (!owner.still()) return;
     entry.onServer = true;
     saveScheduled();
     showActionToast(`Scheduled for ${when}`);
   } catch (error) {
+    if (!owner.still()) return;
     deps.appendEngineLog?.(`Scheduling on the indexer failed, keeping it local: ${error.message}`);
     showActionToast(`Scheduled for ${when} - sends from this browser`);
   }
@@ -5750,6 +5824,12 @@ export function refreshKaPostsFeed() {
 }
 
 export function resetKaPostsForAccount() {
+  // Held actions and thread chains first, before anything else can yield: their countdowns and
+  // segments would otherwise go out signed with the NEW account's key. Clearing the remainder
+  // ledger is what stops a chain mid-way (continueThread checks it before every segment), and a
+  // failed thread of the old account has no card left to Retry from.
+  dropAllUndoables();
+  threadRemainders.clear();
   closeFeedDrawer(); // the card was the old account's menu
   syncRailBadge();
   loadPrefs();
@@ -6518,6 +6598,12 @@ export function initKaPosts(dependencies) {
     // A poll posts with its question and its valid options only - the empty ones are left out,
     // and the button stays off until there are two to four (iOS postAll / pollIsValid).
     if (poll && (!text || !pollEditorValid())) return;
+    // A reply to a post not on the network yet has no parent to name: the composer stays open with
+    // the words in it until the post lands (submitReply's guard would otherwise drop them).
+    if (replyTarget && !editTarget && !kapostsCanReplyTo(findPost(replyTarget.id) || replyTarget)) {
+      deps.showToast?.(KAPOSTS_REPLY_NOT_ON_NETWORK);
+      return;
+    }
     const pollOptions = poll ? validPollOptions() : null;
     if (editingDraftId) deleteDraft(editingDraftId);
     closeComposer({ keepDraft: false });
@@ -6635,7 +6721,9 @@ export function initKaPosts(dependencies) {
     const text = replyInput.value.trim();
     const topId = threadStack[threadStack.length - 1];
     const target = topId ? findPost(topId) : null;
-    if (!text || !target || !target.remoteId) return;
+    if (!text || !target) return;
+    // The words stay in the box until the post has landed (see submitReply).
+    if (!kapostsCanReplyTo(target)) { deps.showToast?.(KAPOSTS_REPLY_NOT_ON_NETWORK); return; }
     replyInput.value = "";
     updateMeter(replyInput, replyMeter);
     autoGrowReply(); // a sent reply leaves the box grown to its old size otherwise

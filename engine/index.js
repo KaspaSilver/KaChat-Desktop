@@ -3,7 +3,7 @@ import { loadKaspaModule } from "./wasm-loader.js";
 import { maxFeerate } from "./kachat-names/codec.js";
 import { clearNodeRegistry, connectRpc, createStandbyRpc, disconnectRpc, forgetEndpoint, getNodeRegistrySnapshot, isRpcConnectionError, markBadNode, probeRpc, recordFailover } from "./rpc.js";
 import { generateWallet, generateMnemonicWallet, generateMnemonicPhrase, importMnemonic, importMnemonicWithFamily, deriveIdentityAddressRange, importPrivateKey, deriveSpendingWallet, deriveSpendingAddressRange, spendingDerivationPath, normalizeSourceFamily, sourceFamilyPathDescription, WALLET_SOURCE_FAMILIES } from "./wallet.js";
-import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance, SEND_OUTCOME_UNKNOWN } from "./transactions.js";
+import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, estimateOnchainFee, estimateSendFeeDetail, sendPayloadTransaction , estimateOnchainFeeDetail, submitConfirmingAcceptance, excludeJustSpentUtxos, transactionSpends, SEND_OUTCOME_UNKNOWN } from "./transactions.js";
 import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain, SELF_STASH_ACCOUNT_CHANGED } from "./messages.js";
@@ -1146,7 +1146,9 @@ export class KaspaEngine {
   /** UTXOs of `addresses` WITH their covenant ids, as plain objects:
    *  `{ outpoint: { transactionId, index }, amount: bigint, scriptPublicKey: hex (script only),
    *  scriptVersion, blockDaaScore: bigint, isCoinbase, covenantId: hex | null }`. 50 addresses
-   *  per request. */
+   *  per request. Coins a send from here has just spent are left out (noteSpentOutpoints): the
+   *  node lists them until that spend is in a block, and a .kachat name transaction built on one
+   *  would be refused (iOS 3942a5b7). */
   async getUtxosWithCovenants(addresses) {
     this.requireSdk();
     const list = [...new Set((addresses || []).map(String).filter(Boolean))];
@@ -1156,7 +1158,7 @@ export class KaspaEngine {
       const response = await this.withRpc(async (rpc) => checkedUtxoAnswer(await rpc.getUtxosByAddresses(chunk)), { retries: 1, label: "UTXO read" });
       for (const e of response?.entries || []) out.push(plainUtxo(e));
     }
-    return out;
+    return excludeJustSpentUtxos(out);
   }
 
   /** The registry's injected `getUtxosByAddresses` (engine/kachat-names/registry.js). */
@@ -1166,8 +1168,10 @@ export class KaspaEngine {
 
   /** Submits a Kaspa WASM SDK Transaction as is; returns the node's transaction id.
    *  `expectedTxId`: the id computed locally (the .kachat core's), looked up when the submit fails;
-   *  else the SDK transaction's own id (iOS 9139e88 `submitRpcTransaction(_:expectedTxId:)`). */
-  async submitRpcTransaction(transaction, { expectedTxId = null } = {}) {
+   *  else the SDK transaction's own id (iOS 9139e88 `submitRpcTransaction(_:expectedTxId:)`).
+   *  `spends`: the "txid:index" coins it spends; by default read from its inputs. Once it went out
+   *  or its outcome is unknown they stay out of the next build for a while (iOS 3942a5b7). */
+  async submitRpcTransaction(transaction, { expectedTxId = null, spends = null } = {}) {
     this.requireSdk();
     // A submit whose answer was lost but whose transaction the network has is a send that went
     // out (iOS IOS-014), not a failure to retry.
@@ -1179,6 +1183,7 @@ export class KaspaEngine {
       withRpc: this.withRpc.bind(this),
       submit: (rpc, { allowOrphan = false } = {}) => rpc.submitTransaction({ transaction, allowOrphan }),
       txid: localId,
+      spends: Array.isArray(spends) ? spends : transactionSpends(transaction),
       label: "Transaction submit",
       log: this.log,
     });

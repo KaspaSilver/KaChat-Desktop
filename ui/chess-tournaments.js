@@ -68,6 +68,12 @@ const pendingMoveGames = new Set();   // "<tournament>|<game>" sent and not yet 
 /** When each pending move went out (wall ms): one the chain has not shown after
  *  T.PENDING_MOVE_TIMEOUT_MS can be played again (iOS 8d5f925). */
 const pendingMoveSentAt = new Map();
+/** Our own moves applied at once with this device's clock and not yet seen on chain: txId ->
+ *  { tournamentId, gameId, sentAt }. Timed whoever's turn the local row made it (the row itself
+ *  clears pendingMoveGames), so a move accepted but never mined is dropped after
+ *  T.PENDING_MOVE_TIMEOUT_MS and offered again (T.unconfirmedLocalMoves). Device-wide, like the
+ *  rows. */
+const sentMoves = new Map();
 /** When a claim was last posted for a game (wall ms). One is enough when it takes; one the chain
  *  voided or that failed to send goes again after T.CLAIM_RETRY_MS while the game is still
  *  undecided on chain (iOS 8d5f925). */
@@ -116,8 +122,15 @@ const keyOf = (tid, gid) => `${tid}|${gid}`;
 // Arena rows: cache, backfill, live scan
 // ---------------------------------------------------------------------------------------------
 
+/** Starts timing a move of ours applied with this device's clock (see sentMoves). */
+function trackSentMove(txId, message, sentAt) {
+  if (message?.a !== "move" || message.t == null || message.g == null) return;
+  sentMoves.set(txId, { tournamentId: message.t, gameId: message.g, sentAt });
+}
+
 function loadCache() {
   rows = new Map();
+  sentMoves.clear();
   unverifiedCachedRows = [];
   try {
     const list = JSON.parse(localStorage.getItem(ARENA_CACHE_KEY) || "[]");
@@ -129,6 +142,10 @@ function loadCache() {
       // reducer sees it. This device's own sends are trusted - it signed them.
       if (row.verified || row.local) rows.set(r.txId, row);
       else unverifiedCachedRows.push(row);
+      // A recent move of ours the chain had not shown yet: timed again from now, so the indexer
+      // gets its chance to return it before it is dropped. An older one is left as it was: its
+      // game is long over on the clock.
+      if (row.local && Date.now() - row.blockTime < T.AUTO_CLAIM_WINDOW_MS) trackSentMove(row.txId, T.decodeMessage(row.content), Date.now());
     }
   } catch { rows = new Map(); unverifiedCachedRows = []; }
 }
@@ -155,6 +172,7 @@ function mergeRows(list) {
     const blockTime = Number(r.blockTime) || 0;
     if (existing && existing.blockTime === blockTime && !existing.local) continue;
     rows.set(r.txId, { txId: r.txId, senderAddress: r.senderAddress, content: r.content || "", blockTime, verified: true });
+    sentMoves.delete(r.txId); // the chain has it
     changed += 1;
   }
   if (changed) { saveCache(); reduceArena(); }
@@ -431,6 +449,7 @@ async function send(message) {
       const txid = await sendBroadcastMessage({ engine: deps.engine, channel: T.ARENA_CHANNEL, content, feeKas: "0", singleInput: true });
       // Applied at once with this device's clock; the chain's row replaces the time when it lands.
       rows.set(txid, { txId: txid, senderAddress: sender, content, blockTime: Date.now(), local: true });
+      trackSentMove(txid, message, Date.now());
       saveCache();
       reduceArena();
       lastError = "";
@@ -635,7 +654,37 @@ function expirePendingMoves() {
     lastError = T.PENDING_MOVE_EXPIRED_MESSAGE;
     expired = true;
   }
+  if (dropUnconfirmedMoves()) return; // its reduce rendered
   if (expired && active) render();
+}
+
+/** Our moves applied at once that the chain never showed (accepted by the node, never mined):
+ *  the local row goes, the board is back on our turn and says "Play it again". Without this the
+ *  row - which already took the move off pendingMoveGames - kept the game stuck on the
+ *  opponent's turn. KaPlay iOS has no such step; Desktop adds it. True when anything was dropped. */
+function dropUnconfirmedMoves() {
+  if (!sentMoves.size) return false;
+  const { drop, seen } = T.unconfirmedLocalMoves(sentMoves, tournaments, now);
+  for (const txId of seen) sentMoves.delete(txId);
+  const my = me();
+  let dropped = false;
+  for (const txId of drop) {
+    const sent = sentMoves.get(txId);
+    sentMoves.delete(txId);
+    const row = rows.get(txId);
+    if (!row?.local) continue; // the chain's copy landed meanwhile
+    rows.delete(txId);
+    dropped = true;
+    const key = keyOf(sent.tournamentId, sent.gameId);
+    pendingMoveGames.delete(key);
+    pendingMoveSentAt.delete(key);
+    if (my && row.senderAddress === my) lastError = T.PENDING_MOVE_EXPIRED_MESSAGE;
+    deps.appendEngineLog?.(`Chess move ${txId} not seen on chain after ${T.PENDING_MOVE_TIMEOUT_MS / 1000} s; dropped`);
+  }
+  if (!dropped) return false;
+  saveCache();
+  reduceArena();
+  return true;
 }
 
 /** Resign asks on a sheet that says what resigning means (iOS 30d0cca); behind the back button
@@ -654,8 +703,8 @@ async function resign(t, game, { leaving = false } = {}) {
     confirmLabel: leaving ? "Resign and leave" : "Resign", cancelLabel: leaving ? "Stay" : "Keep playing", destructive: true,
   });
   if (!ok) return false;
-  await send(T.messages.resign(t.id, game.id));
-  return true;
+  // A resign that didn't go out leaves the game on: the caller stays (send already showed why).
+  return send(T.messages.resign(t.id, game.id));
 }
 
 /** The opponent flagged in one of our games, lately: post the claim. Runs on every tick; a claim

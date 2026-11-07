@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { defineConfig } from "vite";
 import { createRelay } from "./tools/relay-guard.mjs";
 import { securityHeaders } from "./tools/security-headers.mjs";
@@ -20,6 +21,18 @@ delete process.env.VITE_CHANGENOW_API_KEY;
 // The relay itself (SSRF guard with DNS pinning, navigation refusal, response sandboxing, cookie
 // jars for Nextcloud Talk, write/rate/ChangeNOW controls) lives in tools/relay-guard.mjs and is
 // shared with the standalone sidecar (tools/nc-proxy-server.mjs) that serves static deployments.
+
+/** This machine's own name, as a browser on the LAN may open it ("mybox", "mybox.local"). Nobody
+ *  outside the LAN can point a name of theirs at it under that name. */
+function machineHostNames() {
+  try {
+    const name = String(hostname() || "").trim().toLowerCase().replace(/\.+$/, "");
+    if (!name) return [];
+    const short = name.split(".")[0];
+    return [...new Set([name, short, `${short}.local`])];
+  } catch { return []; }
+}
+
 function nextcloudProxy() {
   // One handler, mounted on BOTH the dev server and the preview server. `configureServer` alone
   // meant the proxy existed only while running `vite dev`; `vite build` + `vite preview` hashes
@@ -42,6 +55,12 @@ function nextcloudProxy() {
     // A seed or API that never answers must not hold the connection until the CDN in front gives
     // up (Cloudflare's 522): fifteen seconds for reads; writes get two minutes, long polls one.
     readTimeoutMs: 15000,
+    // DNS rebinding: the relay answers only requests addressed to localhost, an IP address, this
+    // machine's own name or a name in KACHAT_ALLOWED_HOSTS (comma separated) - see preview below,
+    // which serves the built files under any name. Anything else is refused and logged with the
+    // setting that allows it.
+    allowedHosts: process.env.KACHAT_ALLOWED_HOSTS || "",
+    alwaysAllowedHosts: machineHostNames(),
     log: (line) => console.warn(line),
   });
 
@@ -133,9 +152,12 @@ export default defineConfig({
     host: "0.0.0.0",
     // Any host name: the preview server (what the Docker image and Kaspa Quick Start run) sits
     // behind whatever domain someone publishes it on, and Vite refuses a Host it doesn't know
-    // ("Blocked request. This host (...) is not allowed"). It serves only the built files and the
-    // public /nc-proxy relay, so the DNS-rebinding guard behind that check protects nothing here.
-    // `npm run dev` keeps the guard: it serves source files.
+    // ("Blocked request. This host (...) is not allowed"). The built files are public anyway, so
+    // they are served under any name. The /nc-proxy relay is not: under a rebound name a website
+    // would use it as its own (the LAN with KACHAT_RELAY_ALLOW_PRIVATE=1, the ChangeNOW key), so
+    // the relay checks the name itself (allowedHosts above, KACHAT_ALLOWED_HOSTS) - localhost and
+    // an IP address always work, so the Docker / Kaspa Quick Start default needs nothing set.
+    // `npm run dev` keeps Vite's guard too: it serves source files.
     allowedHosts: true,
     // DSK-014: CSP (no inline script, wasm allowed, framing refused), X-Frame-Options, nosniff and
     // Referrer-Policy on the page and every built asset. Vite applies these to static files and

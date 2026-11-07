@@ -7,8 +7,16 @@ import { sendOutcomeUnknownError, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine
 import { kapostsFailureDelivery, kapostsSubmitWithUtxoRetry } from "../ui/kaposts-format.js";
 import { settleLeftoverRoomRows } from "../ui/leftover-sends.js";
 import { identityBatchFlush, emptyKachatIdentity, IDENTITY_BATCH_DELAY_MS } from "../ui/kachat-unnamed-sweep.js";
+import { isSendOutcomeUnknownText, NOT_CONFIRMED_ON_DEVICE } from "../ui/send-kaspa-components.js";
 
 const unknown = sendOutcomeUnknownError("t");
+
+// --- The swipe-up screen's "Not confirmed" -------------------------------------------------------
+assert.ok(isSendOutcomeUnknownText(SEND_OUTCOME_UNKNOWN_MESSAGE));
+assert.ok(isSendOutcomeUnknownText(`${SEND_OUTCOME_UNKNOWN_MESSAGE} (1 of 3 compound transactions were sent)`), "a chunked Compound with an unknown later chunk");
+assert.ok(!isSendOutcomeUnknownText("Insufficient funds"));
+assert.ok(!isSendOutcomeUnknownText(NOT_CONFIRMED_ON_DEVICE), "turned down on the device: nothing was sent, so Try Again");
+assert.ok(!isSendOutcomeUnknownText(null));
 
 // --- KaPost delivery ---------------------------------------------------------------------------
 assert.equal(kapostsFailureDelivery(unknown), "unconfirmed");
@@ -142,6 +150,45 @@ assert.match(tipAvailable, /excludeReservedUtxos\(balance\?\.entries \|\| \[\]\)
 const live = readFileSync(new URL("../ui/kachat-names-live.js", import.meta.url), "utf8");
 assert.match(live, /if \(stale && !identityLookups\.has\(key\)\) queueIdentityLookup\(registry, key\);/);
 assert.match(live, /batch: \(list\) => registry\.identities\(list\)/);
+
+// A message, payment or group message not confirmed: its own status with its txid, never Retry.
+const between = (from, to) => app.slice(app.indexOf(from), app.indexOf(to, app.indexOf(from)));
+assert.match(app, /const MESSAGE_STATUS_UNCONFIRMED = "unconfirmed";/);
+const failurePatch = between("function sendFailurePatch", "\n}\n");
+assert.match(failurePatch, /error\?\.code === SEND_OUTCOME_UNKNOWN[\s\S]{0,80}status: MESSAGE_STATUS_UNCONFIRMED, \.\.\.\(error\.txid \? \{ txid: String\(error\.txid\) \}/, "the txid stays");
+const pipeline = between("async function runEngineSendPipeline", "function describeThrown");
+assert.match(pipeline, /if \(error\?\.code === SEND_OUTCOME_UNKNOWN\) \{[\s\S]{0,300}updateMessageStatus\(conversationId, messageId, sendFailurePatch\(error\)\);[\s\S]{0,200}return;/, "a 1:1 message not confirmed is not FAILED");
+assert.equal((app.match(/applyMessagePatch\(liveMessage, sendFailurePatch\(error, error\.message\)\)/g) || []).length, 3, "chat payment, tip sheet and instant tip");
+assert.doesNotMatch(app, /applyMessagePatch\(liveMessage, \{ status: MESSAGE_STATUSES\.FAILED, note: error\.message \}\)/);
+assert.equal((app.match(/unknown \? groupUnconfirmedPatch\(error\) : \{ status: MESSAGE_STATUSES\.FAILED \}/g) || []).length, 2, "group send and group retry");
+const statusIcon = between("function createDeliveryStatusIcon", "const LONG_MESSAGE_BYTES");
+assert.match(statusIcon, /const failed = status === MESSAGE_STATUSES\.FAILED;/, "only FAILED is the retry button");
+assert.match(statusIcon, /status === MESSAGE_STATUS_UNCONFIRMED\) \{[\s\S]{0,700}word = "Not confirmed";/);
+assert.match(app, /chat-row-delivery-word warning">Not confirmed</);
+// ...and sent once the network has it: a sync looks it up, a group's chain copy settles it.
+const settle = between("async function settleUnconfirmedSends", "async function refreshPendingPaymentStatuses");
+assert.match(settle, /isTransactionKnown\(\{ withRpc: engine\.withRpc\.bind\(engine\), txid \}\)/);
+assert.match(settle, /status: MESSAGE_STATUSES\.CONFIRMED/);
+const refreshPayments = between("async function refreshPendingPaymentStatuses", "function normalizeKasAmount");
+assert.match(refreshPayments, /message\.status !== MESSAGE_STATUS_UNCONFIRMED\s*\);\s*if \(await settleUnconfirmedSends\(conversationEntry, contact\)\) changed = true;/, "an unconfirmed payment isn't marked sent just for its txid");
+assert.match(between("function appendGroupMessage(", "function dedupeStoredGroupMessages"), /existing\.status === MESSAGE_STATUS_UNCONFIRMED && message\.txId[\s\S]{0,120}existing\.status = MESSAGE_STATUSES\.CONFIRMED;/);
+
+// Max checks the coins by the engine's rules (largest 80, just-spent left out): tests/test-amounts.mjs.
+assert.match(between("function maxCoinKeys", "function sameCoinKeys"), /return maxSendOutpointKeys\(entries \|\| \[\], manualKeys\);/);
+
+// The tip sheet is busy before its first await (the swipe-up screen fails a send not busy in 600 ms).
+const tipSend = between("async function sendTipNow", "\n  // The chat with the poster is created HERE");
+const firstAwait = tipSend.indexOf("await ");
+assert.ok(tipSend.indexOf("tip.sending = true;") > 0 && tipSend.indexOf("tip.sending = true;") < firstAwait, "busy before the first await");
+assert.match(tipSend, /const refuse = async \(reason, \{ refreshMax = false \} = \{\}\) => \{\s*if \(refreshMax && tipState === tip\) await tipSetMax\(\{ force: true \}\);\s*tip\.sending = false;/);
+assert.match(app, /async function tipSetMax\(\{ force = false \} = \{\}\) \{[\s\S]{0,120}\(tip\.sending && !force\)\) return;/);
+
+// A failed Max fill puts the fee back; the SDK base is 100 sompi/gram of the mass, not 1.
+const maxFill = between("async function fillMaxAmountNow", "function sendKaspaSelectionKey");
+assert.match(maxFill, /sendKaspaSdkBaseKas = Number\(calculateFee\(mass, MIN_RELAY_FEE_PER_GRAM\)\) \/ 1e8;/);
+assert.doesNotMatch(maxFill, /sendKaspaSdkBaseKas = Number\(mass\) \/ 1e8/);
+assert.match(maxFill, /catch \(error\) \{[^}]*setSendKaspaError[^\n]*\n\s*restoreFee\(\);\s*return;/);
+assert.match(maxFill, /const restoreFee = \(\) => \{\s*if \(token !== sendKaspaMaxToken \|\| sendKaspaMaxMode\) return;\s*sendKaspaBaseFeeKas = feeBefore\.base;\s*sendKaspaSdkBaseKas = feeBefore\.sdkBase;\s*applySendKaspaFeeField\(\);\s*scheduleSendKaspaFeeEstimate\(\);/);
 
 assert.ok(SEND_OUTCOME_UNKNOWN_MESSAGE.startsWith("This may have gone through"));
 console.log("send outcome unknown (ui): ok");

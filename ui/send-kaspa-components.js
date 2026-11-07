@@ -1124,6 +1124,12 @@ export const SWIPE_UP_LABELS = {
 };
 /** A send whose device check (Face ID / the password) was turned down (iOS KachatNamesLiveViews). */
 export const NOT_CONFIRMED_ON_DEVICE = "Not confirmed on this device, so nothing was sent.";
+/** A failure the swipe-up screen shows as "Not confirmed" with only Done: the unknown-outcome
+ *  message, matched by its start, since a chunked Compound adds how many of its transactions
+ *  went out (engine/transactions.js sweepAllToSelf). */
+export function isSendOutcomeUnknownText(text) {
+  return String(text || "").trim().startsWith(SEND_OUTCOME_UNKNOWN_MESSAGE);
+}
 
 const SWIPE_BAR_ICONS = {
   up: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>',
@@ -1240,7 +1246,7 @@ export function createSwipeUpScreen(card, {
   const finished = () => (dagShown && (sent || succeeded)) || (failed && dagShown);
   const failureText = () => (failed && dagShown ? (String(getFailureMessage?.() || "").trim() || words.failedFallback) : null);
   // It may have gone through, so there's nothing to try again (iOS fdb32549 outcomeUnknown).
-  const outcomeUnknown = () => failureText() === SEND_OUTCOME_UNKNOWN_MESSAGE;
+  const outcomeUnknown = () => isSendOutcomeUnknownText(failureText());
   const dag = blockDagAnimation(canvas);
 
   function paintBar() {

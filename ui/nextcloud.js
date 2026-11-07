@@ -94,7 +94,8 @@ let watcherRunning = false;
 let needsReconnect = false;     // Nextcloud refused this login: automatic work stops until it reconnects
 let portfolioChain = null;      // one Portfolio backup at a time: two PUTs at once get 423 Locked
 let portfolioDebounceTimer = null;
-let lastPortfolioCheck = 0;     // when the app last looked for another device's Portfolio changes
+let portfolioChangeCount = 0;   // bumped on every Portfolio change: a backup clears the owed flag only if none came during it
+let lastPortfolioCheck = 0;    // when the app last looked for another device's Portfolio changes
 let portfolioFileCache = new Map(); // path -> { modified, size, wallet, read }: an unchanged file isn't downloaded again
 
 // Picker state
@@ -633,6 +634,8 @@ async function performPortfolioBackup() {
   const stillCurrent = () => nc === account && addressBookHoldsWallet(wallet);
   // Writers always encrypt: without the key nothing is uploaded readable.
   if (!deps.backupKeyAvailable?.()) throw new Error(PORTFOLIO_KEY_UNAVAILABLE_MESSAGE);
+  // Taken before what's uploaded is read: an edit after this point is still owed.
+  const changeCountAtStart = portfolioChangeCount;
   await ensureDavUser();
   const server = await mergePortfoliosFromServer(wallet, stillCurrent);
   const sync = deps.portfolioBackupSync();
@@ -653,11 +656,15 @@ async function performPortfolioBackup() {
     if (ids.some((id) => names.get(id)?.toLowerCase() === String(found.file.name).toLowerCase())) continue;
     // Only for what this device knows the fate of: never a portfolio it simply doesn't have.
     if (!ids.every((id) => names.has(id) || deletedIds.has(id))) continue;
+    // A deleted portfolio's file stays until an uploaded file carries the deletion, or other
+    // devices would never hear of it (and upload it again, and this device delete it again).
+    if (!sync.portfolios.length && ids.some((id) => deletedIds.has(id))) continue;
     if (!stillCurrent()) return;
     await deleteBackupFile(found.file.path);
     portfolioFileCache.delete(found.file.path);
   }
-  if (stillCurrent()) { account.portfolioBackupOwed = false; saveState(); }
+  // An edit made during the upload is still owed (its own debounced backup is on the way).
+  if (stillCurrent() && portfolioChangeCount === changeCountAtStart) { account.portfolioBackupOwed = false; saveState(); }
   deps.appendEngineLog?.("[Nextcloud] Portfolio backed up");
 }
 
@@ -671,6 +678,7 @@ async function deleteBackupFile(path) {
 
 /** The Portfolio changed: with Automatic Sync on, it uploads a few seconds after the changes settle. */
 export function notePortfolioChanged() {
+  portfolioChangeCount += 1;
   if (!nc?.autoBackup || needsReconnect) return;
   if (!nc.portfolioBackupOwed) { nc.portfolioBackupOwed = true; saveState(); }
   schedulePortfolioBackup();

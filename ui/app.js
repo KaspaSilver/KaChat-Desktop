@@ -16,7 +16,7 @@ import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHA
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
-import { excludeReservedUtxos, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, MAX_SEND_INPUT_LIMIT, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
+import { excludeReservedUtxos, isTransactionKnown, maxSendOutpointKeys, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, MAX_SEND_INPUT_LIMIT, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
 import { isLeftoverSend, undeliveredRowFor, settleLeftoverGroupRows } from "./leftover-sends.js";
 import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody } from "../engine/payment-notice.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory, restPaymentSompiTo, restPaymentSender, fetchHeldPaymentRows, strangerPaymentStep } from "../engine/sync.js";
@@ -81,7 +81,7 @@ import * as Calls from "./calls.js";
 // Kaspa Hub > ChangeNOW Swap (iOS SwapView), back on Desktop (owner, 2026-10-22).
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
-import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram } from "./kspt.js";
+import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram, MIN_RELAY_FEE_PER_GRAM } from "./kspt.js";
 import {
   initChildMode, isChildModeEnabled, CHILD_HIDDEN_TABS,
   isUserTypePending, markUserTypePending,
@@ -156,6 +156,11 @@ window.KaspaEngineClass = KaspaEngine;
 window.__kaspaEngineStep = "kachat-shell-step-71";
 
 const engine = new KaspaEngine({ log: appendEngineLog });
+// A message or payment the network never answered (SEND_OUTCOME_UNKNOWN): it may still land, so it
+// says "Not confirmed" with its txid and no Retry, and turns sent once the network has it (iOS
+// e5a9b11, as rooms, KaPosts and chess do). See sendFailurePatch and settleUnconfirmedSends.
+const MESSAGE_STATUS_UNCONFIRMED = "unconfirmed";
+const unconfirmedLookupAt = new Map();
 // The .kachat wordmark is the .kachat section's dock and Hub icon (iOS KachatTabIcon).
 document.querySelectorAll("[data-kachat-wordmark]").forEach((el) => { el.innerHTML = KACHAT_WORDMARK_SVG; });
 // Testnet: the page's static amounts ("-- KAS" placeholders, "Amount (KAS)" labels, fee pills)
@@ -253,18 +258,63 @@ function reloadKaChat() {
   location.reload();
 }
 
+// Contact and group preferences are per account, as on iOS: a contact's notification override and
+// call permission live on that wallet's own Contact records, a group's mentions-only / silent sets
+// are saved scoped to the wallet (GroupChatService saveScoped). A mute or a call allowed in one
+// account no longer applies in another, and removing an account takes its prefs with the rest of
+// its prefixed keys. Earlier builds kept one global key each, which every account used: the first
+// read after the update copies it to every saved account that has none yet (the open one too) and
+// removes the global key, so no account loses a mute it had.
+// Read from storage each time (small objects), so another tab's change, an account switch or a
+// restored backup is never hidden behind a stale copy.
+function accountPrefsScope() {
+  return String(engine?.address || "").trim();
+}
+function loadAccountPrefs(baseKey) {
+  const scope = accountPrefsScope();
+  if (!scope) return {};
+  try {
+    const scopedKey = accountScopedKey(baseKey, scope);
+    let raw = localStorage.getItem(scopedKey);
+    if (raw == null) {
+      const legacy = localStorage.getItem(baseKey);
+      if (legacy != null) {
+        for (const address of new Set([scope, ...legacyPrefsAccounts()])) {
+          const key = accountScopedKey(baseKey, address);
+          if (localStorage.getItem(key) == null) localStorage.setItem(key, legacy);
+        }
+        localStorage.removeItem(baseKey);
+        raw = legacy;
+      }
+    }
+    const value = (raw && JSON.parse(raw)) || {};
+    return typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
+/** Every saved account's address, for the one-time copy of the old global prefs. */
+function legacyPrefsAccounts() {
+  try {
+    return loadSavedAccounts().map((entry) => String(entry?.address || "").trim()).filter(Boolean);
+  } catch { return []; }
+}
+function saveAccountPrefs(baseKey, value) {
+  const scope = accountPrefsScope();
+  if (!scope) return; // no account open: nothing to file it under
+  try { localStorage.setItem(accountScopedKey(baseKey, scope), JSON.stringify(value || {})); } catch { /* quota */ }
+}
+
 // Per-contact preferences (Chat Info): incoming-notification and photo-display
-// overrides, keyed by contact address. { [address]: { notify, photos } }.
+// overrides, keyed by contact address. { [address]: { notify, photos, calls } }.
 const CONTACT_PREFS_KEY = "kachat-contact-prefs-v1";
-let contactPrefs = (() => { try { return JSON.parse(localStorage.getItem(CONTACT_PREFS_KEY) || "{}") || {}; } catch { return {}; } })();
-function saveContactPrefs() { localStorage.setItem(CONTACT_PREFS_KEY, JSON.stringify(contactPrefs)); }
+function contactPrefsStore() { return loadAccountPrefs(CONTACT_PREFS_KEY); }
+function saveContactPrefs(value) { saveAccountPrefs(CONTACT_PREFS_KEY, value); }
 /// This contact's notification override, or null to follow the global default.
 ///
 /// "sound" | "noSound" | "off" | null, matching iOS's ContactNotificationMode. Older installs
 /// stored a two-state "enabled" / "muted": "muted" becomes "off", and "enabled" becomes null -
 /// it only ever meant "not muted", which is what following the default means.
 function getContactNotifyOverride(address) {
-  const raw = contactPrefs[address]?.notify;
+  const raw = contactPrefsStore()[address]?.notify;
   if (raw === "muted" || raw === "off") return "off";
   if (raw === "noSound" || raw === "sound") return raw;
   return null;
@@ -285,39 +335,39 @@ function defaultIncomingNotifyMode() {
   return (accountShellPrefs.notificationSound ?? true) === false ? "noSound" : "sound";
 }
 function contactCallsEnabled(address) {
-  return contactPrefs[address]?.calls === true;
+  return contactPrefsStore()[address]?.calls === true;
 }
 function setContactCallsEnabled(address, enabled) {
   setContactPref(address, "calls", enabled ? true : undefined);
 }
 function setContactPref(address, key, value) {
   if (!address) return;
+  const contactPrefs = contactPrefsStore();
   const next = { ...(contactPrefs[address] || {}) };
   // undefined means "no override" - stored as an absent key rather than a present undefined, so
   // the distinction survives a round trip through JSON.
   if (value === undefined) delete next[key]; else next[key] = value;
   contactPrefs[address] = next;
-  saveContactPrefs();
+  saveContactPrefs(contactPrefs);
 }
 
-// Per-group preferences (Group Info), keyed by group id: { [groupId]: { notify } }.
-// Same shape and storage style as contactPrefs above — one global key holding an object
-// keyed by a globally unique identity (contact address there, group id here), so no extra
-// account scoping is needed: a group id belongs to exactly one group.
+// Per-group preferences (Group Info), keyed by group id: { [groupId]: { notify } }. Per account
+// like contactPrefs above: two accounts in the same group each keep their own mode (iOS saveScoped).
 const GROUP_PREFS_KEY = "kachat-group-prefs-v1";
-let groupPrefs = (() => { try { return JSON.parse(localStorage.getItem(GROUP_PREFS_KEY) || "{}") || {}; } catch { return {}; } })();
-function saveGroupPrefs() { try { localStorage.setItem(GROUP_PREFS_KEY, JSON.stringify(groupPrefs)); } catch {} }
+function groupPrefsStore() { return loadAccountPrefs(GROUP_PREFS_KEY); }
+function saveGroupPrefs(value) { saveAccountPrefs(GROUP_PREFS_KEY, value); }
 // "all" | "mentions" | "muted". Default "all", matching iOS, where a group's
 // "Only Notify if I'm Mentioned" toggle starts OFF (GroupChatService.mentionsOnlyNotifications).
 const GROUP_NOTIFY_MODES = ["all", "mentions", "muted"];
 function getGroupNotify(groupId) {
-  const value = groupPrefs[groupId]?.notify;
+  const value = groupPrefsStore()[groupId]?.notify;
   return GROUP_NOTIFY_MODES.includes(value) ? value : "all";
 }
 function setGroupNotify(groupId, value) {
   if (!groupId || !GROUP_NOTIFY_MODES.includes(value)) return;
+  const groupPrefs = groupPrefsStore();
   groupPrefs[groupId] = { ...(groupPrefs[groupId] || {}), notify: value };
-  saveGroupPrefs();
+  saveGroupPrefs(groupPrefs);
   // A muted group is not watched by the push service at all (iOS collectWatchedGroupIds).
   try { scheduleWebPushSync(); } catch { /* not started yet */ }
 }
@@ -438,6 +488,8 @@ refreshSubscriptionAddresses({ restart: false });
 // and switching network or account no longer throws the other one's away. Stored under the
 // account prefix (removed with the account). The old single global record is read once for the
 // wallet it names, then moved.
+// The incoming-handshake txids kept as processed: the newest this many (see syncIncomingHandshakeRequests).
+const HANDSHAKE_PROCESSED_TXIDS_MAX = 2000;
 function loadHandshakeSyncState(walletAddress = "") {
   try {
     const wallet = String(walletAddress || "").trim();
@@ -454,7 +506,7 @@ function loadHandshakeSyncState(walletAddress = "") {
       walletAddress: wallet || String(parsed?.walletAddress || ""),
       cursor: parserVersion >= 3 ? Number(parsed?.cursor || 0) : 0,
       parserVersion: 3,
-      processedTxids: parserVersion >= 3 && Array.isArray(parsed?.processedTxids) ? [...new Set(parsed.processedTxids.map(String))] : [],
+      processedTxids: parserVersion >= 3 && Array.isArray(parsed?.processedTxids) ? [...new Set(parsed.processedTxids.map(String))].slice(-HANDSHAKE_PROCESSED_TXIDS_MAX) : [],
       declinedTxids: parserVersion >= 3 && Array.isArray(parsed?.declinedTxids) ? [...new Set(parsed.declinedTxids.map(String))] : [],
     };
   } catch {
@@ -467,7 +519,14 @@ let handshakeSyncState = loadHandshakeSyncState(engine.address);
 function persistHandshakeSyncState() {
   const wallet = String(handshakeSyncState?.walletAddress || "").trim();
   if (!wallet) return; // no wallet, nothing synced to keep
-  localStorage.setItem(accountScopedKey(HANDSHAKE_SYNC_KEY, wallet), JSON.stringify(handshakeSyncState));
+  try {
+    localStorage.setItem(accountScopedKey(HANDSHAKE_SYNC_KEY, wallet), JSON.stringify(handshakeSyncState));
+  } catch (error) {
+    // Storage full (photos and voice notes live there too): the scan state stays in memory and is
+    // written on the next pass, rather than throwing out of the sweep.
+    try { appendEngineLog(`Could not save the handshake scan state: ${error?.message || error}`); } catch { /* early in startup */ }
+    return;
+  }
   // The pre-IOS-004 global record, once it has moved under its wallet.
   try {
     if (JSON.parse(localStorage.getItem(HANDSHAKE_SYNC_KEY) || "null")?.walletAddress === wallet) localStorage.removeItem(HANDSHAKE_SYNC_KEY);
@@ -629,22 +688,62 @@ unlockKeyVaultFromSession(); // only after KaChat's own reload (reloadKaChat's 1
 // Signed in until Log Out, as the iOS app is (owner, 2026-10-22): the account that was open opens
 // again at launch with no password or Face ID; picking another saved account, and showing a seed
 // phrase or private key, still ask (ui/vault-remember.js).
-await restoreRememberedVaults({ keepSignedIn: () => (accountShellPrefs.keepSignedIn ?? true) !== false });
+// Logged out (in this tab or another one) is logged out at the next launch too: nothing is opened,
+// and the remembered copy is erased (nothing is open to write). Only the launch itself is gated by
+// the flag - a sign-in clears it after its own vault unlock, which must still be remembered.
+const loggedOutAtLaunch = localStorage.getItem(SESSION_LOGGED_OUT_KEY) === "true";
+let rememberedVaultsLaunchDone = false;
+await restoreRememberedVaults({ keepSignedIn: () => (accountShellPrefs.keepSignedIn ?? true) !== false && (rememberedVaultsLaunchDone || !loggedOutAtLaunch) });
+rememberedVaultsLaunchDone = true;
 // A password change (or removal, or a first password) in another tab replaces the data key this
 // tab holds: lock at once and ask for the password over the current screen (DSK-022). The vault
 // also locks by itself, and tells us, when a read or write finds the key stale first.
 let lockedByAnotherTabPromptOpen = false;
+// The account whose signing key this tab dropped when another tab locked it ("" when none). Locked
+// means locked: the private key leaves memory with the data key, and the password brings both back
+// - the key is read again from the sealed saved account it opens (restoreSigningKeyAfterUnlock).
+let lockedSigningAddress = "";
+function dropSigningKeyWhileLocked() {
+  if (!engine.privateKeyHex) return;
+  lockedSigningAddress = String(engine.address || "").trim();
+  engine.privateKey = null;
+  engine.privateKeyHex = null;
+}
+/** After the unlock: the dropped key again, from this account's sealed record (opened by the
+ *  password just entered). False when it cannot be had - an account kept for this session only
+ *  ("Save account on this device" off) has no stored key, or the record is gone. */
+function restoreSigningKeyAfterUnlock() {
+  const address = lockedSigningAddress;
+  if (!address) return Boolean(engine.privateKeyHex);
+  if (engine.privateKeyHex || !engine.kaspa || canonicalAccountAddress(engine.address || "") !== canonicalAccountAddress(address)) return false;
+  try {
+    const mine = canonicalAccountAddress(address);
+    let hex = String(loadSavedAccounts().find((entry) => canonicalAccountAddress(entry.address) === mine)?.privateKeyHex || "").trim();
+    if (!hex && canonicalAccountAddress(readActiveAccountAddress() || "") === mine) hex = getStoredTestingWalletHex();
+    if (!hex) return false;
+    const wallet = engine.importPrivateKey(hex);
+    if (canonicalAccountAddress(wallet.address) !== mine) return false; // signOutLockedTab clears it
+    lockedSigningAddress = "";
+    return true;
+  } catch (error) {
+    appendEngineLog(`Unlock could not restore the signing key: ${error.message}`);
+    return false;
+  }
+}
 async function handleLockedByAnotherTab() {
   refreshPasswordStatus();
   if (!isAppLocked()) return; // no password left to enter (it was removed there)
   closeAccountBackup(); // the words stay off screen behind the lock
-  if (!engine.privateKeyHex) { renderSavedAccountsScreen(); return; } // signed out: the sign-in screen is the lock
+  if (!engine.privateKeyHex && !lockedSigningAddress) { renderSavedAccountsScreen(); return; } // signed out: the sign-in screen is the lock
+  dropSigningKeyWhileLocked();
   if (lockedByAnotherTabPromptOpen) return;
   lockedByAnotherTabPromptOpen = true;
   try {
     const ok = await unlockAppWithPassword(LOCKED_IN_ANOTHER_TAB_MESSAGE, { allowForgot: false });
-    if (ok) { showCopyToast("Unlocked."); return; }
-    if (isAppLocked() && engine.privateKeyHex) await signOutLockedTab();
+    if (ok && restoreSigningKeyAfterUnlock()) { showCopyToast("Unlocked."); return; }
+    // Cancelled, or the key could not come back: signed out (logged out elsewhere meanwhile: already).
+    if (lockedSigningAddress && engine.address) await signOutLockedTab();
+    lockedSigningAddress = "";
   } finally {
     lockedByAnotherTabPromptOpen = false;
   }
@@ -695,6 +794,14 @@ window.addEventListener("storage", (event) => {
   state = { contacts: [], conversations: [] };
   try { removeAccountScopedLocalData(address); } catch { /* the other tab already removed it */ }
   flushChatStorage().finally(() => reloadKaChat());
+});
+// Log Out in another tab logs this one out the same way: Log Out is this browser's, not one tab's.
+// Left signed in, this tab kept its keys in memory, registered closed-app notifications again
+// within a minute (ui/web-push.js) and wrote the remembered sign-in back on its next vault event.
+window.addEventListener("storage", (event) => {
+  if (event.key !== SESSION_LOGGED_OUT_KEY || event.newValue !== "true" || (event.storageArea && event.storageArea !== localStorage)) return;
+  if (!engine.privateKeyHex && !engine.address && !lockedSigningAddress) return; // signed out here already
+  performLogout({ fromAnotherTab: true });
 });
 function hasAppPassword() { return vaultHasAppPassword(); }
 async function setAppPassword(password) { await vaultSetAppPassword(password); }
@@ -1629,16 +1736,20 @@ function removeAccountScopedLocalData(address) {
       if (changed) localStorage.setItem(key, JSON.stringify(all));
     } catch { /* leave a store we cannot read */ }
   }
-  // Group notification modes are keyed by group id: only those of groups no other account on
-  // this device is still in.
+  // Group notification modes are per account now and went with the prefixed keys above. A global
+  // store from before that, not yet taken over by any account, loses the modes of groups no other
+  // account on this device is still in.
   try {
-    const groupsLeft = JSON.parse(localStorage.getItem("kachat-groups-v1") || "null") || {};
-    const stillUsed = new Set(Object.values(groupsLeft).flatMap((bucket) => Object.keys(bucket || {})));
-    let changed = false;
-    for (const groupId of removedGroupIds) {
-      if (!stillUsed.has(groupId) && Object.prototype.hasOwnProperty.call(groupPrefs, groupId)) { delete groupPrefs[groupId]; changed = true; }
+    const legacyGroupPrefs = JSON.parse(localStorage.getItem(GROUP_PREFS_KEY) || "null");
+    if (legacyGroupPrefs && typeof legacyGroupPrefs === "object") {
+      const groupsLeft = JSON.parse(localStorage.getItem("kachat-groups-v1") || "null") || {};
+      const stillUsed = new Set(Object.values(groupsLeft).flatMap((bucket) => Object.keys(bucket || {})));
+      let changed = false;
+      for (const groupId of removedGroupIds) {
+        if (!stillUsed.has(groupId) && Object.prototype.hasOwnProperty.call(legacyGroupPrefs, groupId)) { delete legacyGroupPrefs[groupId]; changed = true; }
+      }
+      if (changed) localStorage.setItem(GROUP_PREFS_KEY, JSON.stringify(legacyGroupPrefs));
     }
-    if (changed) saveGroupPrefs();
   } catch { /* prefs stay */ }
 }
 
@@ -3957,6 +4068,20 @@ async function notificationWorkerRegistration() {
 // registered under a click id. `key` names the message: one notification per key, across tabs.
 const pendingNotificationClicks = new Map();
 let nextNotificationClickId = 1;
+// The worker hands a tap to whichever tab is visible, which may be another tab or this one after a
+// reload, so a click id names the page that showed it: a bare counter matched the wrong handler.
+// Only a tap on a notification this page put up runs its handler; any other goes by its route.
+const NOTIFICATION_PAGE_ID = (() => {
+  try { if (globalThis.crypto?.randomUUID) return crypto.randomUUID(); } catch { /* fall through */ }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+})();
+function newNotificationClickId() {
+  return `${NOTIFICATION_PAGE_ID}:${(nextNotificationClickId++).toString(36)}`;
+}
+function ownNotificationClickHandler(clickId) {
+  if (typeof clickId !== "string" || !clickId.startsWith(`${NOTIFICATION_PAGE_ID}:`)) return null;
+  return pendingNotificationClicks.get(clickId) || null;
+}
 async function showAppNotification({ title, body, tag, key = "", silent = false, renotify = true, route = null, onClick = null } = {}) {
   // Push Notifications off silences every OS notification (iOS NotificationsHubPage footer).
   if (!pushNotificationsEnabled()) return false;
@@ -3972,7 +4097,7 @@ async function showAppNotification({ title, body, tag, key = "", silent = false,
     }
     if (tag && renotify && !alreadyUp) options.renotify = true;
     if (alreadyUp) options.silent = true;
-    const clickId = nextNotificationClickId++;
+    const clickId = newNotificationClickId();
     if (onClick) {
       pendingNotificationClicks.set(clickId, onClick);
       if (pendingNotificationClicks.size > 200) pendingNotificationClicks.delete(pendingNotificationClicks.keys().next().value);
@@ -3996,7 +4121,7 @@ window.addEventListener("kachat:notification-click", (event) => {
 /** Open what a tapped notification was about. A worker-shown push carries only an address, a group
  *  id, a room, a post or a tab (it cannot know this device's chat ids). */
 function routeNotificationClick(data) {
-  const handler = data.clickId ? pendingNotificationClicks.get(data.clickId) : null;
+  const handler = ownNotificationClickHandler(data.clickId);
   if (handler) {
     pendingNotificationClicks.delete(data.clickId);
     try { handler(); } catch {}
@@ -5839,7 +5964,7 @@ function lastMessageFor(conversationEntry) {
 }
 
 function statusLabel(status) {
-  return engineStatusLabel(status);
+  return status === MESSAGE_STATUS_UNCONFIRMED ? "Not confirmed" : engineStatusLabel(status);
 }
 
 function protocolSummary(message) {
@@ -5942,8 +6067,13 @@ function exportMessagePdf(message) {
   const popup = window.open("", "_blank");
   if (!popup) throw new Error("Allow pop-ups to export a PDF.");
   const rows = Object.entries(record || {}).map(([key, value]) => `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value))}</td></tr>`).join("");
-  popup.document.write(`<!doctype html><html><head><title>KaChat Message Raw Data</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;padding:32px;color:#111}h1{font-size:24px;margin:0 0 8px}p{color:#555;margin:0 0 24px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #ccc;padding:8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{width:180px;background:#f4f4f4}@media print{body{padding:0}}</style></head><body><h1>KaChat Message Raw Data</h1><p>Use the browser print dialog and choose “Save as PDF”.</p><table>${rows}</table><script>window.onload=()=>setTimeout(()=>window.print(),150)<\/script></body></html>`);
+  popup.document.write(`<!doctype html><html><head><title>KaChat Message Raw Data</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;padding:32px;color:#111}h1{font-size:24px;margin:0 0 8px}p{color:#555;margin:0 0 24px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #ccc;padding:8px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{width:180px;background:#f4f4f4}@media print{body{padding:0}}</style></head><body><h1>KaChat Message Raw Data</h1><p>Use the browser print dialog and choose “Save as PDF”.</p><table>${rows}</table></body></html>`);
   popup.document.close();
+  // The print dialog is opened from here: the blank pop-up inherits this page's CSP (no inline
+  // script), so a <script> written into it never ran and the dialog never came up.
+  const print = () => { try { popup.focus(); popup.print(); } catch { /* closed meanwhile: the page says how to print */ } };
+  if (popup.document.readyState === "complete") setTimeout(print, 150);
+  else popup.addEventListener("load", () => setTimeout(print, 150), { once: true });
   setStatus("PDF export opened");
 }
 
@@ -6136,6 +6266,9 @@ function chatListDeliveryGlyphHtml(message) {
   const status = String(message.status || "");
   if (status === MESSAGE_STATUSES.FAILED) {
     return `<svg class="chat-row-delivery failed" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 15.5v.5"/></svg><span class="chat-row-delivery-word failed">Failed</span>`;
+  }
+  if (status === MESSAGE_STATUS_UNCONFIRMED) {
+    return `<svg class="chat-row-delivery warning" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.6.3-1 .8-1 1.5v.2M12 16.6v.4"/></svg><span class="chat-row-delivery-word warning">Not confirmed</span>`;
   }
   if (status === MESSAGE_STATUSES.CONFIRMED || status === MESSAGE_STATUSES.SENT) {
     return `<svg class="chat-row-delivery" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg><span class="chat-row-delivery-word">Sent</span>`;
@@ -6551,7 +6684,7 @@ function noteConversationActivated(contact, conversationEntry) {
   if (!contact || !conversationEntry) return;
   if (contact.historyRescannedAt) return;
   contact.historyRescannedAt = Date.now();
-  conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor: 0 };
+  rewindConversationCursor(conversationEntry, 0);
   // Fire and forget: the caller is a UI action or a sync loop, neither of which should block on a
   // full-history fetch.
   Promise.resolve().then(async () => {
@@ -6578,16 +6711,29 @@ function noteConversationActivated(contact, conversationEntry) {
 /// produce the same result.
 const conversationSyncInFlight = new Set();
 
+/// Cursor rewinds (a newly real conversation's history catch-up, a reply gap, Re-sync), counted
+/// per conversation id. The exception to "a caller that arrives mid-run simply skips": a rewind
+/// asks for blocks the run in flight never requested, and that run's own cursor write would put
+/// the cursor straight back past them. A run that sees the count change keeps the rewound cursor
+/// and runs once more as a catch-up when it ends.
+const conversationRewinds = new Map();
+function rewindConversationCursor(conversationEntry, cursor) {
+  conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor };
+  conversationRewinds.set(conversationEntry.id, (conversationRewinds.get(conversationEntry.id) || 0) + 1);
+}
+const conversationRewindCount = (id) => conversationRewinds.get(id) || 0;
+
 async function syncOneConversation(conversationEntry, { quiet = true, catchUp = false } = {}) {
   const contact = contactForConversation(conversationEntry);
   if (!contact || !engine.address || !engine.isKasiaCipherLoaded?.()) return 0;
   if (conversationSyncInFlight.has(conversationEntry.id)) return 0;
   conversationSyncInFlight.add(conversationEntry.id);
+  const rewindsAtStart = conversationRewindCount(conversationEntry.id);
   // The row's spinner shows for a history load (catch-up), not for every quiet sweep tick; a
   // failure leaves the triangle until a later fetch succeeds (iOS begin/endChatFetch).
   if (catchUp) setChatFetchState(conversationEntry.id, "loading");
   try {
-    const added = await syncOneConversationWork(conversationEntry, { quiet, catchUp, contact });
+    const added = await syncOneConversationWork(conversationEntry, { quiet, catchUp, contact, rewindsAtStart });
     setChatFetchState(conversationEntry.id, null);
     return added;
   } catch (error) {
@@ -6595,7 +6741,25 @@ async function syncOneConversation(conversationEntry, { quiet = true, catchUp = 
     throw error;
   } finally {
     conversationSyncInFlight.delete(conversationEntry.id);
+    if (conversationRewindCount(conversationEntry.id) !== rewindsAtStart) rerunRewoundConversation(conversationEntry);
   }
+}
+
+// The catch-up a rewind asked for while a sync was in flight (which then returned 0 to it).
+function rerunRewoundConversation(conversationEntry) {
+  Promise.resolve().then(async () => {
+    // Not after the chat was deleted or the account switched (its conversations are gone).
+    if (!(state.conversations || []).includes(conversationEntry)) return;
+    try {
+      const found = await syncOneConversation(conversationEntry, { quiet: true, catchUp: true });
+      if (!found) return;
+      persistState();
+      if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+      renderChats();
+    } catch (error) {
+      appendEngineLog(`Could not load earlier messages for ${conversationEntry.id}: ${error.message}`);
+    }
+  });
 }
 
 // The chats whose leftover sends have been settled this run (ui/leftover-sends.js).
@@ -6614,7 +6778,7 @@ function settleLeftoverSends(conversationEntry) {
   return settled;
 }
 
-async function syncOneConversationWork(conversationEntry, { quiet, catchUp, contact }) {
+async function syncOneConversationWork(conversationEntry, { quiet, catchUp, contact, rewindsAtStart = conversationRewindCount(conversationEntry.id) }) {
   // A record holding only a placeholder is not "known": its real text, once this account can read
   // it, replaces the body below (iOS c130dc1, preferMessage).
   const knownTxids = (conversationEntry.messages || []).filter((message) => !isHiddenPlaceholderMessage(message)).map((message) => message.txid).filter(Boolean);
@@ -6647,6 +6811,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
   let added = 0;
   let liveAdded = 0;
   let sentAdded = 0;
+  let statusHealed = false;
   let sentCursor = Number(conversationEntry.sync?.sentCursor || 0);
   // A chat reopened after a deletion keeps what came before it deleted: its deletion instant is a
   // floor every fetched message is held to (iOS 4b00a5f, isDeletedAsOf on every insert).
@@ -6680,6 +6845,18 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
       const live = !catchUp && isLiveMessageTime(message.createdAt);
       if (live) { maybeNotifyIncoming(conversationEntry, contact, message); liveAdded += 1; }
       added += 1;
+    }
+  }
+  // Notes to self read back from the chain before it accepted them were stored outgoing/pending,
+  // and the txid dedupe never let a later read update them: "Sending" forever. They are on the
+  // chain, so they are sent (new read-backs come back confirmed, engine/sync.js).
+  if (contact.address === engine.address) {
+    for (const message of conversationEntry.messages || []) {
+      if (message.direction === "outgoing" && message.status === MESSAGE_STATUSES.PENDING && message.txid
+        && String(message.id || "").startsWith("indexer-")) {
+        applyMessagePatch(message, { status: MESSAGE_STATUSES.CONFIRMED });
+        statusHealed = true;
+      }
     }
   }
   // What this wallet sent from another device, read back with the seed (iOS bfe9f022): never news.
@@ -6729,11 +6906,16 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
   // are already collected (with a self-send filter) by syncStrangerPaymentsIntoSelfChat. Running
   // it here surfaced every received payment/consolidation as a "Received X KAS" bubble.
   if (contact.address !== engine.address) {
+    // A payment bubble the user deleted stays deleted: this scan re-reads the last 100
+    // transactions every sweep, so without the hidden keys it came back (and could notify again).
+    const hiddenPaymentKeys = new Set((conversationEntry.hiddenMessageKeys || []).flatMap((key) => [String(key), normalizePaymentTxId(key)]));
+    const hiddenPayment = (incoming) => (incoming.txid && (hiddenPaymentKeys.has(String(incoming.txid)) || hiddenPaymentKeys.has(normalizePaymentTxId(incoming.txid))))
+      || (incoming.id && hiddenPaymentKeys.has(String(incoming.id)));
     try {
       const paymentResult = await engine.syncIncomingPayments({
         conversationId: conversationEntry.id,
         contact,
-        knownTxids: (conversationEntry.messages || []).map((message) => message.txid).filter(Boolean),
+        knownTxids: [...new Set([...(conversationEntry.messages || []).map((message) => message.txid).filter(Boolean), ...hiddenPaymentKeys])],
         cursor: 0,
         limit: 100,
         ownAddresses: ownWalletAddressSet(),
@@ -6744,6 +6926,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
       for (const incoming of paymentResult.messages || []) {
         if (olderThanRetention(incoming)) continue;
         if (belowDeletionFloor(incoming)) continue;
+        if (hiddenPayment(incoming)) continue;
         if (isSuppressedPaymentTxId(incoming.txid)) continue;
         if ((conversationEntry.messages || []).some((message) => message.txid && message.txid === incoming.txid)) continue;
         // Confirmed by the node only (no signature checked): it may never replace or shadow a
@@ -6766,19 +6949,22 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
 
   const paymentStatusChanged = await refreshPendingPaymentStatuses(conversationEntry, contact);
   if (!account.still()) return added;
-  if (paymentStatusChanged || sendsSettled) persistState();
+  if (paymentStatusChanged || statusHealed || sendsSettled) persistState();
   if (added) promoteRelationshipFromIncomingEvidence(contact, conversationEntry, { persist: false });
+  // A rewind during this run (the promotion just above, a Re-sync) keeps its cursor: this run's
+  // nextCursor would skip the history it asked for (syncOneConversation runs it next).
+  const rewoundMeanwhile = conversationRewindCount(conversationEntry.id) !== rewindsAtStart;
   conversationEntry.sync = {
     ...(conversationEntry.sync || {}), lastSyncAt: Date.now(), lastFound: added,
     runs: Number(conversationEntry.sync?.runs || 0) + 1,
-    cursor: Number(result.nextCursor || conversationEntry.sync?.cursor || 0),
+    cursor: rewoundMeanwhile ? Number(conversationEntry.sync?.cursor || 0) : Number(result.nextCursor || conversationEntry.sync?.cursor || 0),
     sentCursor,
     lastNote: result.note || "Automatic Kasia sync complete.",
     scannedCount: Number(result.scannedCount || 0), decryptFailures: Number(result.decryptFailures || 0), indexerUrl,
   };
   // Backfill (restore / first sweep) is added as read; only live messages bump unread.
   if (liveAdded && activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + liveAdded;
-  if ((added || sentAdded || paymentStatusChanged || sendsSettled) && activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
+  if ((added || sentAdded || paymentStatusChanged || sendsSettled || statusHealed) && activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   if (!quiet && added) setStatus(`${added} new message${added === 1 ? "" : "s"}`);
   if (added || sentAdded) scheduleReplyGapRefetch(conversationEntry);
   // Returned for the caller's persist and repaint; a read-back was never "new".
@@ -6810,7 +6996,7 @@ function scheduleReplyGapRefetch(conversationEntry, { force = false, onlyTxid = 
   const rewindTo = Math.max(0, floor - 24 * 60 * 60 * 1000);
   const current = Number(conversationEntry.sync?.cursor || 0);
   if (current && current <= rewindTo) return false;
-  conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor: rewindTo };
+  rewindConversationCursor(conversationEntry, rewindTo);
   persistState();
   appendEngineLog(`Reply points at a message this device never received; refetching from ${new Date(rewindTo).toISOString()}.`);
   syncOneConversation(conversationEntry, { quiet: true, catchUp: true }).catch(() => {});
@@ -6854,7 +7040,7 @@ async function backfillLegacyIncomingAliases(contact, conversationEntry) {
   return true;
 }
 
-async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
+async function syncIncomingHandshakeRequests({ quiet = true, catchUp = pendingInitialCatchUp } = {}) {
   if (!engine.address || !engine.isKasiaCipherLoaded?.() || typeof engine.syncIncomingHandshakesFromIndexer !== "function") return 0;
   // Handshake cursors and processed IDs must be scoped to the active wallet.
   // Step 64 reused one global cursor after wallet changes, which could skip a
@@ -6865,7 +7051,8 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
   const result = await engine.syncIncomingHandshakesFromIndexer({
     knownTxids: handshakeSyncState.processedTxids,
     cursor: handshakeSyncState.cursor,
-    indexerUrl: indexerUrlInput?.value || undefined,
+    // Settings > Connectivity's indexer, as every other indexer read uses (blank on testnet).
+    indexerUrl: currentIndexerUrl(),
   });
   // The scan read this account's handshakes (indexer and REST payment rows alike) with its key: if
   // the account changed while it ran, none of it - contacts, chats, the aliases they carry, the
@@ -6948,10 +7135,19 @@ async function syncIncomingHandshakeRequests({ quiet = true } = {}) {
         note: wasOutgoingRequest ? "Handshake completed" : "Incoming communication request",
       });
       appendIncomingOrReactionMessage(conversationEntry, message);
-      conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + 1;
+      // Like messages: backfill (restore / first sweep / a reset scan) is added as read, and the
+      // chat on screen is being read.
+      if (!catchUp && isLiveMessageTime(message.createdAt) && activeConversationId !== conversationEntry.id) {
+        conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + 1;
+      }
       added += 1;
     }
     handshakeSyncState.processedTxids = [...new Set([...handshakeSyncState.processedTxids, request.txid])];
+  }
+  // Only the newest are kept: the cursor already holds every older scan back (they sit well
+  // behind its 90 s rewind), and an unbounded list grew the record on every sweep for good.
+  if (handshakeSyncState.processedTxids.length > HANDSHAKE_PROCESSED_TXIDS_MAX) {
+    handshakeSyncState.processedTxids = handshakeSyncState.processedTxids.slice(-HANDSHAKE_PROCESSED_TXIDS_MAX);
   }
   handshakeSyncState.walletAddress = engine.address;
   handshakeSyncState.cursor = Math.max(Number(handshakeSyncState.cursor || 0), Number(result.nextCursor || 0));
@@ -6981,7 +7177,7 @@ async function syncOutgoingHandshakeEvidence({ quiet = true } = {}) {
   const account = accountGuard(() => engine.address);
   const result = await engine.syncOutgoingHandshakesFromIndexer({
     cursor: handshakeSyncState.outCursor || 0,
-    indexerUrl: indexerUrlInput?.value || undefined,
+    indexerUrl: currentIndexerUrl(),
   });
   // Same rule as the incoming scan: an account switch while it ran drops the result.
   if (!account.still()) return 0;
@@ -7550,7 +7746,7 @@ async function refreshAllConversations({ quiet = true } = {}) {
     ensureSelfChatForSync();
     // Indexer-backed passes only where there is an indexer (testnet has none yet).
     const hasIndexer = Boolean(currentIndexerUrl());
-    if (hasIndexer) try { added += await syncIncomingHandshakeRequests({ quiet }); }
+    if (hasIndexer) try { added += await syncIncomingHandshakeRequests({ quiet, catchUp }); }
     catch (error) { sweepFailures += 1; appendEngineLog(`Incoming handshake sync failed: ${error.message}`); }
     if (hasIndexer) try { added += await syncOutgoingHandshakeEvidence({ quiet }); }
     catch (error) { sweepFailures += 1; appendEngineLog(`Outgoing handshake sync failed: ${error.message}`); }
@@ -7584,7 +7780,9 @@ async function refreshAllConversations({ quiet = true } = {}) {
     await Promise.all(Array.from({ length: Math.min(4, sweepTargets.length) }, async () => {
       while (sweepNext < sweepTargets.length) {
         const conversationEntry = sweepTargets[sweepNext++];
-        try { added += await syncOneConversation(conversationEntry, { quiet, catchUp }); }
+        // Read the count after the await: `added += await ...` reads `added` before it, so the four
+        // workers would each write back a stale total and lose the others' counts.
+        try { const found = await syncOneConversation(conversationEntry, { quiet, catchUp }); added += found; }
         catch (error) { sweepFailures += 1; appendEngineLog(`Automatic message sync failed for ${conversationEntry.id}: ${error.message}`); }
       }
     }));
@@ -12762,7 +12960,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 269;
+const APP_BUILD = 270;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -13871,6 +14069,16 @@ async function fillMaxAmountNow() {
   // the 0.002 placeholder, so Max always produced a send that failed.
   // Past one transaction's coins, Max spends the largest MAX_SEND_INPUT_LIMIT (Compound chunks).
   const inputCount = selection.length || (sendKaspaCompound ? (sendKaspaUtxos || []).length : Math.min((sendKaspaUtxos || []).length, MAX_SEND_INPUT_LIMIT)) || 1;
+  // The fee as it was before Max put in its own all-input one: a Max that fails puts it back and
+  // estimates the typed amount's fee again, so the next typed send never pays Max's fee.
+  const feeBefore = { base: sendKaspaBaseFeeKas, sdkBase: sendKaspaSdkBaseKas };
+  const restoreFee = () => {
+    if (token !== sendKaspaMaxToken || sendKaspaMaxMode) return;
+    sendKaspaBaseFeeKas = feeBefore.base;
+    sendKaspaSdkBaseKas = feeBefore.sdkBase;
+    applySendKaspaFeeField();
+    scheduleSendKaspaFeeEstimate();
+  };
   try {
     const feeRate = await fetchQuotedFeeRateSompiPerGram();
     // A quantum-safe source's inputs push their redeem script too: 101-byte signature scripts
@@ -13880,9 +14088,10 @@ async function fillMaxAmountNow() {
     const policyKas = Number(calculateFee(mass, feeRate)) / 1e8;
     if (isFinite(policyKas) && policyKas > 0) {
       sendKaspaBaseFeeKas = policyKas;
-      // The SDK's own automatic base fee is ~1 sompi/gram of the same mass; the send path
-      // passes total - sdkBase as the priority tip, so this keeps paid == displayed.
-      sendKaspaSdkBaseKas = Number(mass) / 1e8;
+      // The SDK's own automatic base fee: 100 sompi/gram of the same mass (engine/transactions.js
+      // SDK_FEE_SOMPI_PER_GRAM, calculateFee's floor), not 1. The send path passes total - sdkBase
+      // as the priority tip, so this keeps paid == displayed.
+      sendKaspaSdkBaseKas = Number(calculateFee(mass, MIN_RELAY_FEE_PER_GRAM)) / 1e8;
       // An amount estimate still running must not land over Max's fee.
       sendKaspaFeeToken += 1;
       sendKaspaFeeCtl.setEstimating(false);
@@ -13923,6 +14132,7 @@ async function fillMaxAmountNow() {
     });
   } catch (error) {
     if (token === sendKaspaMaxToken) setSendKaspaError(userFacingError(error) || "Balance too low after network fees.");
+    restoreFee();
     return;
   }
   if (token !== sendKaspaMaxToken || source !== sendKaspaSourceIndex) return; // superseded
@@ -18008,6 +18218,12 @@ function createDeliveryStatusIcon(message, { onRetry = null } = {}) {
     svg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6.8v7.1"/><circle class="status-dot-mark" cx="12" cy="17.3" r="1.15"/></svg>';
     word = onRetry ? "Failed · Tap to retry" : "Failed";
     aria = onRetry ? "Failed to send. Tap to retry." : "Failed to send";
+  } else if (status === MESSAGE_STATUS_UNCONFIRMED) {
+    // It may have gone through: never a Retry, which could send and pay twice (iOS e5a9b11).
+    icon.classList.add("warning", "unconfirmed");
+    svg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.6.3-1 .8-1 1.5v.2"/><circle class="status-dot-mark" cx="12" cy="17.1" r="1.15"/></svg>';
+    word = "Not confirmed";
+    aria = "Not confirmed. It may have gone through. Check before sending it again.";
   } else if (status === MESSAGE_STATUSES.CONFIRMED) {
     icon.classList.add("confirmed");
     svg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="status-fill" cx="12" cy="12" r="10"/><path class="status-check" d="m7.4 12.3 3 3.1 6.4-7"/></svg>';
@@ -18321,7 +18537,7 @@ function renderMessages(conversationEntry) {
       bubble.classList.add("has-payment-card");
       const paymentCard = buildPaymentCard(paymentParts, message.direction !== "incoming");
       // A payment still on its way shimmers (iOS shouldShowResolvingOverlay).
-      if (![MESSAGE_STATUSES.CONFIRMED, MESSAGE_STATUSES.FAILED].includes(message.status) && message.direction !== "incoming") paymentCard.classList.add("payment-resolving");
+      if (![MESSAGE_STATUSES.CONFIRMED, MESSAGE_STATUSES.FAILED, MESSAGE_STATUS_UNCONFIRMED].includes(message.status) && message.direction !== "incoming") paymentCard.classList.add("payment-resolving");
       // One click opens its details (iOS PaymentCardTaps, 80a6aae); a double-click still reacts,
       // so the single click waits a beat and a second click cancels it.
       paymentCard.setAttribute("role", "button");
@@ -18569,8 +18785,13 @@ function openConversation(conversationId) {
   messageSelectionMode = false;
   selectedMessageIds.clear();
   updateSelectionUi();
-  // An edit or reply in progress belongs to the chat it was started in.
-  if (conversationId !== activeConversationId) cancelReply();
+  // An edit or reply in progress belongs to the chat it was started in. So does a staged photo or
+  // Nextcloud upload (iOS keeps it in the ChatDetailView's own state, gone when the chat closes):
+  // left in place, Send would put it on chain to the next chat's contact.
+  if (conversationId !== activeConversationId) {
+    cancelReply();
+    try { clearPendingPhoto(); } catch { /* composer section not evaluated yet */ }
+  }
 
   // The detail pane may still hold a Settings/Profile scroll offset. Reset it
   // before the thread switches to its own internal message scroller.
@@ -19967,7 +20188,8 @@ async function sendInstantTip(address, name, amountKasNumber, tip = null, fiatTe
       if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
       throw error;
     }
-    applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.FAILED, note: error.message });
+    // Not confirmed (txid kept) when the network never answered, else Failed.
+    applyMessagePatch(liveMessage, sendFailurePatch(error, error.message));
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -20217,10 +20439,11 @@ async function tipPayloadBytesFor(tip, receiver, amountSompi) {
     return null;
   }
 }
-async function tipSetMax() {
+// `force`: from sendTipNow's own checks, while the tip is still marked sending.
+async function tipSetMax({ force = false } = {}) {
   const tip = tipState;
   const input = tipQ("[data-tip-amount]");
-  if (!tip || !input || tip.sending) return;
+  if (!tip || !input || (tip.sending && !force)) return;
   const token = ++tipMaxToken;
   const settingsKey = tipMaxSettingsKey(tip);
   tip.error = "";
@@ -20413,11 +20636,20 @@ async function sendTipNow(tipSompi) {
   const tipAccount = tip.fundingAddress ? captureActiveSpendingAccount() : null;
   if (tip.fundingAddress && !tipAccount) { tipSetError("This account has no 12 or 24 words, so spending sends aren't available."); return; }
   const amountKas = kasTextFromSompi(tipSompi);
+  // Busy before the first await: the swipe-up screen calls a send that isn't busy within 600 ms a
+  // failure, so a slow node read in the checks below showed Failed while the tip went out.
+  tip.sending = true;
+  tipSetError("");
+  // A check below refused it: no longer busy, and the reason (after the new Max, when asked).
+  const refuse = async (reason, { refreshMax = false } = {}) => {
+    if (refreshMax && tipState === tip) await tipSetMax({ force: true });
+    tip.sending = false;
+    if (tipState === tip) tipSetError(reason);
+  };
   // Max (DSK-042 / DSK-043): exactly the amount shown, from exactly the coins it was computed from.
   const max = activeTipMax();
   if (max && (max.amountSompi !== tipSompi || max.settingsKey !== tipMaxSettingsKey(tip))) {
-    await tipSetMax();
-    if (tipState === tip) tipSetError(MAX_AMOUNT_CHANGED_MESSAGE);
+    await refuse(MAX_AMOUNT_CHANGED_MESSAGE, { refreshMax: true });
     return;
   }
   // Speed / custom fee and coin control from the fee card, taken now (the sheet can't change mid-send).
@@ -20434,21 +20666,18 @@ async function sendTipNow(tipSompi) {
       await ensureRuntimes({ quiet: true });
       live = (tip.fundingAddress ? await engine.balanceForAddress(tip.fundingAddress) : await engine.balance())?.entries || [];
     } catch (error) {
-      tipSetError(userFacingError(error) || "Balance unavailable right now.");
+      await refuse(userFacingError(error) || "Balance unavailable right now.");
       return;
     }
-    if (tipState !== tip) return;
+    if (tipState !== tip) { tip.sending = false; return; }
     if (!sameCoinKeys(maxCoinKeys(live, manualKeys), max.outpoints)) {
-      await tipSetMax();
-      if (tipState === tip) tipSetError(MAX_AMOUNT_CHANGED_MESSAGE);
+      await refuse(MAX_AMOUNT_CHANGED_MESSAGE, { refreshMax: true });
       return;
     }
   } else if (spendable != null && tipSompi + 10000n + extraFeeSompi > spendable) {
-    tipSetError(manualKeys ? "Amount exceeds the chosen coins after the network fee." : "Amount exceeds the available balance after the network fee.");
+    await refuse(manualKeys ? "Amount exceeds the chosen coins after the network fee." : "Amount exceeds the available balance after the network fee.");
     return;
   }
-  tip.sending = true;
-  tipSetError("");
 
   // The chat with the poster is created HERE, on an actual send — not when the
   // modal opened — so a cancelled tip never leaves an orphan conversation.
@@ -20579,20 +20808,17 @@ async function sendTipNow(tipSompi) {
       conversationEntry.messages = (conversationEntry.messages || []).filter((entry) => entry.id !== message.id);
       persistState();
       if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
-      tip.sending = false;
-      if (tipState === tip) {
-        await tipSetMax();
-        if (tipState === tip) tipSetError(MAX_AMOUNT_CHANGED_MESSAGE);
-      }
+      await refuse(MAX_AMOUNT_CHANGED_MESSAGE, { refreshMax: true });
       return;
     }
-    applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.FAILED, note: error.message });
+    // Not confirmed (txid kept) when the network never answered, else Failed.
+    applyMessagePatch(liveMessage, sendFailurePatch(error, error.message));
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
     tip.sending = false;
     if (tipState === tip) tipSetError(userFacingError(error) || "Tip failed.");
-    else showCopyToast(`Tip failed: ${userFacingError(error)}`);
+    else showCopyToast(error?.code === SEND_OUTCOME_UNKNOWN ? SEND_OUTCOME_UNKNOWN_MESSAGE : `Tip failed: ${userFacingError(error)}`);
   }
 }
 
@@ -20683,6 +20909,8 @@ tipQ("[data-tip-kas-coin-toggle]")?.addEventListener("click", tipOpenCoinControl
 async function sendOutgoingHandshake(contact, conversationEntry, { accepting = false } = {}) {
   // Never to yourself: a handshake is how a stranger learns about the chat, and you are not one.
   if (!contact?.address || contact.address === engine.address) return false;
+  // The account this request is from, read before any await (as runEngineSendPipeline).
+  const ownerAddress = engine.address || "";
   const createdAt = Date.now();
   const message = createMessage({
     conversationId: conversationEntry.id,
@@ -20720,6 +20948,8 @@ async function sendOutgoingHandshake(contact, conversationEntry, { accepting = f
       // not a reduced amount for responses.
       amountKas: "0.2",
       feeKas: "0",
+      // Refused (thrown, before anything is signed) once the active account is another.
+      ownerAddress,
       onStatus: (patch) => updateMessageStatus(conversationEntry.id, message.id, patch),
     });
     contact.handshakeTxid = result.txid || "";
@@ -21669,6 +21899,12 @@ function closeChatsForAccountSwitch() {
   step(() => closeChatInfo());
   step(() => { if (paySheetConversationId) closePaymentSheet(); });
   step(() => { if (composerInputField) { composerInputField.value = ""; autoGrowComposer(); } });
+  // A staged photo / Nextcloud upload and a recording (or one still waiting on the mic prompt)
+  // belong to the old account's chat; Send must not carry them into the new account.
+  step(() => clearPendingPhoto());
+  step(() => exitChatAudioMode());
+  // The old account's notification handlers point at its chats: a later tap goes by its route.
+  step(() => pendingNotificationClicks.clear());
   step(() => { if (activeGroupId) closeGroupChat({ keepDraft: false }); });
   step(() => { if (chatSelectionModeActive) setChatSelectionMode(false); });
 }
@@ -22778,6 +23014,9 @@ async function runEngineSendPipeline(conversationId, messageId) {
   const contact = contactForConversation(conversationEntry);
   const message = conversationEntry?.messages.find((entry) => entry.id === messageId);
   if (!conversationEntry || !contact || !message) return;
+  // The account this message was written in, read before any await: an in-place create / import
+  // during the build below must not have the next account sign and pay for it (iOS dfaba68).
+  const ownerAddress = engine.address || "";
 
   try {
     updateMessageStatus(conversationId, messageId, { status: MESSAGE_STATUSES.BUILDING });
@@ -22799,6 +23038,8 @@ async function runEngineSendPipeline(conversationId, messageId) {
       envelope,
       amountKas: onchainAmountKas(),
       feeKas: message.feeOverrideKas || "0",
+      // Refused (thrown, before anything is signed) once the active account is another.
+      ownerAddress,
       onStatus: (patch) => {
         updateMessageStatus(conversationId, messageId, patch);
         if (patch.protocolString) updateMessageStatus(conversationId, messageId, { protocolString: patch.protocolString });
@@ -22813,6 +23054,14 @@ async function runEngineSendPipeline(conversationId, messageId) {
     // can find the chat again. A cheap no-op for every chat already noted.
     try { ensureContactStash(contact, conversationEntry); } catch { /* never a send failure */ }
   } catch (error) {
+    if (error?.code === SEND_OUTCOME_UNKNOWN) {
+      // It may have landed: "Not confirmed" with its txid and no Retry (iOS e5a9b11); the chat's
+      // next sync looks the txid up (settleUnconfirmedSends).
+      updateMessageStatus(conversationId, messageId, sendFailurePatch(error));
+      setStatus(SEND_OUTCOME_UNKNOWN_MESSAGE);
+      appendEngineLog(`Message send outcome unknown: ${error.txid || "no txid"}`);
+      return;
+    }
     updateMessageStatus(conversationId, messageId, { status: MESSAGE_STATUSES.FAILED });
     const reason = describeThrown(error);
     setStatus(`Message failed: ${reason}`);
@@ -23959,12 +24208,57 @@ function openPaymentDetailSheet(conversationId, messageId) {
   (backdrop.querySelector("[data-payment-detail-explorer]") || backdrop.querySelector("[data-payment-detail-close]"))?.focus();
 }
 
+// A message or payment whose send ended in SEND_OUTCOME_UNKNOWN: "Not confirmed", its txid kept,
+// no Retry (iOS e5a9b11). Every other failure is FAILED with its reason.
+function sendFailurePatch(error, note = null) {
+  if (error?.code === SEND_OUTCOME_UNKNOWN) {
+    return { status: MESSAGE_STATUS_UNCONFIRMED, ...(error.txid ? { txid: String(error.txid) } : {}), note: SEND_OUTCOME_UNKNOWN_MESSAGE };
+  }
+  return note == null ? { status: MESSAGE_STATUSES.FAILED } : { status: MESSAGE_STATUSES.FAILED, note };
+}
+
+// "Not confirmed" sends, looked up again as their chat syncs: once the network has the transaction
+// (a mempool, or accepted per the REST API) or a payment's output is at the recipient, it was sent.
+// unconfirmedLookupAt: txid -> the earliest next look (ms), a minute apart for its first hour,
+// then now and then.
+async function settleUnconfirmedSends(conversationEntry, contact, now = Date.now()) {
+  let changed = false;
+  for (const message of conversationEntry.messages || []) {
+    if (message.direction !== "outgoing" || message.status !== MESSAGE_STATUS_UNCONFIRMED || !message.txid) continue;
+    const txid = String(message.txid);
+    if ((unconfirmedLookupAt.get(txid) || 0) > now) continue;
+    const young = now - Number(message.createdAt || 0) < 60 * 60 * 1000;
+    unconfirmedLookupAt.set(txid, now + (young ? 60_000 : 30 * 60_000));
+    const amountKas = message.messageType === "payment" ? paymentAmountForMessage(message) : null;
+    let paid = false;
+    if (amountKas && contact?.address) {
+      try { paid = await transactionPaysRecipient(txid, contact.address, amountKas); } catch { paid = false; }
+    }
+    let known = paid;
+    if (!known) {
+      try { known = await isTransactionKnown({ withRpc: engine.withRpc.bind(engine), txid }); } catch { known = false; }
+    }
+    if (!known || message.status !== MESSAGE_STATUS_UNCONFIRMED) continue;
+    unconfirmedLookupAt.delete(txid);
+    applyMessagePatch(message, {
+      status: MESSAGE_STATUSES.CONFIRMED,
+      confirmations: Math.max(1, Number(message.confirmations || 0)),
+      note: paid ? "Kaspa payment verified at recipient output." : "The network has this transaction.",
+    });
+    changed = true;
+  }
+  return changed;
+}
+
 async function refreshPendingPaymentStatuses(conversationEntry, contact) {
   let changed = false;
   const pendingPayments = (conversationEntry.messages || []).filter((message) =>
     message.direction === "outgoing" && message.messageType === "payment" && message.txid &&
     message.status !== MESSAGE_STATUSES.CONFIRMED && message.status !== MESSAGE_STATUSES.FAILED
+    // its txid came with an unknown outcome, not an accepted submit: settleUnconfirmedSends
+    && message.status !== MESSAGE_STATUS_UNCONFIRMED
   );
+  if (await settleUnconfirmedSends(conversationEntry, contact)) changed = true;
   for (const message of pendingPayments) {
     const amountKas = paymentAmountForMessage(message);
     let recipientVerified = false;
@@ -24022,15 +24316,11 @@ function runPostSubmitStep(label, step) {
 // node has the transaction, before the slower recipient-output verification.
 // `extraFeeSompi`: a priority fee on top of the minimum (Fast / Priority / custom); `manualUtxos`:
 // coin control, the "txid:index" coins the build may pick from (null = automatic). iOS 62c2773.
-// The coins a Max send would spend right now (DSK-042 / DSK-043): every coin no scheduled KaPost
-// reserves, narrowed to the coin-control pick when there is one, as "txid:index" keys.
+// The coins a Max send would spend right now (DSK-042 / DSK-043), by the engine's own rules: no
+// coin a scheduled KaPost reserves or a send from here just spent, the coin-control pick when
+// there is one, else the largest MAX_SEND_INPUT_LIMIT (iOS 3942a5b7), as "txid:index" keys.
 function maxCoinKeys(entries, manualKeys = null) {
-  let list = excludeReservedUtxos(entries || []);
-  if (manualKeys && manualKeys.length) {
-    const wanted = new Set(manualKeys.map(String));
-    list = list.filter((entry) => wanted.has(utxoEntryKey(entry)));
-  }
-  return list.map((entry) => utxoEntryKey(entry));
+  return maxSendOutpointKeys(entries || [], manualKeys);
 }
 function sameCoinKeys(a, b) {
   const left = new Set((a || []).map(String));
@@ -24181,11 +24471,12 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
         setStatus("");
         throw error;
       }
-      applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.FAILED, note: error.message });
+      // Not confirmed (txid kept) when the network never answered, else Failed.
+      applyMessagePatch(liveMessage, sendFailurePatch(error, error.message));
       conversationEntry.updatedAt = Date.now();
       persistState();
       if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
-      setStatus(`Payment failed: ${error.message}`);
+      setStatus(error?.code === SEND_OUTCOME_UNKNOWN ? SEND_OUTCOME_UNKNOWN_MESSAGE : `Payment failed: ${error.message}`);
       throw error;
     }
     const txid = submittedTxids.at(-1) || submittedTxids[0];
@@ -25295,8 +25586,11 @@ function syncComposerSlots() {
 async function attachPhotoBlob(blob) {
   if (!canAcceptChatImageAttachment()) { photoViaNextcloud = false; return false; }
   setStatus("Compressing photo…");
+  const conversationId = activeConversationId;
   try {
     const attachment = await compressImageBlob(blob, { targetBytes: CHAT_PHOTO_TARGET_BYTES });
+    // Picked in one chat, compressed after the switch to another: it isn't staged there.
+    if (activeConversationId !== conversationId) { photoViaNextcloud = false; return false; }
     // Kept alongside the compressed envelope version so a photo sent via Nextcloud can
     // upload the ORIGINAL full-quality file instead of the payload-sized recompression.
     attachment.originalBlob = blob;
@@ -25393,6 +25687,9 @@ function createVoiceRecorder({ maxDurationSeconds, onElapsed, onFinish }) {
   let startedAt = 0;
   let timer = null;
   let cancelled = false;
+  // A start waiting on the microphone prompt. A second start meanwhile is ignored; stop() during
+  // it cancels it, and the stream the prompt hands back is switched straight off.
+  let pendingStart = null;
 
   function clearTimer() {
     if (timer) { window.clearInterval(timer); timer = null; }
@@ -25410,17 +25707,30 @@ function createVoiceRecorder({ maxDurationSeconds, onElapsed, onFinish }) {
     onFinish?.({ blob, mimeType, cancelled });
   }
 
-  /** Starts recording. Returns an error string for the caller to toast, or null on success. */
+  /** Starts recording. Returns an error string for the caller to toast, or null otherwise - which
+   *  includes a start ignored (one already running or pending) or cancelled during the mic prompt,
+   *  so callers check isRecording() afterwards before showing a recording. */
   async function start() {
-    if (recorder) return null;
+    if (recorder || pendingStart) return null;
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
       return "Voice recording isn't supported in this browser.";
     }
+    const token = {};
+    pendingStart = token;
+    let acquired;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      acquired = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
+      if (pendingStart !== token) return null; // cancelled meanwhile: nothing to report
+      pendingStart = null;
       return "Microphone access was denied.";
     }
+    if (pendingStart !== token) {
+      acquired.getTracks().forEach((track) => track.stop());
+      return null;
+    }
+    pendingStart = null;
+    stream = acquired;
     const mimeType = pickVoiceMimeType();
     chunks = [];
     cancelled = false;
@@ -25447,13 +25757,15 @@ function createVoiceRecorder({ maxDurationSeconds, onElapsed, onFinish }) {
   }
 
   function stop(cancel) {
+    // Still on the mic prompt: there is nothing to keep, so it ends as cancelled.
+    if (pendingStart && !recorder) { pendingStart = null; cancel = true; }
     cancelled = Boolean(cancel);
     clearTimer();
     if (recorder && recorder.state !== "inactive") recorder.stop();
     else handleStopped();
   }
 
-  return { start, stop, isRecording: () => recorder != null };
+  return { start, stop, isRecording: () => recorder != null, isStarting: () => pendingStart != null };
 }
 
 // Recording, then a preview you can play back before it goes anywhere (iOS "Audio ready"):
@@ -25582,13 +25894,15 @@ function exitChatAudioMode() {
   chatAudioMode = false;
   chatVoiceEncoding = false;
   voiceViaNextcloud = false; // the route belongs to this round of audio mode
-  if (chatVoiceRecorder.isRecording()) chatVoiceRecorder.stop(true);
+  // Also a start still on the mic prompt: it must not go on to record with no field showing it.
+  if (chatVoiceRecorder.isRecording() || chatVoiceRecorder.isStarting()) chatVoiceRecorder.stop(true);
   clearVoicePreview(voiceRecordingPanel);
   renderChatVoiceField();
 }
 
 async function startVoiceRecording() {
-  if (chatVoiceRecorder.isRecording()) return;
+  // A second tap while the mic prompt is up is ignored rather than opening another stream.
+  if (chatVoiceRecorder.isRecording() || chatVoiceRecorder.isStarting()) return;
   clearVoicePreview(voiceRecordingPanel);
   chatAudioMode = true;
   chatVoiceEncoding = false;
@@ -25601,6 +25915,8 @@ async function startVoiceRecording() {
     renderChatVoiceField();
     return;
   }
+  // Trashed (or the chat changed) while the prompt was up: no recording started.
+  if (!chatVoiceRecorder.isRecording()) { renderChatVoiceField(); return; }
   voiceElapsedSeconds = 0;
   renderChatVoiceField();
 }
@@ -26456,6 +26772,8 @@ const ARCHIVE_STATUS_BY_DESKTOP_STATUS = {
   [MESSAGE_STATUSES.BROADCASTING]: "pending",
   [MESSAGE_STATUSES.PENDING]: "pending",
   [MESSAGE_STATUSES.BROADCAST]: "warning",
+  // may have gone through, not known to: never exported as sent
+  [MESSAGE_STATUS_UNCONFIRMED]: "warning",
   [MESSAGE_STATUSES.CONFIRMED]: "sent",
   [MESSAGE_STATUSES.FAILED]: "failed",
 };
@@ -26795,7 +27113,9 @@ pendingPhotoRemove?.addEventListener("click", clearPendingPhoto);
 // stageNextcloudVideo; it used to send on its own the moment it was picked). No on-chain video.
 async function stageChatNextcloudVideo(file) {
   if (!canAcceptChatImageAttachment()) return;
+  const conversationId = activeConversationId;
   const thumbnail = await videoThumbnailDataUrl(file);
+  if (activeConversationId !== conversationId) return; // the chat changed while the frame loaded
   if (!setPendingPhoto({ dataUrl: thumbnail || VIDEO_PLACEHOLDER_THUMB, bytes: 0, isVideo: true })) return;
   photoViaNextcloud = true; // what goes is the link (the fee estimate prices that)
   const { filename, contentType } = nextcloudVideoUploadName(file);
@@ -29356,17 +29676,34 @@ async function openLogoutModal() {
 
 document.querySelectorAll('[data-shell-action="logout"]').forEach((button) => button.addEventListener("click", openLogoutModal));
 
-async function performLogout() {
+/** Log Out. `fromAnotherTab`: another tab logged out (the storage listener above) - the flag is
+ *  already set and that tab removed this browser's push registration, and nothing here may stop
+ *  the keys leaving this tab's memory. */
+async function performLogout({ fromAnotherTab = false } = {}) {
   try {
     closeAccountBackup();
-    persistState();
+    // Another tab's Delete Account also logs every tab out: an account no longer saved on this
+    // device is not written back from here (as the account-deleted listener above).
+    const mine = canonicalAccountAddress(String(engine.address || lockedSigningAddress || ""));
+    let stillSaved = true;
+    if (fromAnotherTab) {
+      try { stillSaved = Boolean(mine) && loadSavedAccounts().some((entry) => canonicalAccountAddress(entry.address) === mine); } catch { stillSaved = false; }
+    }
+    if (stillSaved) {
+      try { persistState(); } catch (error) { if (!fromAnotherTab) throw error; }
+    }
     // Signed out: no more closed-app notifications for this account on this browser. Signed with
     // the wallet key while it is still here; not waited for (the device key can finish it later).
-    if (engine.privateKeyHex && engine.address) webPushSignOut({ privateKeyHex: engine.privateKeyHex, address: engine.address }).catch(() => {});
-    if (engine.privateKeyHex) persistTestingWallet();
-    localStorage.setItem(SESSION_LOGGED_OUT_KEY, "true");
+    if (!fromAnotherTab && engine.privateKeyHex && engine.address) webPushSignOut({ privateKeyHex: engine.privateKeyHex, address: engine.address }).catch(() => {});
+    if (fromAnotherTab) {
+      try { if (stillSaved && engine.privateKeyHex) persistTestingWallet(); } catch (error) { appendEngineLog(`Saving the account at logout failed: ${error.message}`); }
+    } else {
+      if (engine.privateKeyHex) persistTestingWallet();
+      localStorage.setItem(SESSION_LOGGED_OUT_KEY, "true");
+    }
     clearSessionActive();
-    await engine.disconnect?.();
+    lockedSigningAddress = "";
+    try { await engine.disconnect?.(); } catch (error) { if (!fromAnotherTab) throw error; }
     engine.clearSession();
     lockKeyVault(); // with a password, signing back in asks for it again
     setActiveConversationId(null);
@@ -29567,7 +29904,9 @@ async function runIncomingResync(conversationIds) {
     for (const conversationEntry of targets) {
       conversationEntry.messages = (conversationEntry.messages || []).filter((message) => message.direction !== "incoming");
       conversationEntry.unreadCount = 0;
-      conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor: 0, lastSyncAt: 0 };
+      // Counted as a rewind: a sweep already fetching this chat keeps cursor 0 and runs again.
+      rewindConversationCursor(conversationEntry, 0);
+      conversationEntry.sync.lastSyncAt = 0;
     }
     if (all) {
       // Reset the incoming-handshake scan so requests re-sync from the start too.
@@ -30261,9 +30600,20 @@ updateServiceSummary();
 appendEngineLog("Step 75: fixed signed-out account dialog layering; account logic remains Step 73.");
 renderTransportReadiness();
 
+// Two tabs open on different accounts: a tab going to the background (or away) must not write its
+// own account back as the one a reload restores, over the switch another tab made since. It
+// re-saves only while the stored active account is still its own, or none is stored yet.
+function shouldPersistWalletOnLeave() {
+  if (!engine.privateKeyHex) return false;
+  try {
+    const active = readActiveAccountAddress();
+    return !active || active === toActiveNetworkAddress(String(engine.address || "").trim());
+  } catch { return false; }
+}
+
 window.addEventListener("beforeunload", () => {
   try {
-    if (engine.privateKeyHex) persistTestingWallet();
+    if (shouldPersistWalletOnLeave()) persistTestingWallet();
     persistState();
     // Best-effort: start the pending IndexedDB write NOW instead of waiting
     // out the debounce the page is about to tear down.
@@ -30274,7 +30624,7 @@ window.addEventListener("beforeunload", () => {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
     try {
-      if (engine.privateKeyHex) persistTestingWallet();
+      if (shouldPersistWalletOnLeave()) persistTestingWallet();
       persistState();
       flushChatStorage();
     } catch (error) { console.error(error); }
@@ -31359,6 +31709,11 @@ function appendGroupMessage(groupId, message) {
     let changed = false;
     if (!existing.msgIdHex && message.msgIdHex) { existing.msgIdHex = message.msgIdHex; changed = true; }
     if (!existing.txId && message.txId) { existing.txId = message.txId; changed = true; }
+    // A send left "Not confirmed" whose chain copy came back did go out.
+    if (existing.status === MESSAGE_STATUS_UNCONFIRMED && message.txId && message.status !== MESSAGE_STATUS_UNCONFIRMED) {
+      existing.status = MESSAGE_STATUSES.CONFIRMED;
+      changed = true;
+    }
     if (changed) saveGroupMessages(groupId, list);
     return false;
   }
@@ -32039,7 +32394,7 @@ function openGroupChat(groupId) {
   // Fresh composer state per group open - except the text, which is the group's draft (iOS
   // 360e5d2): what was typed comes back when the group reopens.
   try {
-    if (groupVoiceRecorder || groupVoiceEncoding) cancelGroupVoice(); // a recording belongs to its group
+    if (groupVoiceRecorder || groupVoiceEncoding || groupVoiceStartToken) cancelGroupVoice(); // a recording belongs to its group
     cancelGroupReply(); groupDraftMentions.clear(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto();
     if (groupComposerInput) { groupComposerInput.value = readDraft(`group:${groupId}`); autoGrowGroupComposer(); }
   } catch { /* composer wiring not ready during boot */ }
@@ -32269,7 +32624,8 @@ function openMsgContextMenu({ x, y, reaction, items, title = "", preview = "" })
     groupMessageArea?.removeEventListener("scroll", cleanup, true);
   }
   const onDown = (ev) => { if (!menu.contains(ev.target)) cleanup(); };
-  const onKey = (ev) => { if (ev.key === "Escape") cleanup(); };
+  // Marked handled, so the page's Escape (closing the group chat beneath) leaves it at the menu.
+  const onKey = (ev) => { if (ev.key === "Escape") { ev.preventDefault(); cleanup(); } };
   window.setTimeout(() => {
     document.addEventListener("mousedown", onDown, true);
     document.addEventListener("keydown", onKey, true);
@@ -32315,14 +32671,19 @@ function openQuickReactionBarFor({ anchor, alignRight = false, current = null, o
     bar.remove();
     document.removeEventListener("mousedown", onDown, true);
     document.removeEventListener("keydown", onKey, true);
-    messageArea?.removeEventListener("scroll", cleanup, true);
+    for (const area of scrollAreas) area.removeEventListener("scroll", cleanup, true);
   };
   const onDown = (ev) => { if (!bar.contains(ev.target)) cleanup(); };
-  const onKey = (ev) => { if (ev.key === "Escape") cleanup(); };
+  // Marked handled, so the page's Escape (closing the group chat beneath) leaves it at the bar.
+  const onKey = (ev) => { if (ev.key === "Escape") { ev.preventDefault(); cleanup(); } };
+  // A scroll of the thread it sits on closes it - the group and room threads as well as the 1:1 -
+  // or it would float over messages it has nothing to do with.
+  const roomBody = anchor.closest?.("[data-broadcast-room-body]");
+  const scrollAreas = [messageArea, groupMessageArea, roomBody].filter(Boolean);
   window.setTimeout(() => {
     document.addEventListener("mousedown", onDown, true);
     document.addEventListener("keydown", onKey, true);
-    messageArea?.addEventListener("scroll", cleanup, true);
+    for (const area of scrollAreas) area.addEventListener("scroll", cleanup, true);
   }, 0);
   bar.addEventListener("click", (event) => {
     const emojiButton = event.target.closest("[data-quick-emoji]");
@@ -33666,8 +34027,12 @@ async function syncGroupsNow({ catchUp = false } = {}) {
   const mgr = getGroupManager();
   // Group chats live on the KaChat indexer: none on testnet yet, so nothing to sync.
   if (!mgr || !engine.isKasiaCipherLoaded?.() || !currentIndexerUrl()) return 0;
+  // As the 1:1 sweep: a pass that started for one account and ends after an in-place create /
+  // import stores nothing - applyGroupSyncResult writes under whichever account is active now.
+  const account = accountGuard(() => engine.address);
   let result;
   try { result = await mgr.syncGroups(); } catch { return 0; }
+  if (!account.still() || result?.skipped === "account-changed") return 0;
   const changed = applyGroupSyncResult(result, { catchUp });
   settleLeftoverGroupSends();
   return changed;
@@ -34269,6 +34634,10 @@ const groupMentionSuggestions = document.querySelector("[data-group-mention-sugg
 let groupReplyTarget = null;            // message currently being replied to
 const groupDraftMentions = new Map();   // inserted @label -> kaspa address (for encode-on-send)
 let groupVoiceRecorder = null, groupVoiceChunks = [], groupVoiceStartMs = 0, groupVoiceTimer = null, groupVoiceMime = "";
+// A start waiting on the microphone prompt (startGroupVoice): a second tap meanwhile is ignored, and
+// cancelGroupVoice (trash, another group, an account switch) clears it so the stream the prompt
+// hands back goes straight off.
+let groupVoiceStartToken = null;
 
 function autoGrowGroupComposer() {
   syncGroupComposerSlots();
@@ -34378,6 +34747,12 @@ function patchGroupMessage(groupId, localId, patch) {
   saveGroupMessages(groupId, list);
 }
 
+// A group send the network never answered: "Not confirmed" with its txid and no Retry (iOS
+// e5a9b11). Its chain copy, matched by that txid, makes it sent (appendGroupMessage).
+function groupUnconfirmedPatch(error) {
+  return { status: MESSAGE_STATUS_UNCONFIRMED, txId: error?.txid ? String(error.txid) : null };
+}
+
 // Re-send a failed group message: patch it back to pending and retry the broadcast in place
 // (no duplicate row), mirroring the 1:1 retry.
 async function retryGroupMessage(message) {
@@ -34391,8 +34766,10 @@ async function retryGroupMessage(message) {
     const res = await mgr.sendGroupMessage(gid, message.text);
     patchGroupMessage(gid, message.id, { txId: res?.txid || null, msgIdHex: res?.msgIdHex || null, status: MESSAGE_STATUSES.CONFIRMED });
   } catch (error) {
-    patchGroupMessage(gid, message.id, { status: MESSAGE_STATUSES.FAILED });
-    setStatus(`Group send failed: ${error.message}`);
+    // Not confirmed (txid kept, no Retry) when the network never answered, else Failed.
+    const unknown = error?.code === SEND_OUTCOME_UNKNOWN;
+    patchGroupMessage(gid, message.id, unknown ? groupUnconfirmedPatch(error) : { status: MESSAGE_STATUSES.FAILED });
+    setStatus(unknown ? SEND_OUTCOME_UNKNOWN_MESSAGE : `Group send failed: ${error.message}`);
   }
   if (activeGroupId === gid) { renderGroupMessages(); renderGroupList(); }
 }
@@ -34420,9 +34797,10 @@ async function sendGroupWire(text, { feeKas = null, errorPrefix = "" } = {}) {
     renderGroupList();
     return true;
   } catch (error) {
-    patchGroupMessage(gid, localId, { status: MESSAGE_STATUSES.FAILED });
+    const unknown = error?.code === SEND_OUTCOME_UNKNOWN;
+    patchGroupMessage(gid, localId, unknown ? groupUnconfirmedPatch(error) : { status: MESSAGE_STATUSES.FAILED });
     if (activeGroupId === gid) renderGroupMessages();
-    setStatus(`Group send failed: ${error.message}`);
+    setStatus(unknown ? SEND_OUTCOME_UNKNOWN_MESSAGE : `Group send failed: ${error.message}`);
     // iOS: the reason in red above the composer.
     if (activeGroupId === gid) setGroupSendError(`${errorPrefix}${userFacingError(error)}`);
     return false;
@@ -34793,10 +35171,26 @@ function renderGroupVoiceRow() {
   syncGroupComposerSlots();
 }
 async function startGroupVoice() {
-  if (!activeGroupId || groupVoiceRecorder || groupVoiceEncoding) return;
+  if (!activeGroupId || groupVoiceRecorder || groupVoiceEncoding || groupVoiceStartToken) return;
   setGroupSendError(null);
+  const token = {};
+  groupVoiceStartToken = token;
+  const gid = activeGroupId;
+  let stream = null;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    if (groupVoiceStartToken !== token) return;
+    stream = null;
+  }
+  if (groupVoiceStartToken !== token || activeGroupId !== gid) {
+    stream?.getTracks().forEach((t) => t.stop());
+    if (groupVoiceStartToken === token) groupVoiceStartToken = null;
+    return;
+  }
+  groupVoiceStartToken = null;
+  try {
+    if (!stream) throw new Error("Microphone access denied");
     groupVoiceMime = pickVoiceMimeType();
     groupVoiceRecorder = new MediaRecorder(stream, groupVoiceMime ? { mimeType: groupVoiceMime, audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND } : undefined);
     groupVoiceChunks = [];
@@ -34816,6 +35210,7 @@ async function startGroupVoice() {
     }, 250);
   } catch (error) {
     // iOS PublicChatAudioRecording's failure, shown as the composer's red caption.
+    stream?.getTracks().forEach((t) => t.stop());
     groupVoiceRecorder = null;
     setGroupSendError("Microphone access denied");
     renderGroupVoiceRow();
@@ -34823,6 +35218,7 @@ async function startGroupVoice() {
 }
 function stopGroupVoiceTimer() { if (groupVoiceTimer) { clearInterval(groupVoiceTimer); groupVoiceTimer = null; } }
 function cancelGroupVoice() {
+  groupVoiceStartToken = null;
   stopGroupVoiceTimer();
   try { groupVoiceRecorder?.stop(); } catch {}
   groupVoiceRecorder = null; groupVoiceChunks = [];
@@ -34993,7 +35389,10 @@ groupManageBody?.addEventListener("click", async (event) => {
           : phase === "messages" ? `Re-fetching messages (${done} of ${total} members)`
             : phase === "rebuilding" ? "Decrypting history" : "Starting";
       const before = groupMessages(groupId).length;
+      const account = accountGuard(() => engine.address);
       const result = await mgr.forceRefresh(groupId, (progress) => { if (phaseEl) phaseEl.textContent = phaseLabel(progress); });
+      // Never stored under an account switched to while it ran (as syncGroupsNow).
+      if (!account.still()) throw new Error("The account changed during the refresh.");
       applyGroupSyncResult(result, { catchUp: true });
       const recovered = Math.max(0, groupMessages(groupId).length - before);
       // Which wall the repair hit, so "nothing recovered" can be diagnosed (iOS rejections).
@@ -35232,8 +35631,14 @@ groupManageBody?.addEventListener("click", async (event) => {
   }
 });
 
+// An overlay on top (a dialog, the emoji picker, a message menu, the quick-reaction bar, a payment
+// detail sheet) takes the Escape first and marks it handled; the group screens beneath stay open.
+function overlayTakesEscape(event) {
+  if (event.defaultPrevented) return true;
+  return Boolean(document.querySelector(".app-dialog-backdrop:not([hidden]), .emoji-picker-backdrop:not([hidden]), .quick-reaction-bar, .payment-detail-backdrop"));
+}
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
+  if (event.key !== "Escape" || overlayTakesEscape(event)) return;
   if (groupManageScreen && !groupManageScreen.hidden) { closeGroupManage(); return; }
   if (groupCreateModal && !groupCreateModal.hidden) { closeGroupCreate({ cancelled: true }); return; }
   if (groupChatScreen && !groupChatScreen.hidden) { closeGroupChat(); }

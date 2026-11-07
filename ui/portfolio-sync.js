@@ -389,6 +389,20 @@ export function portfolioSyncForArchive(sync) {
   return { ...sync, portfolios: sync.portfolios.filter((p) => !isPristinePortfolioSeed(p, sync.transactions, sync.fees)) };
 }
 
+/**
+ * What this device keeps on Nextcloud: like portfolioSyncForArchive, but when deletions are left
+ * and the pristine seed is all there is, the seed's file is uploaded to carry them (Nextcloud has
+ * no tombstone file of its own: every portfolio file carries every deletion). Without a carrier the
+ * deleted portfolio's file would go and no other device would ever hear of the deletion. Other
+ * devices fold the seed into their own (foldPortfolioEquivalents). KaPay iOS drops the seed here
+ * too; Desktop differs on purpose.
+ */
+export function portfolioSyncForUpload(sync) {
+  const kept = portfolioSyncForArchive(sync);
+  if (kept.portfolios.length || !sync.tombstones.length) return kept;
+  return { ...kept, portfolios: sync.portfolios.slice(0, 1) };
+}
+
 export function isPortfolioSyncEmpty(sync) {
   return !sync.portfolios.length && !sync.transactions.length && !sync.fees.length && !sync.tombstones.length;
 }
@@ -672,9 +686,10 @@ function isPristineDesktopSeed(p, fees) {
 }
 
 /**
- * Reads a CSV into `state` (in place). A row whose timestamp exactly matches an existing row of
- * the portfolio it goes into replaces that row (same id, new data), so re-importing a corrected
- * export updates the ledger instead of piling up copies. A fee in USD is folded into the total:
+ * Reads a CSV into `state` (in place). A row whose timestamp falls in the same second as a row the
+ * portfolio it goes into already had replaces that row (same id, new data; each old row at most
+ * once), so re-importing a corrected export updates the ledger instead of piling up copies. Rows
+ * of the same file never replace each other. A fee in USD is folded into the total:
  * added for buys, subtracted for sells.
  *
  * Which portfolio (iOS importCsv / resolveImportPortfolio): a row's `Portfolio` column names it.
@@ -721,11 +736,24 @@ export function importPortfolioCsv(state, content, { fees = [], maxPortfolios = 
     return targetByName.get(key);
   };
 
-  const indexByTimestamp = new Map(); // portfolio id -> Map(timestamp -> index in its rows)
+  // The export writes whole seconds, so rows match on the second: a row added with
+  // milliseconds (address import, Add to Portfolio) is found again when its export comes back.
+  const second = (timestamp) => Math.floor(timestamp / 1000);
+  // portfolio id -> Map(second -> indexes of the rows that were there before the import, oldest
+  // first). Only those can be replaced, each once: a buy and a sell entered in the same minute
+  // are two rows of the file, not one replacing the other.
+  const indexByTimestamp = new Map();
   const indexFor = (portfolio) => {
     if (!indexByTimestamp.has(portfolio.id)) {
       const index = new Map();
-      (portfolio.transactions || []).forEach((tx, i) => index.set(tx.timestamp, i));
+      (portfolio.transactions || [])
+        .map((tx, i) => ({ tx, i }))
+        .sort((a, b) => a.tx.timestamp - b.tx.timestamp || a.i - b.i)
+        .forEach(({ tx, i }) => {
+          const key = second(tx.timestamp);
+          if (!index.has(key)) index.set(key, []);
+          index.get(key).push(i);
+        });
       indexByTimestamp.set(portfolio.id, index);
     }
     return indexByTimestamp.get(portfolio.id);
@@ -762,13 +790,13 @@ export function importPortfolioCsv(state, content, { fees = [], maxPortfolios = 
     if (!targets.includes(portfolio)) targets.push(portfolio);
     portfolio.transactions ||= [];
     const index = indexFor(portfolio);
-    const existingIndex = index.get(timestamp);
+    const existingIndex = index.get(second(timestamp))?.shift();
     if (existingIndex !== undefined) {
       const existing = portfolio.transactions[existingIndex];
-      portfolio.transactions[existingIndex] = { ...existing, type, amountKas: kas, fiatValue, timestamp, notes };
+      // Same second: the row keeps its own milliseconds.
+      portfolio.transactions[existingIndex] = { ...existing, type, amountKas: kas, fiatValue, timestamp: existing.timestamp, notes };
     } else {
       portfolio.transactions.push({ id: newId(), type, amountKas: kas, fiatValue, timestamp, notes });
-      index.set(timestamp, portfolio.transactions.length - 1);
     }
     count += 1;
   }

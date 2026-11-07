@@ -257,6 +257,25 @@ export function claimMayPost(lastClaimAt, now, force = false) {
  *  played again (iOS 8d5f925 pendingMoveTimeoutMs). */
 export const PENDING_MOVE_TIMEOUT_MS = 25_000;
 export const PENDING_MOVE_EXPIRED_MESSAGE = "Your move didn't reach the network. Play it again.";
+/**
+ * Our own moves still on this device's clock (sent, applied at once, not yet back from the
+ * chain), at wall time `now`: `sent` maps txId -> { tournamentId, gameId, sentAt }. A move the
+ * opponent has answered is on chain (`seen`: stop timing it, its chain time comes with the next
+ * poll). One still unanswered PENDING_MOVE_TIMEOUT_MS after it went out was never mined (`drop`:
+ * the row goes, so the board offers the move again). This device's view only - never part of the
+ * reduce, which every device runs on the chain's rows alone.
+ */
+export function unconfirmedLocalMoves(sent, tournaments, now) {
+  const drop = [];
+  const seen = [];
+  for (const [txId, { tournamentId, gameId, sentAt }] of sent || []) {
+    const moves = tournaments?.[tournamentId]?.games?.[gameId]?.moves || [];
+    const index = moves.findIndex((m) => m.txId === txId);
+    if (index >= 0 && index < moves.length - 1) { seen.push(txId); continue; }
+    if (now - sentAt > PENDING_MOVE_TIMEOUT_MS) drop.push(txId);
+  }
+  return { drop, seen };
+}
 /** Live with at least one game still undecided. */
 export function isInPlay(t, now) {
   return tournamentStatus(t) === "live" && Object.values(t.games).some((g) => !isDecided(g, now));

@@ -40,7 +40,7 @@ import { isNextcloudConnected, uploadToKaChatFolder, downloadNextcloudText, open
 import {
   PORTFOLIO_SEED_NAME, isPortfolioUuid, newPortfolioUuid, stampPortfolioChanges, mergePortfolioTombstones,
   mergePortfolioSync, portfolioSyncFromDesktop, portfolioSyncToDesktop, portfolioSyncFromArchive,
-  portfolioSyncToArchive, portfolioSyncForArchive, isPortfolioSyncEmpty,
+  portfolioSyncToArchive, portfolioSyncForArchive, portfolioSyncForUpload, isPortfolioSyncEmpty,
   portfolioCsvText, importPortfolioCsv, portfolioCsvImportMessage,
 } from "./portfolio-sync.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
@@ -115,7 +115,9 @@ let editingTx = null;      // null = closed; { id } editing; { id: null } adding
 // null = closed; otherwise { busy, progress, input, resolving, resolvedAddress, resolvedDomain,
 // notFound } — the KNS resolution state for the Add Kaspa Address sheet.
 let addressImport = null;
-let priceBackfillTimer = null; // non-null while the background price backfill loop is running
+// The running background price backfill loop's token (null: none). An account switch clears it,
+// which retires that loop, so the next account's loop starts at once instead of waiting it out.
+let priceBackfillTimer = null;
 let view = "main";         // "main" | "price" | "value" | "hashrate" — which screen is showing
 /// What the mining estimate has been typed into. Held here rather than in the DOM so the figure
 /// survives the re-render each keystroke triggers.
@@ -2667,18 +2669,27 @@ function hasPendingPrices() {
 function startPriceBackfillIfNeeded() {
   if (priceBackfillTimer || !hasPendingPrices()) return;
   const accountKey = deps.accountScopedKey(PORTFOLIO_KEY);
-  priceBackfillTimer = (async () => {
+  const token = {};
+  priceBackfillTimer = token;
+  // An account switch reloaded `state` out from under this loop — its rows are gone. The token
+  // also catches a switch away and back while it slept.
+  const stillCurrent = () => priceBackfillTimer === token && deps.accountScopedKey(PORTFOLIO_KEY) === accountKey;
+  (async () => {
     for (const delay of [0, 30_000, 120_000, 300_000]) {
       if (delay > 0) await sleep(delay);
-      // An account switch reloaded `state` out from under this loop — its rows are gone.
-      if (deps.accountScopedKey(PORTFOLIO_KEY) !== accountKey || !hasPendingPrices()) break;
-      await runPriceBackfillPass(accountKey);
+      if (!stillCurrent() || !hasPendingPrices()) break;
+      await runPriceBackfillPass(stillCurrent);
     }
-    priceBackfillTimer = null;
-  })();
+    if (priceBackfillTimer === token) priceBackfillTimer = null;
+  })().catch(() => { if (priceBackfillTimer === token) priceBackfillTimer = null; });
 }
 
-async function runPriceBackfillPass(accountKey) {
+/** Retires the running loop: it belonged to the account before a switch. */
+function cancelPriceBackfill() {
+  priceBackfillTimer = null;
+}
+
+async function runPriceBackfillPass(stillCurrent) {
   const currency = currencyCode();
   const pending = pendingPriceRows();
   const pendingFees = pendingPriceFees();
@@ -2694,13 +2705,13 @@ async function runPriceBackfillPass(accountKey) {
   // stays bounded — the rest wait for the next pass.
   const missing = days.filter((day) => prices[day] === undefined).sort().reverse().slice(0, 30);
   for (const day of missing) {
-    if (deps.accountScopedKey(PORTFOLIO_KEY) !== accountKey) return;
+    if (!stillCurrent()) return;
     const value = await resolveDailyPriceSingle(day, currency);
     if (value !== null) prices[day] = value;
     await sleep(PRICE_REQUEST_SPACING_MS);
   }
 
-  if (deps.accountScopedKey(PORTFOLIO_KEY) !== accountKey) return;
+  if (!stillCurrent()) return;
   let changed = false;
   for (const p of state.portfolios) {
     for (const tx of p.transactions || []) {
@@ -3177,10 +3188,11 @@ export function importPortfolioArchive(archive) {
   return importPortfolioSync(portfolioSyncFromArchive(archive));
 }
 
-/** What this account keeps on Nextcloud: everything but an untouched "Portfolio 1" seed. */
+/** What this account keeps on Nextcloud: everything but an untouched "Portfolio 1" seed - unless
+ *  the seed is needed to carry deletions (portfolioSyncForUpload). */
 export function portfolioBackupSync() {
   if (!deps) return null;
-  return mergePortfolioSync([portfolioSyncForArchive(currentPortfolioSync())]);
+  return mergePortfolioSync([portfolioSyncForUpload(currentPortfolioSync())]);
 }
 
 /** Merges `incoming` in (per item the newest edit or deletion wins) and reloads. True when anything
@@ -3270,6 +3282,7 @@ export function refreshPortfolio() {
 export function resetPortfolioForAccount() {
   closeActiveScanner(); // an account switch must never leave a camera running
   closeMoveSheet();     // its row belonged to the previous account
+  cancelPriceBackfill(); // the previous account's loop may be sleeping; this account's starts below
   loadState();
   ensureDefaultPortfolio();
   render();

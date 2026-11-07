@@ -529,7 +529,10 @@ function startModule() {
     sealBackupPayload: async (json) => { backupsSealed += 1; return sealFor(wallet, json); },
     openBackupPayload: async (raw) => openFor(wallet, raw),
     backupKeyAvailable: () => backupKeyAvailable,
-    portfolioBackupSync: () => portfolioSync.mergePortfolioSync([portfolios.local]),
+    // As ui/portfolio.js portfolioBackupSync: the pristine seed only where it carries deletions.
+    portfolioBackupSync: () => (portfolios.backupOverride
+      ? portfolios.backupOverride()
+      : portfolioSync.mergePortfolioSync([portfolioSync.portfolioSyncForUpload(portfolios.local)])),
     importPortfolioSync: (incoming) => {
       const before = JSON.stringify(portfolioSync.mergePortfolioSync([portfolios.local]));
       portfolios.local = portfolioSync.mergePortfolioSync([portfolios.local, incoming]);
@@ -775,6 +778,54 @@ test("portfolio: a deleted one's file goes, and one this device doesn't know of 
   await runPortfolioBackup();
   assert.equal(dav.get("sam", "KaChat/Short.json"), undefined);
   assert.deepEqual((await pfFile("Long Term.json")).tombstones.map((t) => t.id), [PF_SHORT], "the other files carry the deletion");
+});
+
+const PF_SEED = "AAAAAAAA-0000-4000-8000-0000000000FF";
+const pfSeed = () => ({ id: PF_SEED, name: portfolioSync.PORTFOLIO_SEED_NAME, sortOrder: 0, createdAt: 1_770_000_000_000, updatedAt: null });
+
+test("portfolio: with only the untouched seed left, the seed's file carries the deletion before the deleted file goes", async () => {
+  pfFake();
+  portfolios.local = pfState([pfSeed(), pfRow(PF_LONG, "Long Term")]);
+  await runPortfolioBackup();
+  assert.equal(dav.get("sam", "KaChat/Portfolio 1.json"), undefined, "a seed alone is never uploaded");
+  portfolios.local = pfState([pfSeed()], [], [{ kind: "portfolio", id: PF_LONG, deletedAt: 1_790_000_000_000 }]);
+  await runPortfolioBackup();
+  assert.equal(dav.get("sam", "KaChat/Long Term.json"), undefined);
+  const carrier = await pfFile("Portfolio 1.json");
+  assert.deepEqual(carrier.tombstones.map((t) => t.id), [PF_LONG], "another device hears of the deletion");
+  dav.log = [];
+  await runPortfolioBackup();
+  assert.deepEqual(dav.log.filter((r) => r.method !== "PROPFIND" && r.method !== "GET").map((r) => r.method), [], "no upload/delete loop");
+});
+
+test("portfolio: with nothing to carry a deletion, the deleted portfolio's file stays", async () => {
+  pfFake();
+  portfolios.local = pfState([pfRow(PF_LONG, "Long Term")]);
+  await runPortfolioBackup();
+  portfolios.local = pfState([], [], [{ kind: "portfolio", id: PF_LONG, deletedAt: 1_790_000_000_000 }]);
+  portfolios.backupOverride = () => portfolioSync.mergePortfolioSync([portfolios.local]);
+  try { await runPortfolioBackup(); } finally { portfolios.backupOverride = null; }
+  assert.ok(dav.get("sam", "KaChat/Long Term.json"), "kept until some file carries the deletion");
+});
+
+test("portfolio: an edit made during the upload is still owed afterwards", async () => {
+  pfFake(WALLET_A, { autoBackup: true, lastAutoBackup: Date.now() });
+  const owed = () => JSON.parse(local.getItem(scopedKey("kachat-nextcloud-v1", WALLET_A))).portfolioBackupOwed;
+  portfolios.local = pfState([pfRow(PF_LONG, "Long Term")]);
+  notePortfolioChanged();
+  assert.equal(owed(), true);
+  let edited = false;
+  dav.hook = async ({ method }) => {
+    if (method === "PUT" && !edited) { edited = true; notePortfolioChanged(); }
+  };
+  await runPortfolioBackup();
+  dav.hook = null;
+  assert.ok(edited);
+  assert.equal(owed(), true, "the edit during the upload isn't marked backed up");
+  await runPortfolioBackup();
+  assert.equal(owed(), false, "a backup with no edit during it clears it");
+  storeAccount(WALLET_A, { autoBackup: false });
+  resetNextcloudForAccount();
 });
 
 test("portfolio: the file is the contacts' envelope, with a fresh nonce on every write", async () => {

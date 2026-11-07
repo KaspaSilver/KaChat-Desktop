@@ -7,6 +7,7 @@ import {
   collectLocalStorageEntries, filterChatEntries, hashSnapshot, hasSavedAccounts,
   validateReadyMessage, validateAckMessage, validateDataMessage, createMigrationReceiver,
   MSG_READY, MSG_DATA, MSG_ACK, PROTOCOL_VERSION, MIGRATED_IN_MARKER_KEY, MIGRATED_MARKER_KEY,
+  MOVE_TOKEN_PARAM, moveTokenFromHash,
 } from "../ui/origin-migration.js";
 
 class MemoryStorage {
@@ -28,6 +29,7 @@ class MemoryChatStore {
 const OLD = "https://kachat.app";
 const NEW = "https://desktop.kachat.app";
 const NONCE = "ab".repeat(32);
+const TOKEN = "5c".repeat(32); // the move screen's, from the new window's fragment
 const opener = { name: "opener-window" };
 const popup = { name: "popup-window" };
 let passed = 0;
@@ -76,13 +78,13 @@ function dataEvent(overrides = {}, dataOverrides = {}) {
   return {
     origin: OLD,
     source: opener,
-    data: { type: MSG_DATA, v: PROTOCOL_VERSION, nonce: NONCE, snapshot: snapshot().snapshot, ...dataOverrides },
+    data: { type: MSG_DATA, v: PROTOCOL_VERSION, nonce: NONCE, token: TOKEN, path: "/desktop/", snapshot: snapshot().snapshot, ...dataOverrides },
     ...overrides,
   };
 }
 function receiver({ storage = new MemoryStorage(), chatStore = new MemoryChatStore(), confirm = async () => true, maxChars } = {}) {
   const replies = [];
-  const r = createMigrationReceiver({ expectedOrigin: OLD, source: opener, nonce: NONCE, storage, chatStore, confirm, reply: (m) => replies.push(m), maxChars, now: () => 1234 });
+  const r = createMigrationReceiver({ expectedOrigin: OLD, source: opener, nonce: NONCE, token: TOKEN, fromPath: "/desktop/", storage, chatStore, confirm, reply: (m) => replies.push(m), maxChars, now: () => 1234 });
   return { r, replies, storage, chatStore };
 }
 
@@ -290,11 +292,47 @@ await test("end to end in memory: sender snapshot -> receiver -> ack hash equals
   const sentHash = hashSnapshot(snap);
   const { r, replies } = receiver();
   // what postMessage delivers is a structured clone
-  const res = await r.handle({ origin: OLD, source: opener, data: structuredClone({ type: MSG_DATA, v: 1, nonce: NONCE, snapshot: snap }) });
+  const res = await r.handle({ origin: OLD, source: opener, data: structuredClone({ type: MSG_DATA, v: 1, nonce: NONCE, token: TOKEN, path: "/desktop/", snapshot: snap }) });
   assert.equal(res.stored, true);
   const verdict = validateAckMessage({ origin: NEW, source: popup, data: replies[0] }, { expectedOrigin: NEW, popup, nonce: NONCE });
   assert.equal(verdict.ack.hash, sentHash);
-  assert.equal(validateDataMessage({ origin: OLD, source: opener, data: { type: MSG_DATA, v: 1, nonce: NONCE, snapshot: snap } }, { expectedOrigin: OLD, source: opener, nonce: NONCE }).ok, true);
+  assert.equal(validateDataMessage({ origin: OLD, source: opener, data: { type: MSG_DATA, v: 1, nonce: NONCE, token: TOKEN, path: "/desktop/", snapshot: snap } }, { expectedOrigin: OLD, source: opener, nonce: NONCE, token: TOKEN }).ok, true);
+});
+
+await test("receiver: another kachat.app page cannot push a snapshot (move token + /desktop/ path)", async () => {
+  // The nonce reaches whatever kachat.app page holds the opener window; the token only the move
+  // screen that opened it.
+  for (const token of ["cd".repeat(32), TOKEN.toUpperCase(), TOKEN.slice(2), "", undefined, NONCE]) {
+    const { r, replies, storage } = receiver();
+    const res = await r.handle(dataEvent({}, { token }));
+    assert.deepEqual([res.accepted, res.reason], [false, "token"], String(token));
+    assert.equal(replies.length, 0);
+    assert.equal(storage.length, 0);
+  }
+  for (const path of ["/", "/post/abc", "/desktopx/", "/link/desktop/", "desktop/", "", undefined, 42]) {
+    const { r, replies, storage } = receiver();
+    const res = await r.handle(dataEvent({}, { path }));
+    assert.deepEqual([res.accepted, res.reason], [false, "path"], String(path));
+    assert.equal(replies.length, 0);
+    assert.equal(storage.length, 0);
+  }
+  for (const path of ["/desktop/", "/desktop", "/desktop/index.html"]) {
+    assert.equal((await receiver().r.handle(dataEvent({}, { path }))).stored, true, path);
+  }
+  // A receiver without a well-formed token of its own accepts nothing.
+  for (const token of ["", undefined, "short"]) {
+    assert.equal(validateDataMessage(dataEvent({}, { token }), { expectedOrigin: OLD, source: opener, nonce: NONCE, token }).reason, "token");
+  }
+});
+
+await test("new side: the move token comes only from the fragment's kachat-move parameter", () => {
+  assert.equal(MOVE_TOKEN_PARAM, "kachat-move");
+  assert.equal(moveTokenFromHash(`#kachat-move=${TOKEN}`), TOKEN);
+  assert.equal(moveTokenFromHash(`#a=1&kachat-move=${TOKEN}`), TOKEN);
+  assert.equal(moveTokenFromHash(""), "");
+  assert.equal(moveTokenFromHash("#kachat-move=xyz"), "");
+  assert.equal(moveTokenFromHash(`#kachat-move=${TOKEN.toUpperCase()}`), "");
+  assert.equal(moveTokenFromHash(`#other=${TOKEN}`), "");
 });
 
 console.log(`\n${passed} origin-migration tests passed`);

@@ -7,7 +7,9 @@
 // The same promises as the Node relay (tools/test-relay-guard.mjs) for a site other people open:
 // probes, navigation refusal, the encoded origin kept, blocked hosts and literal IPs, no Nextcloud,
 // the write gate, the ChangeNOW key on the four swap calls from this site only, stripped request and
-// response headers, checked redirect hops, soft 404, rate limits, and no relaying into itself.
+// response headers, checked redirect hops, soft 404, rate limits, and no relaying into itself; and
+// fetch() only (no script/style/worker/media loads, no script or style types out), never for
+// another website's page (Sec-Fetch-Site: cross-site, another site's Origin).
 import { onRequest, clientKey } from "../functions/nc-proxy/[[path]].js";
 import { CHANGENOW_KEY_HEADER, CHANGENOW_CLIENT_KEY_HEADER, NEXTCLOUD_REFUSED_MESSAGE, SWAP_UNAVAILABLE_MESSAGE, EXTENSION_ID_HEADER } from "./relay-rules.mjs";
 
@@ -243,6 +245,46 @@ async function relay(path, { method = "GET", headers = {}, body, env = {}, ip } 
   check("an IPv6 client counts by its /64", key("2001:db8:1:2:aaaa::1") === key("2001:db8:1:2:bbbb::9") && key("2001:db8:1:2::1") === "2001:db8:1:2::/64");
   check("another /64 is another client", key("2001:db8:1:3::1") !== key("2001:db8:1:2::1"));
   check("IPv4-mapped IPv6 counts as the IPv4 address", key("::ffff:203.0.113.9") === "203.0.113.9");
+}
+
+// ---- fetch() only, never code, never for other websites ----------------------------------------
+{
+  answer = () => new Response("alert(1)", { status: 200, headers: { "content-type": "text/javascript; charset=utf-8" } });
+  const api = `/nc-proxy/${enc("https://api.kaspa.org")}/info`;
+  for (const dest of ["script", "style", "worker", "sharedworker", "serviceworker", "image", "audio", "video", "font", "manifest", "xslt", "track", "paintworklet"]) {
+    const r = await relay(api, { headers: { "sec-fetch-dest": dest, "sec-fetch-mode": "no-cors" } });
+    check(`sec-fetch-dest: ${dest} is refused before anything goes out`, r.status === 403 && calls.length === 0, `status ${r.status}`);
+  }
+  let r = await relay(api, { headers: { "sec-fetch-dest": "empty", "sec-fetch-site": "same-origin" } });
+  check("a script type goes out as text/plain", r.status === 200 && r.headers.get("content-type") === "text/plain", r.headers.get("content-type"));
+  for (const type of ["text/css", "application/x-javascript", "application/wasm", "text/xsl", "application/xslt+xml"]) {
+    answer = () => new Response("x", { status: 200, headers: { "content-type": type } });
+    r = await relay(api);
+    check(`${type} goes out as text/plain`, r.headers.get("content-type") === "text/plain", r.headers.get("content-type"));
+  }
+  answer = () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  r = await relay(api);
+  check("a data type is kept", r.headers.get("content-type") === "application/json");
+
+  for (const [label, headers] of [
+    ["Sec-Fetch-Site: cross-site", { "sec-fetch-site": "cross-site" }],
+    ["another site's Origin", { origin: "https://evil.example" }],
+    ["a look-alike Origin", { origin: "https://kachat.app.evil.example" }],
+    ["an opaque Origin", { origin: "null" }],
+    ["another Pages project's Origin", { origin: "https://other.pages.dev" }],
+  ]) {
+    r = await relay(api, { headers });
+    check(`another website's request is refused: ${label}`, r.status === 403 && calls.length === 0, `status ${r.status}`);
+  }
+  for (const [label, headers] of [
+    ["same-origin", { "sec-fetch-site": "same-origin", origin: SITE }],
+    ["same-site (kachat.app)", { "sec-fetch-site": "same-site", origin: "https://kachat.app" }],
+    ["the KaPay Extension's page", { "sec-fetch-site": "none", origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop" }],
+    ["no Fetch Metadata (not a browser)", { "sec-fetch-dest": "", "sec-fetch-mode": "" }],
+  ]) {
+    r = await relay(api, { headers });
+    check(`still relayed: ${label}`, r.status === 200 && calls.length === 1, `status ${r.status}`);
+  }
 }
 
 // ---- Upstream failures -------------------------------------------------------------------------

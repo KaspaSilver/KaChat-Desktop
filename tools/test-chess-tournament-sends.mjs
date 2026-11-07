@@ -150,5 +150,32 @@ const moveBy = (game, sender, blockTime, ply, from, to, txId) => ev(sender, bloc
   r.check(T.orderingLocalStamps([otherGame, otherRoom, mine], new Set(["local-2"]))[2] === mine, "other games and rooms are not neighbours");
 }
 
+// --- Our own moves the chain never showed (accepted, never mined) ---------------------------------
+{
+  const g = game0;
+  const sentAt = g.lastEventAt + 5_000;
+  const mine = moveBy(g, whiteOf, sentAt, 1, "e2", "e4", "local-1");
+  // Applied at once: the board is on the opponent's turn, so pendingMoveGames no longer has it.
+  const view = T.reduce([...joins, mine]);
+  r.eq(Object.values(view[ROOM].games)[0].moves.length, 1, "the local row is applied");
+  const sent = new Map([["local-1", { tournamentId: ROOM, gameId: g.id, sentAt }]]);
+  const at = (ms) => T.unconfirmedLocalMoves(sent, view, sentAt + ms);
+  r.eq(at(T.PENDING_MOVE_TIMEOUT_MS).drop.length, 0, "not before the timeout");
+  r.eq(at(T.PENDING_MOVE_TIMEOUT_MS + 1).drop.join(), "local-1", "unseen after the timeout, whoever's turn the row made it: dropped");
+  r.eq(at(T.PENDING_MOVE_TIMEOUT_MS + 1).seen.length, 0, "and not seen");
+  // The opponent answered it: it is on chain, whatever its row says.
+  const reply = moveBy(g, blackOf, sentAt + 3_000, 2, "e7", "e5", "chain-2");
+  const answered = T.reduce([...joins, mine, reply]);
+  const later = T.unconfirmedLocalMoves(sent, answered, sentAt + 60_000);
+  r.eq(later.seen.join(), "local-1", "answered: seen");
+  r.eq(later.drop.length, 0, "never dropped");
+  // The reducer refused it (no such game any more): dropped after the timeout too.
+  r.eq(T.unconfirmedLocalMoves(sent, {}, sentAt + 30_000).drop.join(), "local-1", "a move in no game is dropped");
+  r.eq(T.unconfirmedLocalMoves(new Map(), view, sentAt + 30_000).drop.length, 0, "nothing sent, nothing dropped");
+  // Dropped, the board is ours to move again.
+  const after = T.reduce([...joins]);
+  r.eq(T.playerToMove(Object.values(after[ROOM].games)[0]), whiteOf, "without the row it is our turn again");
+}
+
 console.log(`chess tournament sends: ${r.pass} passed, ${r.fail} failed`);
 if (r.fail) { for (const f of r.failures) console.log(`  FAIL ${f}`); process.exit(1); }

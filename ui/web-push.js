@@ -34,6 +34,14 @@ const CONFIG_TTL_MS = 6 * 3600 * 1000;
 const UNAVAILABLE_TTL_MS = 30 * 60 * 1000;
 const REFRESH_MS = 24 * 3600 * 1000;
 const TICK_MS = 60 * 1000;
+// ui/app.js SESSION_LOGGED_OUT_KEY: "true" from Log Out (in any tab) until the next sign-in.
+export const SESSION_LOGGED_OUT_KEY = "kachat-session-logged-out-v1";
+
+/** Logged out on this browser? Read on every round, so a Log Out in another tab stops this tab
+ *  registering again even before it has logged itself out. */
+export function isSessionLoggedOut(storage = globalThis.localStorage) {
+  try { return storage?.getItem(SESSION_LOGGED_OUT_KEY) === "true"; } catch { return false; }
+}
 
 let deps = null;
 let status = { state: "starting", detail: "" };
@@ -323,6 +331,16 @@ async function syncOnce(force) {
       await dropSubscription();
     }
     setStatus(enabled ? "denied" : "off");
+    return;
+  }
+  // Logged out (Log Out in any tab): nothing is registered, and a registration made meanwhile - a
+  // tab still signed in when another one logged out - is removed again.
+  if (isSessionLoggedOut()) {
+    if (stored?.endpoint) {
+      await removeStored(stored, deps.wallet?.());
+      await dropSubscription();
+    }
+    setStatus("signed-out");
     return;
   }
   if (permission !== "granted") { setStatus(needsHomeScreenInstall() ? "needs-install" : "ask"); return; }

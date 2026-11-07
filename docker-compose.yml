@@ -25,6 +25,13 @@ services:
       # (192.168.x, 10.x ...). The relay then may reach private addresses. Leave it unset on
       # any public deployment - otherwise anyone could use it to reach this host's network.
       KACHAT_RELAY_ALLOW_PRIVATE: ${KACHAT_RELAY_ALLOW_PRIVATE:-}
+      # Optional: the host names you open KaChat under, when that is not localhost or an IP
+      # address (comma separated, no port; ".example.com" also allows its subdomains). The app
+      # itself opens under any name, but its /nc-proxy relay (Nextcloud, indexers, link previews,
+      # Swap) answers only localhost, IP addresses and these names, so a website cannot use it
+      # through DNS rebinding. A refused name is logged with the line to add here, e.g.
+      # KACHAT_ALLOWED_HOSTS=kachat.example.com,kachat.local
+      KACHAT_ALLOWED_HOSTS: ${KACHAT_ALLOWED_HOSTS:-}
       # Optional: the reverse proxy in front of this container (Nginx Proxy Manager, nginx ...).
       # The relay rate-limits per client on the connection's own address and believes
       # X-Forwarded-For only from these addresses (IPs or CIDRs, comma separated; default

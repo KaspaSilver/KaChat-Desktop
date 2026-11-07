@@ -12,7 +12,7 @@ import {
   LEGACY_PERSISTED_WALLET_KEY, VAULT_LEGACY_WALLET_KEY, VAULT_SESSION_KEY, VAULT_HANDOFF_KEY,
   VAULT_HANDOFF_TTL_MS, VAULT_PBKDF2_ITERATIONS,
   readNextcloudAccount, writeNextcloudAccount, onKeyVaultStateChanged, NEXTCLOUD_STORAGE_KEY,
-  ACCOUNT_PASSWORDS_KEY, forgetAccountSecrets,
+  ACCOUNT_PASSWORDS_KEY, forgetAccountSecrets, exportOpenVaultKeys,
 } from "../ui/key-vault.js";
 // A second tab: the same module loaded again is a separate vault (its own memory and
 // sessionStorage) on the same localStorage.
@@ -520,6 +520,39 @@ test("DSK-022 two tabs: the storage event locks the other tab at once; it unlock
   // localStorage.clear() in another tab arrives as key null.
   assert.equal(keyVaultStorageChanged(null), true);
   assert.equal(isVaultUnlocked(), false);
+});
+
+test("locked by another tab: no private key until the password, which brings back the same one", async () => {
+  // ui/app.js drops the engine's signing key when another tab locks this one, and reads it back
+  // from this account's sealed record after the unlock (restoreSigningKeyAfterUnlock).
+  fresh();
+  writeAccountRecords([accountA, accountB]);
+  await setAppPassword("correct horse");
+  assert.equal(await tabB.unlockKeyVault("correct horse"), true);
+  await tabB.setAppPassword("battery staple");
+  assert.equal(keyVaultStorageChanged(APP_PASSWORD_KEY), true);
+  assert.ok(readAccountRecords().every((entry) => !entry.privateKeyHex), "nothing to sign with while locked");
+  assert.deepEqual(exportOpenVaultKeys(), {}, "nothing to remember while locked");
+  assert.equal(await unlockKeyVault("correct horse"), false);
+  assert.equal(await unlockKeyVault("battery staple"), true);
+  assert.equal(byAddress(accountA.address).privateKeyHex, KEY_A, "the key the tab dropped, from its sealed record");
+  assert.notDeepEqual(exportOpenVaultKeys(), {});
+});
+
+test("Log Out in another tab: this tab's lock tells the remember listener and leaves nothing open", async () => {
+  // ui/app.js performLogout({ fromAnotherTab }) locks this tab's vault; ui/vault-remember.js then
+  // rewrites its blob from exportOpenVaultKeys(), which must be empty (the blob is erased).
+  fresh();
+  writeAccountRecords([accountA]);
+  await setAppPassword("correct horse");
+  let told = 0;
+  const off = onKeyVaultStateChanged(() => { told += 1; });
+  lockKeyVault();
+  await tick();
+  off();
+  assert.equal(told, 1);
+  assert.deepEqual(exportOpenVaultKeys(), {});
+  assert.equal(isAppLocked(), true);
 });
 
 test("DSK-022 two tabs: removing the password in one tab while the other is unlocked", async () => {

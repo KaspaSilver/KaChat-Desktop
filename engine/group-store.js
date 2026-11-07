@@ -1341,22 +1341,33 @@ export class GroupManager {
   // streams from the start, and owns this group's cursors until it is done), and a second call
   // while a pass is in flight does not start an overlapping one. Both return an empty result with
   // `skipped` set, which the app applies as "nothing new"; the next tick syncs as usual.
+  //
+  // walletAddress reads the engine live, so a pass that spans an in-place account create / import
+  // would read one account's groups and write (or send, signed by the next account's key) into the
+  // other's. The pass is bound to the account it started for: it stops writing and sending once
+  // that changes, and its result comes back empty with `skipped: "account-changed"` (iOS dfaba68).
   async syncGroups() {
     if (this._refreshing > 0) return { controls: [], messages: [], skipped: "refreshing" };
     if (this._syncInFlight) return { controls: [], messages: [], skipped: "in-flight" };
-    const pass = this._syncGroupsPass();
+    const wallet = this.walletAddress;
+    const pass = this._syncGroupsPass(wallet);
     this._syncInFlight = pass;
-    try { return await pass; }
-    finally { if (this._syncInFlight === pass) this._syncInFlight = null; }
+    try {
+      const result = await pass;
+      if (this.walletAddress !== wallet) return { controls: [], messages: [], skipped: "account-changed" };
+      return result;
+    } finally { if (this._syncInFlight === pass) this._syncInFlight = null; }
   }
 
-  async _syncGroupsPass() {
+  async _syncGroupsPass(wallet = this.walletAddress) {
     const events = [];
+    const switched = () => this.walletAddress !== wallet;
     // 0. Backfill recovery invites: publish a self-addressed root (with the group seed) for any
     // admin group that lacks one for its current epoch — i.e. every group created before this
     // feature existed. One-time per group per epoch; after it lands on chain, a seedless import
     // of this wallet rediscovers the group with no cloud backup. Best-effort, never blocks sync.
     for (const record of this.listGroups()) {
+      if (switched()) return { controls: [], messages: [] };
       if (!record.isAdmin || !record.groupSeedHex) continue;
       if (record.selfInviteEpoch === record.currentEpoch) continue;
       try {
@@ -1370,10 +1381,12 @@ export class GroupManager {
           name: record.name, adminPrivateKey: this.engine.privateKeyHex, groupSeed,
           rosterVersion: await this._nextRosterVersion(record.groupId),
         });
+        if (switched()) return { controls: [], messages: [] };
         await this._sendControlToMember({ address: this.walletAddress, xOnlyPubKeyHex: this.selfPubHex() }, JSON.stringify(selfPayload));
         // The send awaited: mark it on a fresh read, never by writing `record` back (DSK-053), and
         // only if that epoch is still current (a rotation meanwhile needs its own invite).
         const epoch = record.currentEpoch;
+        if (switched()) return { controls: [], messages: [] };
         await this._mutateLocked(record.groupId, (fresh) => {
           if (Number(fresh.currentEpoch || 0) !== Number(epoch)) return false;
           fresh.selfInviteEpoch = epoch;
@@ -1388,6 +1401,7 @@ export class GroupManager {
     {
       const { bucket } = this._tombstoneBucket();
       for (const entry of bucket.deleted) {
+        if (switched()) return { controls: [], messages: [] };
         if (bucket.published.includes(entry)) continue;
         const [id, admin] = entry.split(":");
         try { await this._publishTombstone(id, admin || null); }
@@ -1395,7 +1409,9 @@ export class GroupManager {
       }
     }
 
+    if (switched()) return { controls: [], messages: [] };
     try { await this._publishGroupAnswers(); } catch { /* retried next pass */ }
+    if (switched()) return { controls: [], messages: [] };
 
     // 1. Discover invites / rotations addressed to us, from the persisted cursor (DSK-041). The
     // by-sender read per known admin (iOS catchUpGroupControl) is not used here: by-recipient
@@ -1435,6 +1451,7 @@ export class GroupManager {
           let full = false;
           for (let page = 0; page < SINCE_MAX_PAGES; page += 1) {
             const { messages: rows, latestBlockTime, count } = await this.engine.scanGroupMessagesSince(chunk, since, SINCE_LIMIT);
+            if (switched()) return { controls: [], messages: [] };
             const pageLatest = Number(latestBlockTime) || 0;
             latest = Math.max(latest, pageLatest);
             for (const row of rows) {
@@ -1487,7 +1504,10 @@ export class GroupManager {
       // only the cursors of the streams it read, and only where the stored cursor is still the one
       // it started from: a cursor reset meanwhile (a key arrived - history must be re-walked from
       // the start) or moved by another reader is left as it is.
+      if (switched()) return { controls: [], messages: [] };
       await this._withGroupLock(() => {
+        // Decoded with, and cursors written into, the account the pass started for only.
+        if (switched()) return;
         const newest = {};
         results.forEach((rows, i) => {
           if (!rows) return;
@@ -1516,6 +1536,7 @@ export class GroupManager {
     }
     // The first full read establishes "now"; the since reads take over from here.
     // A minute back: a computer clock running ahead must not skip the newest rows.
+    if (switched()) return { controls: [], messages: [] };
     if (fullScan && !this.sinceBlockTime) this.sinceBlockTime = Date.now() - 60_000;
     return { controls: events, messages: this._takeMemberStatuses(messages, events) };
   }

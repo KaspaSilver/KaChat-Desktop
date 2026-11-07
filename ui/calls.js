@@ -324,6 +324,7 @@ export async function startCall(address, video) {
     try {
       await deps.sendEnvelope(address, encodeRequest({ callId, video }));
       call.openingMessageSent = true;
+      if (callCancelled(call)) { await sendLateEnd(call); return; }
       startTone("ringback");
       call.timeout = window.setTimeout(() => { if (session === call && call.phase === "ringingOut") finish("no_answer"); }, RING_TIMEOUT_MS);
     } catch (error) {
@@ -336,18 +337,35 @@ export async function startCall(address, video) {
   call.client = client;
   try {
     const token = await client.createPublicConversation(`KaChat call with ${deps.displayNameFor(address)}`);
-    if (session !== call) { await client.deleteConversation(token); return; }
+    // Hung up while the room was being made: finish() had no token to delete, so it goes here.
+    if (callCancelled(call)) { await client.deleteConversation(token); return; }
     call.token = token;
     await joinAndSignal(call);
+    // Hung up while joining: finish() has left and deleted the room; no invite to a deleted room.
+    if (callCancelled(call)) return;
     await deps.sendEnvelope(address, encodeInvite({ callId, server: account.server, token, video }));
     call.openingMessageSent = true;
+    if (callCancelled(call)) { await sendLateEnd(call); return; }
     startTone("ringback");
     call.timeout = window.setTimeout(() => { if (session === call && call.phase === "ringingOut") finish("no_answer"); }, RING_TIMEOUT_MS);
   } catch (error) {
     deps.appendEngineLog?.(`[Call] Starting call failed: ${error?.message || error}`);
+    if (callCancelled(call)) return; // already ended by the person: no "could not start"
     deps.showToast?.(`Could not start the call: ${error?.message || error}`);
     await finish("failed");
   }
+}
+
+/** True once `call` is no longer the live call: hung up, ended, or replaced. Checked after every
+ *  await on the way into a call, since finish() can run during any of them and only tears down
+ *  what existed then (the stream, peer connection and tone made later would stay open). */
+function callCancelled(call) { return session !== call || call.phase === "ended"; }
+
+/** The opening message went out after the call was already hung up (finish() saw no opening
+ *  message, so sent no close): the closing message follows, so the other side stops ringing. */
+async function sendLateEnd(call) {
+  try { await deps.sendEnvelope(call.address, encodeEnd({ callId: call.id, reason: call.endedReason || "cancelled", durationSeconds: null })); }
+  catch (error) { deps.appendEngineLog?.(`[Call] Sending call_end failed: ${error?.message || error}`); }
 }
 
 /** Driven by the chat's ingest of an incoming message that parsed as a call envelope. */
@@ -388,6 +406,7 @@ export function handleIncomingCallEnvelope(envelope, message, contactAddress) {
         call.client = new NextcloudTalkClient({ server, auth: { kind: "guest" } });
         joinAndSignal(call).catch(async (error) => {
           deps.appendEngineLog?.(`[Call] Joining the hosted call failed: ${error?.name || "Error"}: ${error?.message || error}`);
+          if (callCancelled(call)) return;
           call.failureDetail = callFailureText(error);
           deps.showToast?.(call.failureDetail);
           await finish("failed");
@@ -472,7 +491,7 @@ function hostRequestedCall(callId, address, video) {
     // server again before turning the request away (iOS 88aa3c1).
     let canHost = false;
     try { canHost = await deps.talkCallsAvailable(); } catch { canHost = false; }
-    if (session !== call) return;
+    if (callCancelled(call)) return;
     if (!canHost) {
       deps.appendEngineLog?.(`[Call] Requested call ${callId.slice(0, 8)} can't be hosted: Nextcloud Talk isn't available`);
       call.failureDetail = `Calls from ${deps.displayNameFor(address)} need Nextcloud Talk here, and it isn't available right now.`;
@@ -486,6 +505,8 @@ function hostRequestedCall(callId, address, video) {
       if (session !== call || call.phase === "ended") { await client.deleteConversation(token); return; }
       // the room must be one the two sides can signal over (not the external HPB)
       const settings = await client.signalingSettings(token);
+      // Declined meanwhile: the room is not on the call yet, so finish() could not delete it.
+      if (callCancelled(call)) { await client.deleteConversation(token); return; }
       if (String(settings.mode).toLowerCase() === "external") {
         await client.deleteConversation(token);
         throw new TalkError("external", "This Nextcloud uses an external signaling server, which KaChat calls do not support yet.");
@@ -554,6 +575,7 @@ export async function acceptIncoming() {
     await joinAndSignal(call);
   } catch (error) {
     deps.appendEngineLog?.(`[Call] Joining call failed: ${error?.name || "Error"}: ${error?.message || error}`);
+    if (callCancelled(call)) return;
     call.failureDetail = callFailureText(error);
     deps.showToast?.(call.failureDetail);
     await finish("failed");
@@ -695,27 +717,42 @@ async function joinAndSignal(call) {
   const client = call.client;
   if (!client) return;
   const settings = await client.signalingSettings(call.token);
+  if (callCancelled(call)) return;
   if (String(settings.mode).toLowerCase() === "external") {
     throw new TalkError("external", "This Nextcloud uses an external signaling server, which KaChat calls do not support yet.");
   }
+  // Hung up during a join: finish() may have left before the join landed, so leave again.
+  const leaveLate = () => { client.leaveCall(call.token).catch(() => {}).then(() => client.leaveConversation(call.token)).catch(() => {}); };
   const sessionId = await client.joinConversation(call.token);
+  if (callCancelled(call)) { leaveLate(); return; }
   call.mySessionId = sessionId;
   if (client.auth?.kind === "guest") await client.setGuestDisplayName(call.token, deps.ownDisplayName());
   await client.joinCall(call.token, call.video);
+  if (callCancelled(call)) { leaveLate(); return; }
 
   // Media first, so the peer connection carries our tracks from the first offer.
+  let stream;
   try {
-    call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: call.video ? { facingMode: "user" } : false });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: call.video ? { facingMode: "user" } : false });
   } catch (error) {
-    if (call.video) {
+    if (call.video && !callCancelled(call)) {
       // No camera: carry on as a voice call rather than failing the call.
-      call.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       call.video = false;
-      deps.showToast?.("No camera available; continuing as a voice call.");
+      if (!callCancelled(call)) deps.showToast?.("No camera available; continuing as a voice call.");
+    } else if (callCancelled(call)) {
+      return;
     } else {
       throw new Error(`Microphone unavailable: ${error?.message || error}`);
     }
   }
+  // Hung up while the browser asked for the microphone: finish() saw no stream to stop.
+  if (callCancelled(call)) {
+    for (const track of stream?.getTracks?.() || []) { try { track.stop(); } catch { /* fine */ } }
+    leaveLate();
+    return;
+  }
+  call.localStream = stream;
   // The list is already cleaned (talk.js usableIceServers); if a browser still refuses it, the call
   // goes on with the public STUN server rather than failing.
   let pc;
@@ -945,7 +982,8 @@ async function finish(reason) {
   }
   // Long enough to read why, when a join failed with a reason.
   window.setTimeout(() => {
-    if (session === call) { session = null; hideOverlay(); }
+    // stopTone again: no tone may outlive the call (one started by a step still in flight).
+    if (session === call) { session = null; stopTone(); hideOverlay(); }
   }, call.failureDetail ? 6000 : 1500);
 }
 

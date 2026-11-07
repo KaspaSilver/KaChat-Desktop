@@ -14,13 +14,14 @@ export function kapostsFailureDelivery(error) {
 
 /** Runs `op`, again up to `retries` times after `delayMs` when it throws (rapid sequential sends hit
  *  "UTXO already spent / none spendable" until the node indexes the previous change). Never after
- *  an unknown outcome: the first one may have landed (iOS submitWithUtxoRetry). */
+ *  an unknown outcome: the first one may have landed (iOS submitWithUtxoRetry). Nor after an error
+ *  marked `noRetry` (the account changed under a thread chain - trying again cannot help). */
 export async function kapostsSubmitWithUtxoRetry(op, { retries = 4, delayMs = 1500, onRetry = null } = {}) {
   let attempt = 0;
   for (;;) {
     try { return await op(); }
     catch (error) {
-      if (error?.code === SEND_OUTCOME_UNKNOWN) throw error;
+      if (error?.code === SEND_OUTCOME_UNKNOWN || error?.noRetry === true) throw error;
       attempt += 1;
       if (attempt > retries) throw error;
       onRetry?.(attempt, error);
