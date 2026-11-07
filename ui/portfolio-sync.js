@@ -204,9 +204,9 @@ export function portfolioSyncToArchive(sync) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// One portfolio's file on Nextcloud (KaPay 953b255 PortfolioBackupFile): plain JSON named after the
+// One portfolio's file on Nextcloud (KaPay 953b255 PortfolioBackupFile): JSON named after the
 // portfolio, holding it with its transactions and fees, every deletion the account knows of, and
-// the owning account. Dates are Swift's default encoding, seconds since 2001, which KaPay's decoder
+// the owning account. ui/nextcloud.js seals it in the contacts' envelope before it uploads. Dates are Swift's default encoding, seconds since 2001, which KaPay's decoder
 // requires. Version 1 was the one file holding every portfolio, with no `type` or owner.
 // ---------------------------------------------------------------------------------------------
 

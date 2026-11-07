@@ -95,7 +95,7 @@ let needsReconnect = false;     // Nextcloud refused this login: automatic work 
 let portfolioChain = null;      // one Portfolio backup at a time: two PUTs at once get 423 Locked
 let portfolioDebounceTimer = null;
 let lastPortfolioCheck = 0;     // when the app last looked for another device's Portfolio changes
-let portfolioFileCache = new Map(); // path -> { modified, size, parsed }: an unchanged file isn't downloaded again
+let portfolioFileCache = new Map(); // path -> { modified, size, wallet, read }: an unchanged file isn't downloaded again
 
 // Picker state
 let pickerOpen = false;
@@ -514,12 +514,31 @@ export async function downloadNextcloudText(path, { maxBytes = 10_000_000 } = {}
 }
 
 // --- Portfolio files (KaPay 953b255, its NextcloudService "Portfolio backup") ---
+// Each file is encrypted with the contacts' key, in the same envelope (ui/backup-crypto.js). An
+// earlier plain file of this account's is still read, and written encrypted with the next backup.
+
+const PORTFOLIO_KEY_UNAVAILABLE_MESSAGE = "The wallet key is unavailable, so the Portfolio backup was skipped. Nothing was uploaded.";
+
+/** What one downloaded file is (KaPay readPortfolioFile): `parsed` is the Portfolio file it holds, or
+ *  null; `ownUnreadable` is this account's own envelope that won't decrypt, whose name may be written
+ *  over. Another account's envelope, or one naming no account that won't decrypt, is neither. */
+async function readPortfolioFile(text) {
+  const plain = !parseBackupEnvelope(text);
+  if (plain) return { parsed: parsePortfolioBackupFile(text), plain, ownUnreadable: false };
+  try {
+    return { parsed: parsePortfolioBackupFile(await deps.openBackupPayload(text)), plain, ownUnreadable: false };
+  } catch (error) {
+    return { parsed: null, plain, ownUnreadable: error?.code === "ownUnreadable" };
+  }
+}
 
 /** Reads the backup folder: this account's Portfolio files, and the lowercased names of everything
  *  else there (another account's portfolio, or any other file), which a portfolio's file goes beside
  *  and never over. Any file that can't be downloaded throws, so nothing is written or deleted on a
- *  partial view of what's there. */
+ *  partial view of what's there, and so does a missing key: without it this account's files can't
+ *  be told from anyone else's. */
 async function readServerPortfolios(wallet) {
+  if (!deps.backupKeyAvailable?.()) throw new Error(PORTFOLIO_KEY_UNAVAILABLE_MESSAGE);
   const result = { own: [], taken: new Set() };
   let listing;
   try {
@@ -530,19 +549,26 @@ async function readServerPortfolios(wallet) {
   }
   for (const file of listing) {
     if (file.isDirectory) continue;
-    let parsed = null;
+    let read = null;
     if (isPortfolioFileCandidate(file.name, { size: file.size })) {
       const modified = file.modified ? file.modified.getTime() : null;
       const cached = portfolioFileCache.get(file.path);
-      if (modified != null && cached?.modified === modified && cached.size === file.size) {
-        parsed = cached.parsed;
+      // What one account read isn't another's: the file opens with this account's key.
+      if (modified != null && cached?.modified === modified && cached.size === file.size && cached.wallet === wallet) {
+        read = cached.read;
       } else {
-        parsed = parsePortfolioBackupFile(await downloadNextcloudText(file.path, { maxBytes: PORTFOLIO_FILE_MAX_BYTES }));
-        portfolioFileCache.set(file.path, { modified, size: file.size, parsed });
+        read = await readPortfolioFile(await downloadNextcloudText(file.path, { maxBytes: PORTFOLIO_FILE_MAX_BYTES }));
+        portfolioFileCache.set(file.path, { modified, size: file.size, wallet, read });
       }
     }
-    if (isOwnPortfolioFile(parsed, wallet)) result.own.push({ file, parsed });
-    else result.taken.add(String(file.name).toLowerCase());
+    if (isOwnPortfolioFile(read?.parsed, wallet)) {
+      result.own.push({ file, parsed: read.parsed, plain: read.plain });
+    } else if (read?.ownUnreadable) {
+      // This account's, so its name stays free for this account's portfolio of that name.
+      deps.appendEngineLog?.(`[Nextcloud] A Portfolio file of this account can't be decrypted: ${file.name}`);
+    } else {
+      result.taken.add(String(file.name).toLowerCase());
+    }
   }
   return result;
 }
@@ -605,6 +631,8 @@ async function performPortfolioBackup() {
   const wallet = addressBookWalletAddress();
   if (!account || !wallet) throw new Error("Open a wallet first.");
   const stillCurrent = () => nc === account && addressBookHoldsWallet(wallet);
+  // Writers always encrypt: without the key nothing is uploaded readable.
+  if (!deps.backupKeyAvailable?.()) throw new Error(PORTFOLIO_KEY_UNAVAILABLE_MESSAGE);
   await ensureDavUser();
   const server = await mergePortfoliosFromServer(wallet, stillCurrent);
   const sync = deps.portfolioBackupSync();
@@ -612,10 +640,12 @@ async function performPortfolioBackup() {
   for (const portfolio of sync.portfolios) {
     const name = names.get(portfolio.id);
     const one = portfolioSyncFor(sync, portfolio.id);
-    const upToDate = server.own.some((found) => String(found.file.name).toLowerCase() === name.toLowerCase()
+    // An earlier plain file is written again, encrypted, even when its contents are the same.
+    const upToDate = server.own.some((found) => String(found.file.name).toLowerCase() === name.toLowerCase() && !found.plain
       && JSON.stringify(mergePortfolioSync([found.parsed.sync])) === JSON.stringify(mergePortfolioSync([one])));
     if (upToDate) continue;
-    await uploadToKaChatFolder(portfolioBackupFileJson(one, wallet), name, "application/json", { keepSpaces: true, stillCurrent });
+    const sealed = await deps.sealBackupPayload(portfolioBackupFileJson(one, wallet));
+    await uploadToKaChatFolder(sealed, name, "application/json", { keepSpaces: true, stillCurrent });
   }
   const deletedIds = new Set(sync.tombstones.filter((t) => t.kind === "portfolio").map((t) => t.id));
   for (const found of server.own) {

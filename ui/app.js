@@ -12762,7 +12762,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 268;
+const APP_BUILD = 269;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -30660,7 +30660,9 @@ queueMicrotask(async () => {
       // The contacts file's envelope (NEXTCLOUD_SYNC.md §3). Writers always encrypt; the reader throws
       // on another wallet's file or a failed decrypt, so a sync aborts before it writes anything.
       sealBackupPayload: sealSharedBackupJson,
-      // The Portfolio's plain files beside it (KaPay 953b255).
+      // The Portfolio's files beside it (KaPay 953b255), in the same envelope. Without the key the
+      // Portfolio backup reads and writes nothing.
+      backupKeyAvailable: () => Boolean(String(engine.privateKeyHex || "").trim()),
       portfolioBackupSync,
       importPortfolioSync,
       openBackupPayload: openSharedBackupJson,
