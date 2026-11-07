@@ -252,29 +252,62 @@ export function claimMayPost(lastClaimAt, now, force = false) {
   if (force || lastClaimAt == null) return true;
   return now - lastClaimAt >= CLAIM_RETRY_MS;
 }
+/** Taps on Claim win closer together than this (to the last claim posted) are one claim (iOS
+ *  4922804 claimTapGapMs). */
+export const CLAIM_TAP_GAP_MS = 5_000;
+export function claimTapAllowed(lastClaimAt, now) {
+  return lastClaimAt == null || now - lastClaimAt >= CLAIM_TAP_GAP_MS;
+}
 
-/** A move of ours that the chain has not shown after this long (dropped, never mined) can be
- *  played again (iOS 8d5f925 pendingMoveTimeoutMs). */
+/** A move of ours that the reducer still has not applied this long after it went out stops
+ *  showing as sending (iOS 4922804 pendingMoveTimeoutMs; one the network dropped is the
+ *  unconfirmed-row check's, below). */
 export const PENDING_MOVE_TIMEOUT_MS = 25_000;
-export const PENDING_MOVE_EXPIRED_MESSAGE = "Your move didn't reach the network. Play it again.";
-/**
- * Our own moves still on this device's clock (sent, applied at once, not yet back from the
- * chain), at wall time `now`: `sent` maps txId -> { tournamentId, gameId, sentAt }. A move the
- * opponent has answered is on chain (`seen`: stop timing it, its chain time comes with the next
- * poll). One still unanswered PENDING_MOVE_TIMEOUT_MS after it went out was never mined (`drop`:
- * the row goes, so the board offers the move again). This device's view only - never part of the
- * reduce, which every device runs on the chain's rows alone.
- */
-export function unconfirmedLocalMoves(sent, tournaments, now) {
-  const drop = [];
-  const seen = [];
-  for (const [txId, { tournamentId, gameId, sentAt }] of sent || []) {
-    const moves = tournaments?.[tournamentId]?.games?.[gameId]?.moves || [];
-    const index = moves.findIndex((m) => m.txId === txId);
-    if (index >= 0 && index < moves.length - 1) { seen.push(txId); continue; }
-    if (now - sentAt > PENDING_MOVE_TIMEOUT_MS) drop.push(txId);
+export const PENDING_MOVE_EXPIRED_MESSAGE = "Your move didn't count. Check the board.";
+
+// --- Our own arena rows the chain has not shown yet (iOS 4922804 checkUnconfirmedServiceRows) ---
+// Every row this device sent (a move, join, claim, anything) is applied at once with its own clock.
+// One the chain has not shown UNCONFIRMED_ROW_MS after it went out is looked up: accepted (REST
+// API), it takes the block's time; in a mempool, it waits another round; found nowhere, it is
+// dropped, so the board is the chain's again (a move is the player's to play again). One the
+// network cannot be asked about is given up after UNCONFIRMED_GIVE_UP_MS. This device's view only -
+// never part of the reduce, which every device runs on the chain's rows alone.
+/** Blocks come ten a second and the indexer is polled every 2-8 s, so a row that landed is
+ *  normally back well inside this; it also covers a slow indexer or an orphan waiting on its
+ *  parent, and still leaves most of a five-minute clock to play the move again. */
+export const UNCONFIRMED_ROW_MS = 60_000;
+export const UNCONFIRMED_GIVE_UP_MS = 5 * 60_000;
+/** A row still in a mempool, or one the REST API could not answer for, is asked about again
+ *  this much later, not on every tick. */
+export const UNCONFIRMED_RECHECK_MS = 15_000;
+export const MOVE_DROPPED_MESSAGE = "Your move didn't reach the network. Play it again.";
+export const ROW_DROPPED_MESSAGE = "That didn't reach the network. Try again.";
+/** The rows due a look-up at wall time `now`: `sentAt` maps txId -> when this device started
+ *  waiting for it, `nextCheck` txId -> the earliest next look-up (wall ms). */
+export function unconfirmedRowsDue(sentAt, nextCheck, now, bound = UNCONFIRMED_ROW_MS) {
+  const due = [];
+  for (const [txId, at] of sentAt || []) {
+    if (now - at > bound && (nextCheck?.get(txId) ?? 0) <= now) due.push(txId);
   }
-  return { drop, seen };
+  return due;
+}
+/** The REST API's `GET /transactions/{id}` answer, read: `{ status: "accepted", blockTime }`,
+ *  `{ status: "notAccepted" }` (404, or known and not accepted), or `{ status: "unanswered" }`. */
+export function transactionLookupFromRest(httpStatus, json) {
+  if (httpStatus === 404) return { status: "notAccepted" };
+  if (httpStatus !== 200 || !json || typeof json !== "object") return { status: "unanswered" };
+  if (json.is_accepted !== true) return { status: "notAccepted" };
+  const blockTime = Number(json.block_time);
+  return { status: "accepted", blockTime: Number.isFinite(blockTime) && blockTime > 0 ? blockTime : null };
+}
+/** What becomes of a due row: "confirm" (the chain has it), "later" (ask again in
+ *  UNCONFIRMED_RECHECK_MS) or "drop" (it never reached the network). `inMempool` is only asked
+ *  for a row the REST API does not have; `now` is when the look-up round started. */
+export function unconfirmedRowVerdict({ lookup, inMempool = false, sentAt, now, giveUp = UNCONFIRMED_GIVE_UP_MS }) {
+  const status = lookup?.status || "unanswered";
+  if (status === "accepted") return "confirm";
+  if (status === "notAccepted") return inMempool ? "later" : "drop";
+  return now - sentAt <= giveUp ? "later" : "drop";
 }
 /** Live with at least one game still undecided. */
 export function isInPlay(t, now) {
@@ -289,6 +322,17 @@ export function isStillPlaying(t, address, now) {
     const winner = decidedWinner(g, now);
     return winner != null && winner !== address;
   });
+}
+/** A game of `address`'s in a live room whose flag fell lately (or is still to fall) with no claim
+ *  on chain: its winner is still on the board to claim it, so a challenge link waits (iOS 4922804
+ *  ChessTournamentService.isBusyOnline). */
+export function hasRecentUnclaimedFlag(tournaments, address, now) {
+  if (!address) return false;
+  return Object.values(tournaments || {}).some((t) => tournamentStatus(t) === "live" && Object.values(t.games).some((game) => {
+    if (!colorOf(game, address)) return false;
+    const flag = flagAt(game);
+    return flag != null && now - flag < AUTO_CLAIM_WINDOW_MS;
+  }));
 }
 /** When `address`'s seat runs out, while waiting. */
 export function seatExpiry(t, address) {
@@ -336,6 +380,16 @@ export const SEND_CONFIRMING_MESSAGE = "The network is still confirming your pre
 export const NOT_ENOUGH_KAS_MESSAGE = "Not enough KAS on your Chatting Address. Add some and try again.";
 /** engine/transactions.js SEND_OUTCOME_UNKNOWN, by value: this file stays free of the send code. */
 const SEND_OUTCOME_UNKNOWN_CODE = "SEND_OUTCOME_UNKNOWN";
+/** engine/transactions.js SEND_OUTCOME_UNKNOWN_MESSAGE, by value: what a stamp that may have gone
+ *  through says when its error carries no text. */
+export const SEND_OUTCOME_UNKNOWN_NOTE = "This may have gone through, but the network didn't confirm it. Check your balance before sending again.";
+/** For a send a node may hold without having answered (SEND_OUTCOME_UNKNOWN): its txid ("" when
+ *  the error names none). Null for any other error (iOS 4922804: kept as itself, so a caller can
+ *  tell "may have gone through" from a failure). */
+export function sendOutcomeUnknownTxid(error) {
+  if (error?.code !== SEND_OUTCOME_UNKNOWN_CODE) return null;
+  return String(error.txid || "");
+}
 const RETRYABLE_SEND_TEXT = [
   "orphan", "already spent",
   // iOS ChatService.isNoConfirmedInputsError: the coins are there, the change not spendable yet.

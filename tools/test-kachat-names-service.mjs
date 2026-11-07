@@ -747,6 +747,18 @@ async function main() {
       await r.throws(() => ca.combineCoins(ca.signer()), (e) => e.message === "Not enough KAS on your chatting address for this.",
         "combineCoins: one plain coin (the covenant coin never counts) is nothing to combine");
       r.eq(J([A.combineMaxCoins, A.combineFeeRoom]), J([80, 5_000_000n]), "combineCoins: up to 80 coins, 0.05 KAS kept back for the fee");
+      // nor a coin still being mined or a mining reward (iOS 33095ac): one confirmed coin is nothing to combine
+      const uEngine = {
+        ...pa.engine,
+        getUtxosWithCovenants: async () => [
+          { outpoint: { transactionId: "b1".repeat(32), index: 0 }, amount: 900_000_000n, covenantId: null, blockDaaScore: 10n, isCoinbase: false },
+          { outpoint: { transactionId: "b2".repeat(32), index: 0 }, amount: 900_000_000n, covenantId: null, blockDaaScore: 0n, isCoinbase: false },
+          { outpoint: { transactionId: "b3".repeat(32), index: 0 }, amount: 900_000_000n, covenantId: null, blockDaaScore: 11n, isCoinbase: true },
+        ],
+      };
+      const ua = new A.KachatNamesActions({ engine: uEngine, service: pa.service, registry: registryStub, storage: { get: () => null, set: () => {} } });
+      await r.throws(() => ua.combineCoins(ua.signer()), (e) => e.message === "Not enough KAS on your chatting address for this.",
+        "combineCoins: unconfirmed and coinbase coins never count");
     }
 
     // MARK: claiming an expired name frees it first (iOS eea52b2, 4f0bd33)

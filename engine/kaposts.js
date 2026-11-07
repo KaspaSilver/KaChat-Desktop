@@ -455,8 +455,24 @@ async function submitKaPostPayload(engine, protocolString) {
   });
   const txid = sendResult.txids?.[0] || "";
   if (!txid) throw new Error("KaPost transaction broadcast returned no txid.");
+  if (kapostActionShowsOnProfile(protocolString)) ownKaPostActivity = { address: engine.address, at: Date.now() };
   engine.log?.(`KaPost action on-chain: ${protocolString.slice(0, 12)}… tx ${txid.slice(0, 12)}…`);
   return txid;
+}
+
+/** Whether a KaPost action changes what your own profile shows: a post, reply, quote, unquote,
+ *  edit, delete or poll (not a like, follow or vote). iOS 33095ac submitPayloadTx. */
+export function kapostActionShowsOnProfile(protocolString) {
+  const action = String(protocolString || "").split(":")[2] || "";
+  return ["post", "reply", "quote", "unquote", "edit", "delete", "poll"].includes(action);
+}
+
+// When this run last put such an action on chain, and for which address: a profile page loaded
+// before it is out of date (iOS 33095ac KaPostsAPIClient.ownActivityAt).
+let ownKaPostActivity = null;
+/** When `address` last posted, replied, quoted, edited or deleted from here (ms), or 0. */
+export function lastOwnKaPostActivityAt(address) {
+  return ownKaPostActivity && ownKaPostActivity.address === address ? ownKaPostActivity.at : 0;
 }
 
 /**

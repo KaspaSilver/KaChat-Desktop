@@ -150,6 +150,7 @@ test("one book per wallet", () => {
 });
 
 test("merge: newest edit or deletion wins per address", () => {
+  fresh({ start: Date.parse("2026-10-09T00:00:00Z") }); // read after every date below
   const t = (s) => `2026-10-08T12:00:${String(s).padStart(2, "0")}Z`;
   const local = [
     { address: ALICE, name: "Alice local", updatedAt: t(10) },
@@ -179,6 +180,7 @@ test("merge: newest edit or deletion wins per address", () => {
 });
 
 test("shared-file merge in the archive's shape, photo with the winner", () => {
+  fresh({ start: Date.parse("2026-10-09T00:00:00Z") }); // read after every date below
   const t = (s) => `2026-10-08T12:00:${String(s).padStart(2, "0")}Z`;
   const local = {
     addressBook: [{ id: "6f1c1a4e-8a9e-4b0b-9a43-0d7f2c9e1a11", address: ALICE, name: "Alice", note: "", createdAt: t(1), updatedAt: t(30) }],
@@ -458,6 +460,50 @@ test("import (IOS-089): a nameless entry imports with its note, and a newer one 
   assert.equal(addressBookEntry(BOB).note, "only a note");
   fresh();
   assert.deepEqual(importAddressBookExport(file([row(CAROL, "")])), { added: 1, updated: 0, skipped: 0 }, "a file of nameless entries is not empty");
+});
+
+// iOS d23e6f7a / KaPay 1652437: newest wins, so a file dated in the future would win over every
+// later edit for good. No file dates a change after the moment it's read.
+test("a contact or deletion dated in the future counts as dated now", () => {
+  fresh();
+  const future = clock + 50 * 365 * 86_400_000;
+  // the merge: a future edit counts as now, so a later edit here wins
+  let merged = mergeAddressBooks([[{ address: ALICE, name: "2099", updatedAt: iso(future) }]], [[]]);
+  assert.equal(merged.entries[0].updatedAt, clock);
+  tick();
+  merged = mergeAddressBooks(
+    [[{ address: ALICE, name: "Edited now", updatedAt: clock }], [{ address: ALICE, name: "2099", updatedAt: iso(future) }]],
+    [[{ address: BOB, deletedAt: iso(future) }]],
+  );
+  assert.equal(merged.entries.find((e) => e.address === ALICE).name, "Edited now", "a tie at most, which keeps this side");
+  assert.equal(merged.tombstones[0].deletedAt, clock, "a future deletion too");
+  // the shared file: the dates that land here are now, and an edit after wins
+  saveAddressBookEntry({ address: CAROL, name: "Carol" });
+  tick();
+  mergeSharedContactsFile(JSON.stringify({
+    type: "kachat-address-book", version: 1, exportedAt: iso(clock), walletAddress: WALLET_A,
+    entries: [{ id: "8F14E45F-CEEA-467F-A9B4-0C1D2E3F4A5B", address: ALICE, name: "From 2099", note: "", createdAt: iso(clock), updatedAt: iso(future) }],
+    deleted: [{ address: CAROL, deletedAt: iso(future) }],
+  }));
+  assert.equal(addressBookEntry(ALICE).updatedAt, clock);
+  assert.equal(addressBookEntry(CAROL), null);
+  tick();
+  saveAddressBookEntry({ address: CAROL, name: "Carol again" });
+  saveAddressBookEntry({ address: ALICE, name: "Mine now" });
+  const archive = archiveAddressBook();
+  assert.equal(archive.addressBook.find((e) => e.address === ALICE).name, "Mine now");
+  assert.equal(archive.addressBook.find((e) => e.address === CAROL).name, "Carol again", "the deletion no longer outranks every edit");
+  // importing an export file
+  fresh();
+  saveAddressBookEntry({ address: BOB, name: "Bob" });
+  tick();
+  const file = JSON.stringify({ type: "kachat-address-book", version: 1, exportedAt: iso(clock), entries: [{ address: BOB, name: "Bob 2099", note: "", createdAt: iso(clock), updatedAt: iso(future) }] });
+  assert.deepEqual(importAddressBookExport(file), { added: 0, updated: 1, skipped: 0 });
+  assert.equal(addressBookEntry(BOB).updatedAt, clock);
+  tick();
+  saveAddressBookEntry({ address: BOB, name: "Bob, edited after" });
+  assert.equal(addressBookEntry(BOB).name, "Bob, edited after");
+  assert.ok(addressBookEntry(BOB).updatedAt > clock - 1);
 });
 
 test("normalise", () => {

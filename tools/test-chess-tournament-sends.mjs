@@ -110,7 +110,35 @@ const moveBy = (game, sender, blockTime, ply, from, to, txId) => ev(sender, bloc
   r.check(T.claimMayPost(now - 30_000, now), "again after 30 s");
   r.check(T.claimMayPost(now - 1, now, true), "Claim win goes past the throttle");
   r.eq(T.PENDING_MOVE_TIMEOUT_MS, 25_000, "a pending move expires after 25 s");
-  r.eq(T.PENDING_MOVE_EXPIRED_MESSAGE, "Your move didn't reach the network. Play it again.", "iOS's expiry message");
+  r.eq(T.PENDING_MOVE_EXPIRED_MESSAGE, "Your move didn't count. Check the board.", "iOS 4922804's expiry message");
+  // Claim win taps (iOS 4922804 claimTapGapMs): within five seconds of the last claim, one claim.
+  r.eq(T.CLAIM_TAP_GAP_MS, 5_000, "taps five seconds apart");
+  r.check(T.claimTapAllowed(undefined, now), "the first tap claims");
+  r.check(!T.claimTapAllowed(now - 4_999, now), "a tap 4.999 s after the last claim does nothing");
+  r.check(T.claimTapAllowed(now - 5_000, now), "five seconds on, a tap claims again");
+}
+
+// --- A send whose outcome is unknown ----------------------------------------------------------
+{
+  r.eq(T.sendOutcomeUnknownTxid(err("may have gone through", "SEND_OUTCOME_UNKNOWN")), "", "unknown with no txid: an empty txid");
+  r.eq(T.sendOutcomeUnknownTxid(Object.assign(err("x", "SEND_OUTCOME_UNKNOWN"), { txid: "ab12" })), "ab12", "unknown: its txid");
+  r.eq(T.sendOutcomeUnknownTxid(err("orphan")), null, "any other error: null");
+  r.eq(T.sendOutcomeUnknownTxid(null), null, "no error: null");
+}
+
+// --- A recent flag with no claim keeps a challenge link waiting (iOS 4922804 isBusyOnline) ---------
+{
+  const g = game0;
+  const flag = T.flagAt(g);
+  const view = T.reduce(joins);
+  r.check(T.hasRecentUnclaimedFlag(view, whiteOf, flag - 60_000), "a game of mine still on: busy");
+  r.check(T.hasRecentUnclaimedFlag(view, blackOf, flag + 60_000), "flagged a minute ago, no claim: busy (the winner)");
+  r.check(T.hasRecentUnclaimedFlag(view, whiteOf, flag + 60_000), "and the flagged loser too");
+  r.check(!T.hasRecentUnclaimedFlag(view, whiteOf, flag + T.AUTO_CLAIM_WINDOW_MS), "half an hour past the flag: free");
+  r.check(!T.hasRecentUnclaimedFlag(view, "kaspa:someone", flag + 60_000), "someone else's game: free");
+  r.check(!T.hasRecentUnclaimedFlag(view, "", flag), "no account: free");
+  const claimed = T.reduce([...joins, ev(blackOf, flag + 1_500, T.messages.claim(ROOM, g.id))]);
+  r.check(!T.hasRecentUnclaimedFlag(claimed, blackOf, flag + 60_000), "the claim is on chain: free");
 }
 
 // --- Our own local stamps ordered by ply ---------------------------------------------------------
@@ -150,31 +178,47 @@ const moveBy = (game, sender, blockTime, ply, from, to, txId) => ev(sender, bloc
   r.check(T.orderingLocalStamps([otherGame, otherRoom, mine], new Set(["local-2"]))[2] === mine, "other games and rooms are not neighbours");
 }
 
-// --- Our own moves the chain never showed (accepted, never mined) ---------------------------------
+// --- Our own rows the chain never showed (iOS 4922804 checkUnconfirmedServiceRows) ----------------
 {
-  const g = game0;
-  const sentAt = g.lastEventAt + 5_000;
-  const mine = moveBy(g, whiteOf, sentAt, 1, "e2", "e4", "local-1");
-  // Applied at once: the board is on the opponent's turn, so pendingMoveGames no longer has it.
-  const view = T.reduce([...joins, mine]);
-  r.eq(Object.values(view[ROOM].games)[0].moves.length, 1, "the local row is applied");
-  const sent = new Map([["local-1", { tournamentId: ROOM, gameId: g.id, sentAt }]]);
-  const at = (ms) => T.unconfirmedLocalMoves(sent, view, sentAt + ms);
-  r.eq(at(T.PENDING_MOVE_TIMEOUT_MS).drop.length, 0, "not before the timeout");
-  r.eq(at(T.PENDING_MOVE_TIMEOUT_MS + 1).drop.join(), "local-1", "unseen after the timeout, whoever's turn the row made it: dropped");
-  r.eq(at(T.PENDING_MOVE_TIMEOUT_MS + 1).seen.length, 0, "and not seen");
-  // The opponent answered it: it is on chain, whatever its row says.
-  const reply = moveBy(g, blackOf, sentAt + 3_000, 2, "e7", "e5", "chain-2");
-  const answered = T.reduce([...joins, mine, reply]);
-  const later = T.unconfirmedLocalMoves(sent, answered, sentAt + 60_000);
-  r.eq(later.seen.join(), "local-1", "answered: seen");
-  r.eq(later.drop.length, 0, "never dropped");
-  // The reducer refused it (no such game any more): dropped after the timeout too.
-  r.eq(T.unconfirmedLocalMoves(sent, {}, sentAt + 30_000).drop.join(), "local-1", "a move in no game is dropped");
-  r.eq(T.unconfirmedLocalMoves(new Map(), view, sentAt + 30_000).drop.length, 0, "nothing sent, nothing dropped");
+  r.eq(T.UNCONFIRMED_ROW_MS, 60_000, "looked up 60 s after it went out");
+  r.eq(T.UNCONFIRMED_GIVE_UP_MS, 5 * 60_000, "given up after five minutes with no answer");
+  r.eq(T.UNCONFIRMED_RECHECK_MS, 15_000, "asked again 15 s later");
+  r.eq(T.MOVE_DROPPED_MESSAGE, "Your move didn't reach the network. Play it again.", "iOS's dropped-move message");
+  r.eq(T.ROW_DROPPED_MESSAGE, "That didn't reach the network. Try again.", "iOS's dropped-row message");
+  // Which rows are due.
+  const sentAt = T0;
+  const sent = new Map([["move", sentAt], ["join", sentAt + 30_000]]);
+  const next = new Map();
+  r.eq(T.unconfirmedRowsDue(sent, next, sentAt + 60_000).length, 0, "not at 60 s exactly");
+  r.eq(T.unconfirmedRowsDue(sent, next, sentAt + 60_001).join(), "move", "past 60 s: due");
+  r.eq(T.unconfirmedRowsDue(sent, next, sentAt + 90_001).join(), "move,join", "a join is checked like a move");
+  next.set("move", sentAt + 75_000);
+  r.eq(T.unconfirmedRowsDue(sent, next, sentAt + 70_000).length, 0, "not before its next check");
+  r.eq(T.unconfirmedRowsDue(sent, next, sentAt + 75_000).join(), "move", "at its next check: due again");
+  r.eq(T.unconfirmedRowsDue(new Map(), next, sentAt + 999_999).length, 0, "nothing sent, nothing due");
+  // The REST API's answer.
+  r.eq(T.transactionLookupFromRest(404, null).status, "notAccepted", "404: the network doesn't have it");
+  r.eq(T.transactionLookupFromRest(200, { is_accepted: false }).status, "notAccepted", "known, not accepted");
+  const accepted = T.transactionLookupFromRest(200, { is_accepted: true, block_time: 1_793_000_123_456 });
+  r.eq(accepted.status, "accepted", "accepted");
+  r.eq(accepted.blockTime, 1_793_000_123_456, "with its block's time");
+  r.eq(T.transactionLookupFromRest(200, { is_accepted: true }).blockTime, null, "accepted with no block time");
+  r.eq(T.transactionLookupFromRest(500, null).status, "unanswered", "a server error: no answer");
+  r.eq(T.transactionLookupFromRest(200, null).status, "unanswered", "no JSON: no answer");
+  // The verdict.
+  const verdict = (lookup, extra = {}) => T.unconfirmedRowVerdict({ lookup, sentAt, now: sentAt + 61_000, ...extra });
+  r.eq(verdict({ status: "accepted", blockTime: 1 }), "confirm", "accepted: confirmed");
+  r.eq(verdict({ status: "notAccepted" }), "drop", "nowhere: dropped");
+  r.eq(verdict({ status: "notAccepted" }, { inMempool: true }), "later", "in a mempool: another round");
+  r.eq(verdict({ status: "unanswered" }), "later", "no answer: asked again");
+  r.eq(verdict({ status: "unanswered" }, { now: sentAt + 5 * 60_000 }), "later", "no answer at five minutes: still asked");
+  r.eq(verdict({ status: "unanswered" }, { now: sentAt + 5 * 60_000 + 1 }), "drop", "no answer past five minutes: given up");
+  r.eq(verdict({ status: "unanswered" }, { inMempool: true, now: sentAt + 10 * 60_000 }), "drop", "the mempool is asked only when REST says not accepted");
   // Dropped, the board is ours to move again.
-  const after = T.reduce([...joins]);
-  r.eq(T.playerToMove(Object.values(after[ROOM].games)[0]), whiteOf, "without the row it is our turn again");
+  const g = game0;
+  const mine = moveBy(g, whiteOf, g.lastEventAt + 5_000, 1, "e2", "e4", "local-1");
+  r.eq(T.playerToMove(Object.values(T.reduce([...joins, mine])[ROOM].games)[0]), blackOf, "the local row is applied at once");
+  r.eq(T.playerToMove(Object.values(T.reduce([...joins])[ROOM].games)[0]), whiteOf, "without the row it is our turn again");
 }
 
 console.log(`chess tournament sends: ${r.pass} passed, ${r.fail} failed`);

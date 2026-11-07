@@ -238,7 +238,7 @@ function restoreHarness({ importFails = false, saveFails = false } = {}) {
     },
   };
   const source = between("function restorePersistedTestingWallet(", "function normalizeContact(");
-  const { restorePersistedTestingWallet } = build(source, {
+  const { restorePersistedTestingWallet, reason } = build(source, {
     engine,
     localStorage: { getItem: () => null },
     SESSION_LOGGED_OUT_KEY: "logged-out",
@@ -251,8 +251,9 @@ function restoreHarness({ importFails = false, saveFails = false } = {}) {
     markSessionActive: () => log.push("active"),
     activateWalletDataScope: (address) => log.push(`scope:${address}`),
     appendEngineLog: () => {},
-  }, "{ restorePersistedTestingWallet }", 'let preScopedAddress = "";');
-  return { restorePersistedTestingWallet, log };
+    userFacingError: (error) => error?.message || "",
+  }, "{ restorePersistedTestingWallet, reason: () => restoreFailureReason }", 'let preScopedAddress = "";');
+  return { restorePersistedTestingWallet, log, reason };
 }
 
 test("a re-save that fails at launch never deletes the stored keys", () => {
@@ -263,9 +264,85 @@ test("a re-save that fails at launch never deletes the stored keys", () => {
 });
 
 test("a stored key that does not open is still cleared, as before", () => {
-  const { restorePersistedTestingWallet, log } = restoreHarness({ importFails: true });
+  const { restorePersistedTestingWallet, log, reason } = restoreHarness({ importFails: true });
   assert.equal(restorePersistedTestingWallet(), false);
   assert.deepEqual(log, ["CLEAR"]);
+  assert.equal(reason(), "bad key", "the reason waits for the sign-in screen (iOS d23e6f7a)");
+});
+
+// --- A sign-in's failure survives its reload (iOS d23e6f7a signInFailureMessage) ---------------
+const signInSource = between("const SIGN_IN_ATTEMPT_KEY", "/** Whether any of `address`'s keys reached");
+function signInHarness(session = new Map()) {
+  return build(signInSource, {
+    sessionStorage: { getItem: (k) => (session.has(k) ? session.get(k) : null), setItem: (k, v) => session.set(k, String(v)), removeItem: (k) => session.delete(k) },
+    sameStoredAccountAddress: (a, b) => Boolean(a && b) && String(a).replace(/^kaspatest:/, "kaspa:") === String(b).replace(/^kaspatest:/, "kaspa:"),
+  }, "{ takeSignInAttempt, signInFailureMessageFor, SIGN_IN_ATTEMPT_KEY }");
+}
+
+test("a sign-in that lands on its account says nothing; one that doesn't says why, once", () => {
+  const session = new Map();
+  const api = signInHarness(session);
+  session.set(api.SIGN_IN_ATTEMPT_KEY, "kaspa:qpicked");
+  const attempted = api.takeSignInAttempt();
+  assert.equal(attempted, "kaspa:qpicked");
+  assert.equal(api.takeSignInAttempt(), "", "read once: a later reload says nothing");
+  assert.equal(api.signInFailureMessageFor(attempted, { restored: true, activeAddress: "kaspa:qpicked" }), "");
+  assert.equal(api.signInFailureMessageFor(attempted, { restored: true, activeAddress: "kaspatest:qpicked" }), "", "the same account on the other network");
+  assert.equal(api.signInFailureMessageFor(attempted, { restored: false, activeAddress: null, reason: "bad key" }), "bad key");
+  assert.equal(api.signInFailureMessageFor(attempted, { restored: true, activeAddress: "kaspa:qother" }), "Unable to sign in to this account.", "another account opened");
+  assert.equal(api.signInFailureMessageFor("", { restored: false }), "", "no sign-in asked: an ordinary launch");
+});
+
+test("activateSavedAccount files the attempt last, after every write", () => {
+  const source = between("function activateSavedAccount(", "// The account a sign-in picked");
+  assert.match(source, /UI_SPOT_TAB_KEY[\s\S]*sessionStorage\.setItem\(SIGN_IN_ATTEMPT_KEY/);
+});
+
+// --- A failed save puts the previous account back (iOS d23e6f7a / KaPay 1652437 restoreActiveSlot) --
+function persistHarness({ upsertFails = false, verifyFails = false } = {}) {
+  const data = new Map([["wallet", JSON.stringify({ address: "kaspa:qold" })], ["active", "kaspa:qold"]]);
+  const storage = { getItem: (k) => (data.has(k) ? data.get(k) : null), setItem: (k, v) => data.set(k, String(v)), removeItem: (k) => data.delete(k) };
+  const source = between("function persistTestingWallet(", "function clearPersistedTestingWallet(");
+  const api = build(source, {
+    engine: { privateKeyHex: "ab".repeat(32), address: "kaspa:qnew" },
+    accountShellPrefs: {},
+    appendEngineLog: () => {},
+    activeAccountMetadata: () => ({ name: "New" }),
+    loadSavedAccounts: () => [],
+    isAppLocked: () => false,
+    normalizePassphraseForm: (f) => f,
+    passphraseFormForRecord: () => "nfkd",
+    fileStoredWalletBeforeReplacing: () => {},
+    localStorage: storage,
+    PERSISTED_WALLET_KEY: "wallet",
+    ACTIVE_ACCOUNT_KEY: "active",
+    persistedWalletRecordForStorage: (payload) => payload,
+    canonicalAccountAddress: (a) => a,
+    clearLegacyWalletKey: () => {},
+    upsertSavedAccount: () => { data.set("active", "kaspa:qnew"); if (upsertFails) throw new Error("KaChat is locked."); },
+    getStoredTestingWalletHex: () => (verifyFails ? "cd".repeat(32) : "ab".repeat(32)),
+  }, "{ persistTestingWallet }");
+  return { ...api, data };
+}
+
+test("a save that fails part-way leaves the previous account in the slot", () => {
+  for (const options of [{ upsertFails: true }, { verifyFails: true }]) {
+    const { persistTestingWallet, data } = persistHarness(options);
+    assert.throws(() => persistTestingWallet({ mnemonic: "words" }));
+    assert.equal(JSON.parse(data.get("wallet")).address, "kaspa:qold", JSON.stringify(options));
+    assert.equal(data.get("active"), "kaspa:qold");
+  }
+  const { persistTestingWallet, data } = persistHarness();
+  assert.equal(persistTestingWallet({ mnemonic: "words" }), true);
+  assert.equal(JSON.parse(data.get("wallet")).address, "kaspa:qnew", "a save that works keeps the new account");
+});
+
+// --- Same words again are the same account (iOS d23e6f7a isNewWallet / isSameAccount) ---------
+test("importing the account already in the slot doesn't reset its chats", () => {
+  const source = between("async function importAndEnterAccount(", "// STEP 1 → STEP 2");
+  assert.match(source, /const previousSlotAddress = String\(engine\.address \|\| readActiveAccountAddress\(\) \|\| ""\)/);
+  assert.ok(source.indexOf("previousSlotAddress =") < source.indexOf("importMnemonicWithFamily"), "read before the import moves engine.address");
+  assert.match(source, /if \(resetState && !sameStoredAccountAddress\(previousSlotAddress, wallet\.address\)\) \{\n\s*state = \{ contacts: \[\], conversations: \[\] \};/);
 });
 
 for (const [name, fn] of tests) {

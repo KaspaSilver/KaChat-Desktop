@@ -5,6 +5,7 @@
 // server. No real Nextcloud is involved: the fake answers only what these paths need.
 import assert from "node:assert/strict";
 import { createServer } from "vite";
+import { readFileSync } from "node:fs";
 
 class MemoryStorage {
   constructor() { this.map = new Map(); }
@@ -352,6 +353,7 @@ test("per address the newest edit wins, and a tie keeps this device's copy", () 
   saveAddressBookEntry({ address: ALICE, name: "Older here" });
   saveAddressBookEntry({ address: BOB, name: "Newer here" });
   saveAddressBookEntry({ address: DAVE, name: "Tie here" });
+  clock = Date.parse("2026-11-01T12:00:00Z"); // the file is read after every date in it
   const result = mergeSharedContactsFile(kapayFile({ entries: [
     row(ALICE, "2026-10-11T10:00:00Z", { name: "Newer there" }),
     row(BOB, "2026-10-09T10:00:00Z", { name: "Older there", id: UUID_2 }),
@@ -410,6 +412,7 @@ test("photos: the winning edit decides, as in a restore", () => {
   clock = Date.parse("2026-10-10T10:00:00Z");
   saveAddressBookEntry({ address: ALICE, name: "Alice", photo: "data:image/jpeg;base64,TE9DQUw=" });
   saveAddressBookEntry({ address: BOB, name: "Bob", photo: "data:image/jpeg;base64,TE9DQUw=" });
+  clock = Date.parse("2026-11-01T12:00:00Z"); // the file is read after every date in it
   // A newer edit with no photo removes ours; an older one leaves it.
   mergeSharedContactsFile(kapayFile({ entries: [row(ALICE, "2026-10-11T10:00:00Z"), row(BOB, "2026-10-09T10:00:00Z", { id: UUID_2 })] }));
   assert.equal(addressBookPhoto(ALICE), null);
@@ -962,6 +965,111 @@ test("deleting the backup with the account takes the contacts file and the old c
   assert.equal(dav.get("sam", "KaChat/kachat-backup-desktop.json"), undefined);
   // Nothing there is the state asked for.
   await deleteRemoteNextcloudBackup();
+});
+
+// --- KaPay 1652437 / KaChat d23e6f7a: Nextcloud and account removal --------------------------------
+
+const ncState = (address = WALLET_A) => JSON.parse(local.getItem(scopedKey("kachat-nextcloud-v1", address)));
+
+test("portfolio: after one encrypted backup a plain file is nobody's, and its name is taken", async () => {
+  pfFake();
+  dav.put("sam", "KaChat/Long Term.json", pfJson([pfRow(PF_LONG, "Long Term")], [pfTx("t1", PF_LONG)]));
+  portfolios.local = pfState([]);
+  await runPortfolioBackup();
+  assert.deepEqual(portfolios.local.transactions.map((t) => t.id), ["t1"], "read while this account's files were still plain");
+  assert.equal(ncState().plainPortfoliosRetired, true);
+  // Anyone can write a plain file naming this account: it no longer counts.
+  const planted = pfJson([pfRow(PF_SHORT, "Short")], [pfTx("t9", PF_SHORT)]);
+  dav.put("sam", "KaChat/Short.json", planted);
+  portfolios.local = pfState([pfRow(PF_LONG, "Long Term"), pfRow("AAAAAAAA-0000-4000-8000-000000000003", "Short", 1_780_000_000_000, 1_790_000_000_000)], [pfTx("t1", PF_LONG)]);
+  await runPortfolioBackup();
+  assert.ok(!portfolios.local.transactions.some((t) => t.id === "t9"), "not merged in");
+  assert.equal(dav.get("sam", "KaChat/Short.json"), planted, "never written over or deleted");
+  assert.equal((await pfFile("Short 2.json")).portfolios[0].name, "Short", "this account's goes beside it");
+});
+
+test("portfolio: the old single file without an owner goes to the first account on that login, once", async () => {
+  const single = JSON.stringify({ version: 1, exportedAt: 700000000, portfolios: [{ id: PF_LONG, name: "Old", sortOrder: 0, createdAt: 700000000, updatedAt: 700000000 }], transactions: [], fees: [], tombstones: [] });
+  pfFake(WALLET_A, { autoBackup: false, singlePortfolioMerged: false });
+  dav.put("sam", "KaChat/KaPay Portfolio.json", single);
+  portfolios.local = pfState([]);
+  await runPortfolioBackup();
+  assert.deepEqual(portfolios.local.portfolios.map((p) => p.name), ["Old"]);
+  const logins = local.getItem("kachat-nextcloud-single-portfolio-logins-v1");
+  assert.deepEqual(JSON.parse(logins), ["https://cloud.example.test|sam"]);
+  // A second account on the same login: not its portfolios.
+  pfFake(WALLET_B, { autoBackup: false, singlePortfolioMerged: false });
+  local.setItem("kachat-nextcloud-single-portfolio-logins-v1", logins);
+  dav.put("sam", "KaChat/KaPay Portfolio.json", single);
+  portfolios.local = pfState([]);
+  await runPortfolioBackup();
+  assert.deepEqual(portfolios.local.portfolios, [], "the first account's, not this one's");
+  assert.equal(ncState(WALLET_B).singlePortfolioMerged, true, "and not looked at again");
+  // One that names its owner goes to that account only, login or no login.
+  pfFake(WALLET_B, { autoBackup: false, singlePortfolioMerged: false });
+  local.setItem("kachat-nextcloud-single-portfolio-logins-v1", logins);
+  dav.put("sam", "KaChat/KaPay Portfolio.json", JSON.stringify({ ...JSON.parse(single), walletAddress: WALLET_B }));
+  portfolios.local = pfState([]);
+  await runPortfolioBackup();
+  assert.deepEqual(portfolios.local.portfolios.map((p) => p.name), ["Old"]);
+});
+
+test("portfolio: an untouched seed uploaded to carry a deletion goes once real portfolios are up", async () => {
+  pfFake();
+  const deletion = [{ kind: "portfolio", id: PF_LONG, deletedAt: 1_790_000_000_000 }];
+  portfolios.local = pfState([pfSeed()], [], deletion);
+  await runPortfolioBackup();
+  assert.ok(dav.get("sam", "KaChat/Portfolio 1.json"), "the carrier");
+  portfolios.local = pfState([pfSeed(), pfRow(PF_SHORT, "Short")], [], deletion);
+  await runPortfolioBackup();
+  assert.deepEqual((await pfFile("Short.json")).tombstones.map((t) => t.id), [PF_LONG], "the real file carries the deletion now");
+  assert.equal(dav.get("sam", "KaChat/Portfolio 1.json"), undefined, "the carrier has no job left");
+});
+
+test("deleting the backup takes this account's damaged Portfolio files too, never another account's", async () => {
+  pfFake();
+  dav.put("sam", BACKUP_PATH, "{}");
+  dav.put("sam", "KaChat/Long Term.json", await sealFor(WALLET_A, pfJson([pfRow(PF_LONG, "Long Term")])));
+  dav.put("sam", "KaChat/Damaged.json", await sealBackupEnvelope(pfJson([pfRow(PF_SHORT, "Damaged")]), "33".repeat(32), WALLET_A));
+  await pfForeign("Theirs.json", WALLET_B);
+  await deleteRemoteNextcloudBackup();
+  assert.equal(dav.get("sam", BACKUP_PATH), undefined);
+  assert.equal(dav.get("sam", "KaChat/Long Term.json"), undefined);
+  assert.equal(dav.get("sam", "KaChat/Damaged.json"), undefined, "its own, though it won't open");
+  assert.ok(dav.get("sam", "KaChat/Theirs.json"), "another account's stays");
+});
+
+test("deleting the backup without the key takes the contacts file, then says the Portfolio files stayed", async () => {
+  pfFake();
+  dav.put("sam", BACKUP_PATH, "{}");
+  dav.put("sam", "KaChat/Long Term.json", await sealFor(WALLET_A, pfJson([pfRow(PF_LONG, "Long Term")])));
+  backupKeyAvailable = false;
+  try {
+    await assert.rejects(deleteRemoteNextcloudBackup(), /contacts backup was deleted, but the Portfolio files weren't/);
+  } finally { backupKeyAvailable = true; }
+  assert.equal(dav.get("sam", BACKUP_PATH), undefined);
+  assert.ok(dav.get("sam", "KaChat/Long Term.json"), "can't be told from anyone else's without the key");
+});
+
+test("removing an account revokes the app password its stored login holds; a sealed one it can't open is left", async () => {
+  toFake(WALLET_A, { autoBackup: false });
+  storeAccount(WALLET_B, { autoBackup: false, appPassword: undefined, appPasswordSealed: { v: 1, iv: "aXY=", ct: "Y3Q=" } });
+  startModule();
+  const logins = nextcloud.storedNextcloudLoginsFor(WALLET_A);
+  assert.deepEqual(logins, [{ server: "https://cloud.example.test", username: "sam", appPassword: "app-pass" }]);
+  assert.deepEqual(nextcloud.storedNextcloudLoginsFor(WALLET_B), [], "no password to revoke with");
+  assert.deepEqual(nextcloud.storedNextcloudLoginsFor(""), []);
+  dav.revokes = [];
+  await nextcloud.revokeNextcloudLogins(logins);
+  assert.deepEqual(dav.revokes, [{ method: "DELETE", ocs: "true", auth: `Basic ${btoa("sam:app-pass")}` }]);
+  await nextcloud.revokeNextcloudLogins([]);
+  assert.equal(dav.revokes.length, 1);
+});
+
+test("Settings says the Portfolio files are encrypted", () => {
+  const source = readFileSync(new URL("../ui/nextcloud.js", import.meta.url), "utf8");
+  assert.ok(source.includes("Each portfolio has its own file, named after it, encrypted with this account's key."));
+  assert.ok(!source.includes("These files aren't encrypted"));
 });
 
 // --- Run ------------------------------------------------------------------------------------------

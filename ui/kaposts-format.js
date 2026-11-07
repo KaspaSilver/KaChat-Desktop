@@ -30,6 +30,18 @@ export async function kapostsSubmitWithUtxoRetry(op, { retries = 4, delayMs = 15
   }
 }
 
+// --- Kept pages (iOS 33095ac) ----------------------------------------------------------------------
+
+/** Whether a page loaded at `loadedAt` can be shown again as it was: younger than `freshMs`, and
+ *  loaded after `changedAt` - your own last post, reply, edit or delete for your profile
+ *  (KaPostsAPIClient.ownActivityAt), the last arrival for Notifications
+ *  (KaPostsNotificationCenter.lastArrivalAt). A page never loaded (0) is never fresh. */
+export function kapostsKeptPageFresh({ loadedAt, freshMs, changedAt = 0, now = Date.now() }) {
+  const at = Number(loadedAt) || 0;
+  if (!at || now - at >= freshMs) return false;
+  return (Number(changedAt) || 0) < at;
+}
+
 /** Characters as the composer counts them: code points, so an emoji is one, not two UTF-16
  *  units (iOS counts `text.count`). */
 export function kapostsCharCount(text) {

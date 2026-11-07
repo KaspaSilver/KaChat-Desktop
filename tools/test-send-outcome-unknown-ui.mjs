@@ -68,11 +68,12 @@ assert.equal(kapostsFailureDelivery(null), "failed");
   assert.equal(changed, 5);
   const byId = Object.fromEntries(rows.map((r) => [r.txId, r]));
   assert.equal(byId["pending-a"], undefined, "the delivered copy replaces it");
-  assert.equal(byId["pending-b"].status, "failed", "Retry appears");
-  assert.equal(byId["pending-c"].status, "failed");
-  assert.equal(byId["pending-d"].status, "failed");
+  // It may have landed while the app was closed: Not confirmed, no Retry (iOS 33095ac).
+  assert.equal(byId["pending-b"].status, "unconfirmed", "no Retry that could pay twice");
+  assert.equal(byId["pending-c"].status, "unconfirmed");
+  assert.equal(byId["pending-d"].status, "unconfirmed");
   assert.equal(byId["pending-e"].status, "pending", "this run's send is still being worked on");
-  assert.equal(byId["pending-f"].status, "failed");
+  assert.equal(byId["pending-f"].status, "unconfirmed");
   assert.equal(settleLeftoverRoomRows(rows, { keeping: new Set(["pending-e"]) }), 0, "nothing left to settle");
 }
 
@@ -130,7 +131,7 @@ const css = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
 assert.match(css, /\.kaposts-delivery\.unconfirmed \{[^}]*color: var\(--ios-orange\)/);
 
 const rooms = readFileSync(new URL("../ui/broadcasts.js", import.meta.url), "utf8");
-assert.match(rooms, /showBubble && error\?\.code === SEND_OUTCOME_UNKNOWN/, "a room message not confirmed stays pending");
+assert.match(rooms, /showBubble && error\?\.code === SEND_OUTCOME_UNKNOWN\) \{[\s\S]{0,400}markRoomRowUnconfirmed\(messageCache\[channel\], pendingId, error\.txid\)/, "a room message not confirmed shows Not confirmed (iOS 33095ac)");
 assert.match(rooms, /pendingSendsThisRun\.add\(pendingId\)/);
 assert.match(rooms, /settledPendingRooms\.clear\(\)/, "an account switch checks the rooms again");
 assert.match(rooms, /if \(error\?\.code === SEND_OUTCOME_UNKNOWN\) \{[\s\S]{0,300}return;\s*\}\s*\/\/ No toast \(iOS\): the pill turns red/, "a reaction not confirmed is not marked failed");

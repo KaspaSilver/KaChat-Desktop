@@ -876,8 +876,11 @@ let activeCoinPicker = null;
  * [{ key, amountSompi, entry }] or null for automatic (an empty pick means automatic, never
  * "spend nothing"); Cancel, Escape or the backdrop leave the choice as it was. `labels` maps
  * "txid:index" to a coin's name. A failed load says so, with Retry, instead of "no coins".
+ * `unavailableReason(entry)` (optional): why the send can't spend a coin, null when it can. Such a
+ * coin is listed greyed out with that reason and never picked, by a tap or Select All (iOS
+ * d23e6f7a / KaPay 1652437 CoinControlView unavailableReason).
  */
-export function openCoinControlPicker({ loadEntries, initialSelection = null, labels = {}, kasUnit = "KAS", onDone } = {}) {
+export function openCoinControlPicker({ loadEntries, initialSelection = null, labels = {}, kasUnit = "KAS", unavailableReason = null, onDone } = {}) {
   closeCoinControlPicker();
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop sk-source-backdrop sk-coin-backdrop";
@@ -900,6 +903,11 @@ export function openCoinControlPicker({ loadEntries, initialSelection = null, la
   let loading = true;
   let loadError = "";
   const selected = new Set(Array.isArray(initialSelection) ? initialSelection.map(String) : []);
+  const reasonFor = (entry) => {
+    if (typeof unavailableReason !== "function") return null;
+    try { return unavailableReason(entry) || null; } catch { return null; }
+  };
+  const available = () => entries.filter((entry) => !reasonFor(entry));
 
   function paint() {
     if (doneButton) {
@@ -932,16 +940,18 @@ export function openCoinControlPicker({ loadEntries, initialSelection = null, la
       <div class="cold-coincontrol-list sk-coin-picker-list" role="group" aria-label="UTXOs at this address">
         ${entries.map((entry) => {
           const key = utxoEntryKey(entry);
-          const on = selected.has(key);
+          const reason = reasonFor(entry);
+          const on = !reason && selected.has(key);
           const label = labels?.[key];
           const [txid, index] = [key.slice(0, key.lastIndexOf(":")), key.slice(key.lastIndexOf(":") + 1)];
           return `
-          <button type="button" class="cold-coincontrol-row${on ? " selected" : ""}" data-sk-coin-key="${esc(key)}" aria-pressed="${on ? "true" : "false"}">
+          <button type="button" class="cold-coincontrol-row${on ? " selected" : ""}${reason ? " unavailable" : ""}" data-sk-coin-key="${esc(key)}" aria-pressed="${on ? "true" : "false"}"${reason ? ' disabled aria-disabled="true"' : ""}>
             <span class="cold-coincontrol-check" aria-hidden="true">${on ? SEND_ICONS.checkCircle : '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.25"/></svg>'}</span>
             <span class="cold-coincontrol-copy">
               ${label ? `<span class="cold-coincontrol-label">${esc(label)}</span>` : ""}
               <span class="cold-coincontrol-amount">${esc(fixedKas8(utxoEntrySompi(entry)))} ${esc(kasUnit)}</span>
               <span class="cold-coincontrol-outpoint">${esc(txid.slice(0, 10))}...:${esc(index)}</span>
+              ${reason ? `<span class="cold-coincontrol-unavailable">${esc(reason)}</span>` : ""}
             </span>
           </button>`;
         }).join("")}
@@ -959,8 +969,8 @@ export function openCoinControlPicker({ loadEntries, initialSelection = null, la
         if (!backdrop.isConnected) return;
         // In the order the node lists them (iOS CoinControlView).
         entries = [...(loaded || [])];
-        // A coin spent since it was picked can't stay ticked.
-        const live = new Set(entries.map(utxoEntryKey));
+        // A coin spent since it was picked (or one the send can't spend now) can't stay ticked.
+        const live = new Set(available().map(utxoEntryKey));
         for (const key of [...selected]) if (!live.has(key)) selected.delete(key);
         loading = false;
         paint();
@@ -994,11 +1004,11 @@ export function openCoinControlPicker({ loadEntries, initialSelection = null, la
   backdrop.addEventListener("click", (event) => {
     if (event.target.closest("[data-sk-coin-cancel]")) { close(); return; }
     if (event.target.closest("[data-sk-coin-retry]")) { load(); return; }
-    if (event.target.closest("[data-sk-coin-all]")) { entries.forEach((e) => selected.add(utxoEntryKey(e))); paint(); return; }
+    if (event.target.closest("[data-sk-coin-all]")) { available().forEach((e) => selected.add(utxoEntryKey(e))); paint(); return; }
     if (event.target.closest("[data-sk-coin-none]")) { selected.clear(); paint(); return; }
     if (event.target.closest("[data-sk-coin-done]")) {
       if (loading) return;
-      const picked = entries
+      const picked = available()
         .filter((e) => selected.has(utxoEntryKey(e)))
         .map((e) => ({ key: utxoEntryKey(e), amountSompi: utxoEntrySompi(e), entry: e }));
       close();
@@ -1006,7 +1016,7 @@ export function openCoinControlPicker({ loadEntries, initialSelection = null, la
       return;
     }
     const row = event.target.closest("[data-sk-coin-key]");
-    if (!row) return;
+    if (!row || row.disabled) return;
     const key = row.getAttribute("data-sk-coin-key");
     if (selected.has(key)) selected.delete(key); else selected.add(key);
     const list = body.querySelector(".sk-coin-picker-list");

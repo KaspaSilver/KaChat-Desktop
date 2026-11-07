@@ -92,6 +92,21 @@ export function parseBackupEnvelope(json) {
   return null;
 }
 
+export const BACKUP_NOT_ENCRYPTED_MESSAGE =
+  "This file isn't an encrypted KaChat archive, so it can't be imported.";
+
+/**
+ * A chat archive imported from a file: only an encrypted export, which is all KaChat writes (iOS
+ * d23e6f7a BackupEnvelope.notEncrypted). Nothing in a plaintext archive is checked against the
+ * chain or a key, so its messages, contacts and groups would be taken as they are from whoever
+ * sent the file. Throws BACKUP_NOT_ENCRYPTED_MESSAGE for anything else, before reading it, and
+ * BACKUP_DECRYPT_FAILED_MESSAGE as openBackupEnvelope does.
+ */
+export async function openEncryptedArchive(json, identityPrivateKeyHex, walletAddress) {
+  if (!parseBackupEnvelope(json)) throw new Error(BACKUP_NOT_ENCRYPTED_MESSAGE);
+  return openBackupEnvelope(json, identityPrivateKeyHex, walletAddress);
+}
+
 /** Encrypts a plaintext archive JSON string into the envelope (a JSON string,
  *  the file's entire content). Fresh random nonce per write. */
 export async function sealBackupEnvelope(plaintextJson, identityPrivateKeyHex, walletAddress) {

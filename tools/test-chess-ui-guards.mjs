@@ -43,7 +43,14 @@ const screen = { innerHTML: "", querySelector: () => null, querySelectorAll: () 
 globalThis.document = { hidden: false, querySelector: (sel) => (sel === "[data-chess-tournaments]" ? screen : null) };
 
 // --- Stubs for the sends, the dialogs, the endpoints and the stylesheet ---------------------------
-const stub = globalThis.__chessStub = { sends: [], confirm: true };
+const stub = globalThis.__chessStub = { sends: [], confirm: true, rest: {}, mempool: {}, lookups: [] };
+// The Kaspa REST API's GET /transactions/{id}: stub.rest[txId]() answers { status, json } or throws.
+globalThis.fetch = async (url) => {
+  const txId = decodeURIComponent(String(url).match(/\/transactions\/([^?]+)/)?.[1] || "");
+  stub.lookups.push(txId);
+  const answer = stub.rest[txId]?.() || { status: 404 };
+  return { status: answer.status, json: async () => answer.json };
+};
 const dataModule = (source) => `data:text/javascript,${encodeURIComponent(source)}`;
 const STUBS = {
   "../engine/broadcasts.js": dataModule(`
@@ -60,7 +67,7 @@ const STUBS = {
     export const promptDialog = async () => null;
     export const chooseDialog = async () => null;`),
   "./broadcasts.js": dataModule(`export const setServiceScanWanted = () => {};`),
-  "../engine/endpoints.js": dataModule(`export const getEndpoint = () => "";`),
+  "../engine/endpoints.js": dataModule(`export const getEndpoint = (name) => (name === "kaspaApi" ? "https://rest.test" : "");`),
   "./chess-bots.css": dataModule(``),
   // The bot games ui/chess-bots.js starts, kept for the test to look at.
   "../engine/chess-bot.js": dataModule(`
@@ -96,11 +103,13 @@ const cache = [
   row(ME, t0 - 40_000, T.messages.join("duel-3")),
   row(OPP, t0 - 39_000, T.messages.join("duel-3")),
   row(ME, t0 - 2_000, T.messages.move("duel-3", "1-0", 1, "e2", "e4", null), { local: true, txId: "local-e4" }),
+  // A claim of ours (for a room the reducer doesn't know) the chain has not shown yet either.
+  row(ME, t0 - 1_000, T.messages.claim("duel-7", "1-0"), { local: true, txId: "local-claim" }),
 ];
 store.set("kachat-chess-arena-v1", JSON.stringify(cache));
 
 const logs = [];
-const engine = { address: ME, onBroadcastBlockHits: () => () => {} };
+const engine = { address: ME, onBroadcastBlockHits: () => () => {}, getMempoolEntry: async (txId) => stub.mempool[txId] ?? null };
 const scoped = (key, address = engine.address) => {
   const clean = String(address || "").trim();
   return clean ? `kachat-account-data-v1:${clean}:${key}` : key;
@@ -125,20 +134,79 @@ function click(attr, dataset = {}) {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 const tick = () => intervals.get(200)?.();
 
-// --- Our unseen move is not dropped by the first tick after Chess comes back on -------------------
+// --- Our unseen rows: looked up on the chain after 60 s, dropped only if they never landed --------
+// (iOS 4922804 checkUnconfirmedServiceRows; loadCache timed both rows from the app's start.)
 {
-  // Chess was off for a minute after the app started (loadCache timed e4 from then): no poll, no scan.
-  clockOffset.ms = 60_000;
+  const cachedRow = (txId) => JSON.parse(store.get("kachat-chess-arena-v1") || "[]").find((x) => x.txId === txId);
+  clockOffset.ms = 30_000;
   ui.showChessTournaments();
   tick();
-  r.check(!logs.some((l) => l.includes("local-e4")), "first tick after Chess came back on keeps the unseen move (the indexer gets its turn)");
-  r.check(!screen.innerHTML.includes("didn't reach the network"), "and says nothing about it");
-  // Still unseen T.PENDING_MOVE_TIMEOUT_MS after Chess came back on: dropped, as before.
-  clockOffset.ms = 60_000 + T.PENDING_MOVE_TIMEOUT_MS + 1_000;
+  await settle();
+  r.eq(stub.lookups.length, 0, "30 s on: nothing looked up yet");
+  // 61 s: the REST API can't be reached for e4; the claim is accepted, with its block time.
+  const claimBlockTime = t0 + 5_000;
+  stub.rest["local-e4"] = () => { throw new Error("offline"); };
+  stub.rest["local-claim"] = () => ({ status: 200, json: { is_accepted: true, block_time: claimBlockTime } });
+  clockOffset.ms = 61_000;
   tick();
-  r.check(logs.some((l) => l.includes("local-e4") && l.includes("dropped")), "still unseen the timeout after Chess came back on: dropped");
-  clockOffset.ms = 0;
+  await settle();
+  r.eq(stub.lookups.join(), "local-e4,local-claim", "61 s on: both rows looked up (a claim like a move)");
+  r.check(!logs.some((l) => l.includes("local-e4")), "no answer for e4: kept");
+  r.eq(cachedRow("local-claim")?.local, false, "the accepted claim is the chain's row now");
+  r.eq(cachedRow("local-claim")?.blockTime, claimBlockTime, "with the block's time");
+  // Not asked again on every tick: 15 s later.
+  clockOffset.ms = 70_000;
   tick();
+  await settle();
+  r.eq(stub.lookups.length, 2, "not asked again before 15 s");
+  // 77 s: not accepted, but a node's mempool holds it - another round.
+  stub.rest["local-e4"] = () => ({ status: 404 });
+  stub.mempool["local-e4"] = { transaction: {} };
+  clockOffset.ms = 77_000;
+  tick();
+  await settle();
+  r.eq(stub.lookups.at(-1), "local-e4", "asked again 15 s later");
+  r.check(!logs.some((l) => l.includes("local-e4")), "in a mempool: kept");
+  r.eq(cachedRow("local-e4")?.local, true, "still our local row");
+  // 93 s: nowhere - dropped, and the board offers the move again.
+  delete stub.mempool["local-e4"];
+  clockOffset.ms = 93_000;
+  tick();
+  await settle();
+  r.check(logs.some((l) => l.includes("local-e4") && l.includes("dropped")), "found nowhere: dropped");
+  r.eq(cachedRow("local-e4"), undefined, "the row is gone");
+  click("data-chess-t-watch", { chessTWatch: "duel-3|1-0" });
+  r.check(screen.innerHTML.includes(deps.escapeHtml(T.MOVE_DROPPED_MESSAGE)), "the board says: Play it again");
+  r.check(screen.innerHTML.includes("data-chess-t-status>Your move<"), "and it is our move again");
+  // Played again, and this time the node never answers (SEND_OUTCOME_UNKNOWN): the move stays
+  // taken until the chain settles it (iOS 4922804) - no error, no second send.
+  click("data-chess-t-sq", { chessTSq: "4,1" });
+  r.check(/chess-sq [a-z]+ selected/.test(screen.innerHTML), "our e2 pawn picks up");
+  click("data-chess-t-sq", { chessTSq: "4,3" });
+  const moveSend = stub.sends.at(-1);
+  r.check(moveSend?.args.content.includes('"move"'), "the move goes out");
+  const sendsBefore = stub.sends.length;
+  moveSend.reject(Object.assign(new Error("This may have gone through, but the network didn't confirm it."), { code: "SEND_OUTCOME_UNKNOWN", txid: "unknown-e4" }));
+  await settle();
+  r.eq(stub.sends.length, sendsBefore, "an unknown outcome is not sent again");
+  r.check(screen.innerHTML.includes("data-chess-t-status>Their move<"), "the move stays taken: their move");
+  r.check(!screen.innerHTML.includes("chess-t-error"), "and no error shows");
+  r.eq(cachedRow("unknown-e4")?.local, true, "kept as our row until the chain settles it");
+  click("data-chess-t-back");
+}
+
+// --- A flagged loser can't move (iOS 4922804): a move after the flag is void on chain -------------
+{
+  engine.address = OPP;
+  ui.resetChessTournamentsForAccount();
+  click("data-chess-t-watch", { chessTWatch: "duel-1|1-0" });
+  const sendsBefore = stub.sends.length;
+  click("data-chess-t-sq", { chessTSq: "4,1" });   // white's e2 pawn
+  r.check(!/chess-sq [a-z]+ selected/.test(screen.innerHTML), "the flagged side's piece can't be picked up");
+  click("data-chess-t-sq", { chessTSq: "4,3" });
+  r.eq(stub.sends.length, sendsBefore, "and no move goes out");
+  engine.address = ME;
+  ui.resetChessTournamentsForAccount();
 }
 
 // --- Claim win: taps while the claim is going out send one claim -----------------------------------
@@ -148,21 +216,27 @@ const tick = () => intervals.get(200)?.();
   // The tick posted the claim by itself (a recent flag) and it is still going out: taps add none.
   const auto = stub.sends.filter((s) => s.args.content.includes('"claim"'));
   r.eq(auto.length, 1, "the tick posted the claim by itself");
+  r.check(screen.innerHTML.includes("Claiming…") && /data-chess-t-claim disabled/.test(screen.innerHTML), "the button reads Claiming… and is off while it goes out");
   click("data-chess-t-claim");
   click("data-chess-t-claim");
   r.eq(stub.sends.filter((s) => s.args.content.includes('"claim"')).length, 1, "Claim win taps while the tick's claim is going out send nothing more");
   auto[0].reject(new Error("Request timed out"));
   await settle();
+  r.check(screen.innerHTML.includes(">Claim win<"), "the claim failed: Claim win again");
   const before = stub.sends.length;
   click("data-chess-t-claim");
   click("data-chess-t-claim");
   click("data-chess-t-claim");
   r.eq(stub.sends.length - before, 1, "three Claim win taps while the claim is going out: one claim transaction");
-  // It failed (not sent): the button sends again.
+  // It failed (not sent): a tap within five seconds of it is the same claim (iOS 4922804) ...
   stub.sends.at(-1).reject(new Error("Request timed out"));
   await settle();
   click("data-chess-t-claim");
-  r.eq(stub.sends.length - before, 2, "after a failed claim, Claim win sends again");
+  r.eq(stub.sends.length - before, 1, "a tap within five seconds of the last claim sends nothing");
+  // ... and five seconds on, the button sends again.
+  clockOffset.ms += T.CLAIM_TAP_GAP_MS;
+  click("data-chess-t-claim");
+  r.eq(stub.sends.length - before, 2, "after a failed claim, Claim win sends again five seconds on");
   stub.sends.at(-1).resolve("claim-tx-2");
   await settle();
   click("data-chess-t-back");

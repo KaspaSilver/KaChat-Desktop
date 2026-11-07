@@ -16,7 +16,7 @@
 
 import { getEndpoint } from "../engine/endpoints.js";
 import { isNetworkAddress, otherNetworkReason } from "../engine/network.js";
-import { submitConfirmingAcceptance } from "../engine/transactions.js";
+import { submitConfirmingAcceptance, transactionSpends } from "../engine/transactions.js";
 import { maxFeerate } from "../engine/kachat-names/codec.js";
 
 // Matches firmware MAX_INPUTS=32 as of KasSigner v1.0.5 (was 8; devices on older
@@ -732,6 +732,9 @@ export async function broadcastSigned({ engine, unsigned, decoded }) {
     withRpc: engine.withRpc.bind(engine),
     submit: (rpc, { allowOrphan = false } = {}) => rpc.submitTransaction({ transaction: tx, allowOrphan }),
     txid: localId,
+    // Every submit holds its coins back, sent or with an unknown outcome (KaPay 1652437: Cold
+    // Storage too), so no build here picks them again before a block shows them spent.
+    spends: transactionSpends(tx),
     label: "Cold storage broadcast",
     log: typeof engine.log === "function" ? engine.log : () => {},
   });

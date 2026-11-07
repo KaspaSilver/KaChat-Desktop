@@ -397,7 +397,6 @@ const sq = Chess.squareFromAlgebraic;
   // Errors that are not retried (iOS 8d5f925): an unknown outcome, no coins at all, a refused
   // double spend - one attempt each, no sleep, and the error mapped for display.
   const cases = [
-    [Object.assign(new Error("This may have gone through, but the network didn't confirm it."), { code: "SEND_OUTCOME_UNKNOWN" }), "This may have gone through, but the network didn't confirm it."],
     [new Error("No UTXOs found. Fund the receive address first."), "Not enough KAS on your Chatting Address. Add some and try again."],
     [new Error("Insufficient funds: need 0.1 KAS"), "Not enough KAS on your Chatting Address. Add some and try again."],
     [new Error("transaction rejected: double spend in mempool"), "The network is still confirming your previous send. Please try again in a few seconds."],
@@ -420,6 +419,38 @@ const sq = Chess.squareFromAlgebraic;
     r.eq(sleeps.filter((ms) => ms === 1_200).length, 0, `no retry wait: ${thrown.message}`);
     r.eq(game.stamp, "failed", `failed at once: ${thrown.message}`);
     r.eq(game.stampError, shown, `shown as: ${shown}`);
+  }
+}
+
+{
+  // An unknown outcome (iOS 4922804 .unconfirmed): it may have gone through - one attempt, no
+  // Retry, never a second stamp of the same game, and the win doesn't count until it is known.
+  for (const thrown of [
+    Object.assign(new Error("This may have gone through, but the network didn't confirm it."), { code: "SEND_OUTCOME_UNKNOWN", txid: "ab" }),
+    Object.assign(new Error(""), { code: "SEND_OUTCOME_UNKNOWN" }),
+  ]) {
+    let attempts = 0;
+    const stamped = [];
+    const game = new ChessBotGame({
+      bot: chessBot(1), playerColor: Chess.WHITE,
+      send: async () => { attempts += 1; throw thrown; },
+      think: async () => null,
+      recordStampedWin: (moves) => stamped.push(moves),
+      sleep: async () => {},
+    });
+    game.board = fen("6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1");
+    game.start();
+    game.play({ from: sq("a1"), to: sq("a8"), promotion: null });
+    await settle(20);
+    r.eq(attempts, 1, "unknown: one attempt");
+    r.eq(game.stamp, "unconfirmed", "unknown: unconfirmed, not failed");
+    r.eq(game.stampError, thrown.message || "This may have gone through, but the network didn't confirm it. Check your balance before sending again.", "it says it may have gone through");
+    game.retry();
+    game.sendStamp();
+    await settle(20);
+    r.eq(attempts, 1, "no Retry and no second stamp once it may have gone through");
+    r.eq(game.stamp, "unconfirmed", "still unconfirmed");
+    r.eq(stamped.length, 0, "the win doesn't count while it is unconfirmed");
   }
 }
 

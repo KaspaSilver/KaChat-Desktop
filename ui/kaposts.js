@@ -56,6 +56,7 @@ import {
   KAPOSTS_SCHEDULE_MIN_MS,
   KAPOSTS_SCHEDULE_MAX_MS,
   pollClosesAt,
+  lastOwnKaPostActivityAt,
 } from "../engine/kaposts.js";
 import { setReservedOutpoints } from "../engine/transactions.js";
 import { getEndpoint } from "../engine/endpoints.js";
@@ -87,6 +88,7 @@ import {
   kachatSiteLinkIn,
   kapostsFailureDelivery,
   kapostsSubmitWithUtxoRetry,
+  kapostsKeptPageFresh,
 } from "./kaposts-format.js";
 import { botChallengeIn, botChallengeTitle } from "../engine/chess-bot-links.js";
 // The phone header's hamburger, its slide-out card and the swipeable feeds (iOS 865c9ab).
@@ -2461,7 +2463,10 @@ function probeThreadRoots(posts) {
           return mapped && mapped.posterAddress === post.posterAddress;
         });
         if (isThread) { threadRootProbe.set(post.remoteId, true); found = true; }
-      } catch { /* stays false */ }
+      } catch {
+        // No answer: the claim mustn't stop a later render from asking (iOS 33095ac unclaim).
+        if (threadRootProbe.get(post.remoteId) === false) threadRootProbe.delete(post.remoteId);
+      }
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
     if (found) renderFeed();
@@ -3483,7 +3488,10 @@ function refreshActivePanel() {
   if (!panelHasRefresh(panel)) return;
   if (panel.type === "profile") refreshProfilePanel(panel);
   else if (panel.type === "followList") refreshFollowList(panel);
-  else if (panel.type === "notifications") loadNotificationsFirstPage(panel);
+  else if (panel.type === "notifications") {
+    // a refresh that worked is the list's new load time (iOS 33095ac)
+    loadNotificationsFirstPage(panel).then((loaded) => { if (loaded) keptNotificationsPanel = { panel, loadedAt: Date.now() }; });
+  }
   else if (panel.type === "list" && panel.kind === "scheduled") refreshScheduledPanel(panel);
 }
 
@@ -4040,7 +4048,9 @@ let keptNotificationsPanel = null; // { panel, loadedAt }
 /** The profile panel to show again for `address`, or null when it has to load. */
 function freshKeptProfilePanel(address, passedPubkey) {
   const kept = keptProfilePanel;
-  if (!kept || kept.address !== address || Date.now() - kept.loadedAt >= PROFILE_FRESH_MS) return null;
+  // Your own profile loaded before your last post, edit or delete is out of date (iOS 33095ac).
+  if (!kept || kept.address !== address
+    || !kapostsKeptPageFresh({ loadedAt: kept.loadedAt, freshMs: PROFILE_FRESH_MS, changedAt: lastOwnKaPostActivityAt(address) })) return null;
   const panel = kept.panel;
   if (panel.loading || !(panel.posts.length || panel.replies.length)) return null;
   if (passedPubkey && panel.pubkey && passedPubkey.toLowerCase() !== panel.pubkey.toLowerCase()) return null;
@@ -4308,8 +4318,12 @@ function saveUnseenKaPostsCount(count) {
   try { localStorage.setItem(deps.accountScopedKey(KAPOSTS_UNSEEN_KEY), String(Math.max(0, count | 0))); }
   catch {}
 }
+// When activity last arrived (this run): the Notifications list reloads when it is newer than its
+// own last load (iOS 33095ac KaPostsNotificationCenter.lastArrivalAt).
+let lastKaPostsArrivalAt = 0;
 function recordUnseenKaPostsArrivals(count) {
   if (count <= 0) return;
+  lastKaPostsArrivalAt = Date.now();
   saveUnseenKaPostsCount(loadUnseenKaPostsCount() + count);
   syncRailBadge();
 }
@@ -4559,10 +4573,12 @@ async function openNotificationsPanel() {
   panelGeneration += 1;
   clearPanelPagerSentinels();
   const generation = panelGeneration;
-  // Within two minutes of the last load the list comes back as it was, pages and all; pull to
-  // refresh still reloads (iOS e5a9b11 KaPostsNotificationsView lastLoadedAt).
+  // Within two minutes of the last load the list comes back as it was, pages and all, unless
+  // something arrived since; pull to refresh still reloads (iOS 33095ac KaPostsNotificationsView
+  // lastLoadedAt). Only a load that worked is kept.
   const kept = keptNotificationsPanel;
-  const reuse = kept && !kept.panel.loading && Date.now() - kept.loadedAt < NOTIFICATIONS_FRESH_MS;
+  const reuse = kept && !kept.panel.loading
+    && kapostsKeptPageFresh({ loadedAt: kept.loadedAt, freshMs: NOTIFICATIONS_FRESH_MS, changedAt: lastKaPostsArrivalAt });
   activePanel = beginPanel(reuse ? kept.panel : { type: "notifications", items: [], loading: true, pager: makePager({ pageSize: PAGER_THREAD_PAGE_SIZE }) });
   const panel = activePanel;
   renderPanel();
@@ -4571,13 +4587,14 @@ async function openNotificationsPanel() {
   // not sit there while you read.
   markAllKaPostsNotificationsSeen();
   if (reuse || generation !== panelGeneration) return;
-  keptNotificationsPanel = { panel, loadedAt: Date.now() };
-  await loadNotificationsFirstPage(panel);
+  keptNotificationsPanel = null;
+  if (await loadNotificationsFirstPage(panel)) keptNotificationsPanel = { panel, loadedAt: Date.now() };
 }
 
-/** Page one of the notification stream - the open and the pull-to-refresh (iOS loadPage(reset:)). */
+/** Page one of the notification stream - the open and the pull-to-refresh (iOS loadPage(reset:)).
+ *  Whether it loaded, for this panel still on screen (iOS 33095ac load() -> Bool). */
 async function loadNotificationsFirstPage(panel) {
-  if (panel?.type !== "notifications") return;
+  if (panel?.type !== "notifications") return false;
   const generation = panelGeneration;
   // A fresh pager: a load-more still in flight on the old one sees it was replaced and drops out.
   const pager = makePager({ pageSize: PAGER_THREAD_PAGE_SIZE });
@@ -4586,7 +4603,7 @@ async function loadNotificationsFirstPage(panel) {
   renderPanel();
   try {
     const page = await fetchKaPostNotifications({ engine: deps.engine, limit: PAGER_THREAD_PAGE_SIZE });
-    if (activePanel !== panel || generation !== panelGeneration || panel.pager !== pager) return;
+    if (activePanel !== panel || generation !== panelGeneration || panel.pager !== pager) return false;
     panel.items = page.notifications.map(mapNotificationRow).filter(Boolean);
     panel.loading = false;
     seedPager(pager, page.notifications, page.pagination);
@@ -4603,9 +4620,11 @@ async function loadNotificationsFirstPage(panel) {
     resolvePosterIdentities(panel.items.map((item) => item.actorAddress), () => {
       if (activePanel === panel) renderPanel();
     });
+    return true;
   } catch (error) {
     deps.appendEngineLog?.(`KaPost notifications load failed: ${error.message}`);
     if (activePanel === panel && panel.pager === pager) { panel.loading = false; pager.hasMore = false; renderPanel(); }
+    return false;
   }
 }
 

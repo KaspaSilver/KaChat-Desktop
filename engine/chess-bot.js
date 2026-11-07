@@ -15,7 +15,7 @@ import {
   WHITE, BLACK, opposite, algebraic, promotionLetter, initialBoard, legalMoves, applyMove, isLegalMove,
   normalizingPromotion, isCheckmate, isStalemate, isInsufficientMaterial, pieceAt, squareEquals,
 } from "./chess.js";
-import { positionKey, periodSinceMs, isRetryableSendError, friendlySendErrorMessage } from "./chess-tournament.js";
+import { positionKey, periodSinceMs, isRetryableSendError, friendlySendErrorMessage, sendOutcomeUnknownTxid, SEND_OUTCOME_UNKNOWN_NOTE } from "./chess-tournament.js";
 
 // ---------------------------------------------------------------------------------------------
 // The bots (ChessBotModels.swift)
@@ -855,7 +855,8 @@ export class ChessBotGame {
     /** { kind: "won" | "lost" | "drawn", why } once the game is over. */
     this.result = null;
     this.isThinking = false;
-    /** Where the result's transaction stands: none (the game is still on) | sending | stamped | failed. */
+    /** Where the result's transaction stands: none (the game is still on) | sending | stamped |
+     *  failed | unconfirmed (may have gone through: no Retry). */
     this.stamp = "none";
     this.stampError = null;
 
@@ -982,15 +983,26 @@ export class ChessBotGame {
 
   // --- On chain ---
 
-  /** Goes on even if the player leaves the screen: only another account stops it. */
+  /** Goes on even if the player leaves the screen: only another account stops it. Never twice for
+   *  one game: not while one is going out, once one went out, or once one may have
+   *  ("unconfirmed", iOS 4922804). */
   sendStamp() {
-    if (this.disposed || !this.result || this.stamp === "sending" || this.stamp === "stamped") return;
+    if (this.disposed || !this.result || !["none", "failed"].includes(this.stamp)) return;
     this.stamp = "sending";
     this.stampError = null;
     const result = this.result;
     const message = botResultMessage(this.id, this.bot.level, this.playerColor, result, this.moves.map((played) => played.move));
-    this.sendWithRetries(message).then((error) => {
+    this.sendWithRetries(message).then((outcome) => {
       if (this.disposed) return;
+      if (outcome?.unknown) {
+        // A node may have taken it and never answered: it may be on chain. No Retry - a second
+        // stamp of the same game (iOS 4922804 .unconfirmed).
+        this.stamp = "unconfirmed";
+        this.stampError = outcome.unknown;
+        this.changed();
+        return;
+      }
+      const error = outcome?.error;
       if (error) {
         this.stamp = "failed";
         this.stampError = error;
@@ -1008,8 +1020,9 @@ export class ChessBotGame {
   /** One broadcast transaction, with the retries a send needs while the change of the last
    *  transaction is not spendable yet (the arena's sends do the same). Only that kind of error
    *  is retried (isRetryableSendError): no KAS on the chatting address, or a send whose outcome
-   *  is unknown (a second stamp of the same game), fails at once (iOS 8d5f925). Resolves the
-   *  error to show, or null once it is sent. */
+   *  is unknown (a second stamp of the same game), fails at once (iOS 8d5f925). Resolves null once
+   *  it is sent, `{ unknown: note }` when it may have gone through (SEND_OUTCOME_UNKNOWN, iOS
+   *  4922804), else `{ error }` - the error to show. */
   async sendWithRetries(message) {
     const content = encodeBotMessage(message);
     let attempt = 0;
@@ -1019,10 +1032,14 @@ export class ChessBotGame {
         await this.sendContent(content);
         return null;
       } catch (error) {
+        if (sendOutcomeUnknownTxid(error) !== null) {
+          this.log("Chess bot game stamp outcome unknown");
+          return { unknown: error?.message || SEND_OUTCOME_UNKNOWN_NOTE };
+        }
         attempt += 1;
         if (attempt > BOT_SEND_RETRIES || !isRetryableSendError(error)) {
           this.log(`Chess bot game stamp failed: ${error?.message || String(error)}`);
-          return friendlySendErrorMessage(error);
+          return { error: friendlySendErrorMessage(error) };
         }
         await this.sleep(BOT_SEND_RETRY_MS);
       }

@@ -5,6 +5,22 @@
  *  PassphraseAddressPreview.searchDepth). */
 export const IMPORT_ADDRESS_SEARCH_DEPTH = 50;
 
+/** How long Import waits for that search before letting go and importing onto #0 (KaPay 1652437,
+ *  KaPlay 4922804, KaPost 33095ac PassphraseAddressPreview.searchTimeoutNanoseconds). */
+export const IMPORT_ADDRESS_SEARCH_TIMEOUT_MS = 12_000;
+
+/**
+ * The funds search, given up after `timeoutMs`: `{ timedOut: false, value }` with its answer, or
+ * `{ timedOut: true }` once the time is up (an answer after that is ignored by the caller). A search
+ * that fails before then rejects, as it would have.
+ */
+export function raceImportSearch(search, timeoutMs = IMPORT_ADDRESS_SEARCH_TIMEOUT_MS, { setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  let timer = null;
+  const timeout = new Promise((resolve) => { timer = setTimer(() => resolve({ timedOut: true }), timeoutMs); });
+  const answer = Promise.resolve(search).then((value) => ({ timedOut: false, value }));
+  return Promise.race([answer, timeout]).finally(() => clearTimer(timer));
+}
+
 /**
  * Address #0 plus every other address on the identity chain holding funds, in index order
  * (iOS WalletManager.findChattingAddresses).

@@ -1,4 +1,5 @@
 import { originMigrationGate } from "./origin-migration.js";
+import { shortenLogAddresses } from "./log-addresses.js";
 import { KaspaEngine } from "../engine/index.js";
 import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
@@ -16,7 +17,7 @@ import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHA
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
 import { makePaymentRequest, signPaymentRequest, parsePaymentRequestLink, paymentRequestAmountText, paymentRequestUniversalLink, clampMemoText, memoCharacters, PAYMENT_REQUEST_MEMO_LIMIT } from "../engine/payment-request.js";
-import { excludeReservedUtxos, isTransactionKnown, maxSendOutpointKeys, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, MAX_SEND_INPUT_LIMIT, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
+import { excludeReservedUtxos, excludeJustSpentUtxos, isTransactionKnown, maxSendOutpointKeys, MAX_AMOUNT_CHANGED, MAX_AMOUNT_CHANGED_MESSAGE, MAX_SEND_INPUT_LIMIT, SEND_FEE_CHANGED, SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
 import { isLeftoverSend, undeliveredRowFor, settleLeftoverGroupRows } from "./leftover-sends.js";
 import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paymentNoticeText, paymentNoticePlacement, checkPaymentNoticeTx, chatPaymentNotificationBody } from "../engine/payment-notice.js";
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory, restPaymentSompiTo, restPaymentSender, fetchHeldPaymentRows, strangerPaymentStep } from "../engine/sync.js";
@@ -76,11 +77,11 @@ import {
   createStepFlow, createFeeEditorStep, keypadHtml, wireKeypad, applyKeypadKey, stepChipHtml, stepQuestionHtml, reviewRowHtml, reviewAddressHtml,
 } from "./send-steps.js";
 import "./send-steps.css";
-import { initNextcloud, noteContactActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason } from "./nextcloud.js";
+import { initNextcloud, noteContactActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason, storedNextcloudLoginsFor, revokeNextcloudLogins } from "./nextcloud.js";
 import * as Calls from "./calls.js";
 // Kaspa Hub > ChangeNOW Swap (iOS SwapView), back on Desktop (owner, 2026-10-22).
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
-import { sealBackupEnvelope, openBackupEnvelope } from "./backup-crypto.js";
+import { sealBackupEnvelope, openBackupEnvelope, openEncryptedArchive } from "./backup-crypto.js";
 import { calculateMass, calculateFee, fetchQuotedFeeRateSompiPerGram, MIN_RELAY_FEE_PER_GRAM } from "./kspt.js";
 import {
   initChildMode, isChildModeEnabled, CHILD_HIDDEN_TABS,
@@ -127,7 +128,7 @@ import kachatLogoUrl from "./assets/kachat-logo.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, PROMPT_EXTRA, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 import { attachRowSwipes, chatRowSwipeActions } from "./row-swipe.js";
-import { IMPORT_ADDRESS_SEARCH_DEPTH, foundChattingAddresses, firstFundedAddress, rediscoveredGroupIsRead, pastedWordsInvalidMessage } from "./account-import.js";
+import { IMPORT_ADDRESS_SEARCH_DEPTH, IMPORT_ADDRESS_SEARCH_TIMEOUT_MS, raceImportSearch, foundChattingAddresses, firstFundedAddress, rediscoveredGroupIsRead, pastedWordsInvalidMessage } from "./account-import.js";
 import { attachPinnedSearch } from "./pinned-search.js";
 import { edgeBackWouldClaim } from "./edge-back.js";
 import { startAppUpdateChecks } from "./app-update.js";
@@ -1362,6 +1363,29 @@ function activateSavedAccount(address) {
   // Every sign-in gets new tabs, opening on Chats (iOS d063b897 signInSession): the remembered tab
   // is for a refresh of the same session, not for the next sign-in.
   try { localStorage.removeItem(UI_SPOT_TAB_KEY); } catch { /* best-effort */ }
+  // The sign-in finishes after the reload: should it not land on this account there, the sign-in
+  // screen it comes back to says why (iOS d23e6f7a signInFailureMessage).
+  try { sessionStorage.setItem(SIGN_IN_ATTEMPT_KEY, canonicalAccountAddress(account.address)); } catch { /* no message, still signs in */ }
+}
+
+// The account a sign-in picked, across its reload (sessionStorage: this tab only). Read once at
+// launch (takeSignInAttempt): when the restore didn't land on it, the reason is said on the sign-in
+// screen rather than lost with the page that asked (iOS d23e6f7a: the accounts screen was rebuilt
+// under the loading screen, and its message went with it).
+const SIGN_IN_ATTEMPT_KEY = "kachat-sign-in-attempt-v1";
+const SIGN_IN_FAILED_FALLBACK = "Unable to sign in to this account.";
+function takeSignInAttempt() {
+  try {
+    const value = String(sessionStorage.getItem(SIGN_IN_ATTEMPT_KEY) || "").trim();
+    sessionStorage.removeItem(SIGN_IN_ATTEMPT_KEY);
+    return value;
+  } catch { return ""; }
+}
+/** The message for a sign-in that didn't land on `attempted` after its reload, or "" when it did. */
+function signInFailureMessageFor(attempted, { restored, activeAddress, reason }) {
+  if (!attempted) return "";
+  if (restored && sameStoredAccountAddress(activeAddress, attempted)) return "";
+  return String(reason || "").trim() || SIGN_IN_FAILED_FALLBACK;
 }
 
 /** Whether any of `address`'s keys reached this device's storage: a registry entry (sealed or not)
@@ -1647,9 +1671,64 @@ function savedAccountShortAddress(address) {
   return value.length > 16 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
 }
 
-function removeAccountScopedLocalData(address) {
+/** What removing `address` needs read while it still can be (iOS d23e6f7a / KaPay 1652437
+ *  removeLocalData): its stored Nextcloud logins, whose app passwords every removal path revokes,
+ *  and its spending addresses (derived from its seed while unlocked), whose coin labels are filed
+ *  by address rather than under the account. Taken before anything locks or is erased. */
+function accountRemovalContext(address) {
+  let nextcloudLogins = [];
+  try { nextcloudLogins = storedNextcloudLoginsFor(address); } catch { nextcloudLogins = []; }
+  let spendingAddresses = [];
+  let keepCoinLabels = false;
+  try {
+    const accounts = loadSavedAccounts();
+    const record = accounts.find((entry) => sameStoredAccountAddress(entry?.address, address));
+    // Another saved account from the same words (an earlier chatting address) spends from the same
+    // addresses: their labels are still its.
+    keepCoinLabels = Boolean(record?.mnemonic) && accounts.some((entry) => entry !== record && !sameStoredAccountAddress(entry?.address, address)
+      && entry?.mnemonic === record.mnemonic && String(entry?.passphrase || "") === String(record.passphrase || ""));
+    if (record && !keepCoinLabels) spendingAddresses = savedAccountSpendingAddresses(record);
+  } catch { spendingAddresses = []; }
+  return { nextcloudLogins, spendingAddresses, keepCoinLabels };
+}
+
+/** The coin labels (UTXO_LABELS_KEY, filed by address) of every address in `addresses`, on both
+ *  network encodings (iOS d23e6f7a removeSpendingData). */
+function removeUtxoLabelsForAddresses(addresses) {
+  const doomed = new Set();
+  for (const address of addresses || []) {
+    const clean = String(address || "").trim();
+    if (!clean) continue;
+    for (const encoded of [clean, reencodeAddress(clean, "kaspa"), reencodeAddress(clean, "kaspatest")]) if (encoded) doomed.add(encoded);
+  }
+  if (!doomed.size) return;
+  try {
+    const all = JSON.parse(localStorage.getItem(UTXO_LABELS_KEY) || "null");
+    if (!all || typeof all !== "object") return;
+    let changed = false;
+    for (const key of Object.keys(all)) {
+      if (doomed.has(key)) { delete all[key]; changed = true; }
+    }
+    if (changed) localStorage.setItem(UTXO_LABELS_KEY, JSON.stringify(all));
+  } catch { /* leave a store we cannot read */ }
+}
+
+function removeAccountScopedLocalData(address, { spendingAddresses = [], keepCoinLabels = false } = {}) {
   const cleanAddress = String(address || "").trim();
   if (!cleanAddress) return;
+  // Its spending addresses' coin labels are filed by address, outside the account's prefix: found
+  // from its seed (the caller's, while unlocked) and from its last-known spending balances, which
+  // name every address Manage Addresses showed - read before the sweep below erases them.
+  if (!keepCoinLabels) {
+    const labelAddresses = new Set(spendingAddresses);
+    for (const encoded of new Set([cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")].filter(Boolean))) {
+      try {
+        const cached = JSON.parse(localStorage.getItem(accountScopedKey(SPENDING_BAL_CACHE_KEY, encoded)) || "null");
+        if (cached && typeof cached === "object") for (const spending of Object.keys(cached)) labelAddresses.add(spending);
+      } catch { /* no cache */ }
+    }
+    removeUtxoLabelsForAddresses([...labelAddresses]);
+  }
   // That wallet's Address Book, first: its photos live in the chat storage and are found through
   // its entries, which the localStorage sweep below removes.
   for (const encoded of new Set([cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")].filter(Boolean))) {
@@ -1756,10 +1835,15 @@ function removeAccountScopedLocalData(address) {
   } catch { /* prefs stay */ }
 }
 
-function removeSavedAccountFromDevice(account) {
+/** Every removal path ends here (iOS d23e6f7a / KaPay 1652437 removeLocalData: one list, so no path
+ *  leaves a different part behind). `context`: accountRemovalContext(address), taken by a caller
+ *  that locks the vault first. Resolves once its Nextcloud app passwords are revoked (best effort). */
+function removeSavedAccountFromDevice(account, context = null) {
   const address = String(account?.address || "").trim();
   if (!address) throw new Error("Saved account address is missing.");
-  const remaining = loadSavedAccounts().filter((entry) => entry.address !== address);
+  const { nextcloudLogins = [], spendingAddresses = [], keepCoinLabels = false } = context || accountRemovalContext(address);
+  // Compared as an account (iOS isSameAccount): the same key on either network.
+  const remaining = loadSavedAccounts().filter((entry) => !sameStoredAccountAddress(entry?.address, address));
   persistSavedAccounts(remaining);
   // A tab still open on it stops saving it (only the event matters, so nothing stays stored).
   try {
@@ -1768,13 +1852,16 @@ function removeSavedAccountFromDevice(account) {
   } catch { /* storage full: no signal, nothing else depends on it */ }
   // Its closed-app notifications stop with it (the device key removes the registration).
   webPushForgetAccount(address).catch(() => {});
-  removeAccountScopedLocalData(address);
+  removeAccountScopedLocalData(address, { spendingAddresses, keepCoinLabels });
   // Its keys opened in this tab go too: they must not outlive the account in memory (iOS 3942a5b7).
   forgetAccountSecrets(address);
   // Its own password and Face ID record protect nothing now, whether or not other accounts remain;
   // the shared one goes once no account is left in it.
   if (releaseAppPasswordIfUnused()) refreshPasswordStatus();
   renderSavedAccountsScreen();
+  // The app password its Nextcloud login held stops working too, as Disconnect does: the login on
+  // this device is gone with the rest, and nothing left behind can still sign in.
+  return nextcloudLogins.length ? revokeNextcloudLogins(nextcloudLogins) : Promise.resolve();
 }
 
 let pendingSavedAccountRename = null;
@@ -4620,6 +4707,35 @@ function persistTestingWallet({ mnemonic = "", passphrase = "", passphraseForm =
   // The record and the pre-v2 key are about to be overwritten: whatever account they hold must be
   // safely in the registry first, or this stops here (IOS-016).
   fileStoredWalletBeforeReplacing(address, privateKeyHex);
+  // What the active slot held, put back if this write fails part-way (iOS d23e6f7a / KaPay 1652437
+  // restoreActiveSlot): the previous account stays the one a reload opens, rather than a record
+  // whose account never made it into the registry.
+  const previousSlot = { record: localStorage.getItem(PERSISTED_WALLET_KEY), active: localStorage.getItem(ACTIVE_ACCOUNT_KEY) };
+  try {
+    writeActiveSlotRecord(address, payload, meta);
+  } catch (error) {
+    restoreActiveSlot(previousSlot);
+    throw error;
+  }
+  const verified = getStoredTestingWalletHex();
+  if (verified !== privateKeyHex) { restoreActiveSlot(previousSlot); throw new Error("Browser storage verification failed."); }
+  appendEngineLog(`Account saved in browser storage: ${engine.address}`);
+  return true;
+}
+
+/** Puts back the active-slot record and active-account pointer read before a write. */
+function restoreActiveSlot({ record, active }) {
+  try {
+    if (record == null) localStorage.removeItem(PERSISTED_WALLET_KEY); else localStorage.setItem(PERSISTED_WALLET_KEY, record);
+    if (active == null) localStorage.removeItem(ACTIVE_ACCOUNT_KEY); else localStorage.setItem(ACTIVE_ACCOUNT_KEY, active);
+  } catch (error) {
+    appendEngineLog(`Putting the previous account back failed: ${error.message}`);
+  }
+}
+
+/** persistTestingWallet's writes: the active-slot record, then the registry entry. */
+function writeActiveSlotRecord(address, payload, meta) {
+  const privateKeyHex = payload.privateKeyHex;
   localStorage.setItem(PERSISTED_WALLET_KEY, JSON.stringify(persistedWalletRecordForStorage({ ...payload, address: canonicalAccountAddress(address) })));
   // Read and filed just above; a sealed copy this tab cannot open is never deleted (DSK-022).
   clearLegacyWalletKey();
@@ -4637,10 +4753,6 @@ function persistTestingWallet({ mnemonic = "", passphrase = "", passphraseForm =
     createdAt: meta?.createdAt,
     savedAt: payload.savedAt,
   });
-  const verified = getStoredTestingWalletHex();
-  if (verified !== privateKeyHex) throw new Error("Browser storage verification failed.");
-  appendEngineLog(`Account saved in browser storage: ${engine.address}`);
-  return true;
 }
 
 function clearPersistedTestingWallet() {
@@ -4686,6 +4798,7 @@ function restorePersistedTestingWallet() {
   // signs in until the lock screen opens them (DSK-007). "Keep me signed in" cannot bypass it.
   if (isAppLocked()) {
     appendEngineLog("KaChat is locked: the password opens the saved accounts.");
+    restoreFailureReason = "This account's password wasn't carried over. Sign in to it again.";
     return false;
   }
   // "Keep me signed in" off → don't auto-enter on a fresh launch; the saved
@@ -4698,6 +4811,7 @@ function restorePersistedTestingWallet() {
   const privateKeyHex = getStoredTestingWalletHex();
   if (!privateKeyHex) {
     appendEngineLog("No persistent testing wallet was found in this browser origin.");
+    restoreFailureReason = "This account's keys couldn't be read on this device.";
     return false;
   }
 
@@ -4719,9 +4833,12 @@ function restorePersistedTestingWallet() {
     clearPersistedTestingWallet();
     if (preScopedAddress) { engine.address = null; preScopedAddress = ""; activateWalletDataScope(""); }
     appendEngineLog(`Stored testing wallet could not be restored: ${error.message}`);
+    restoreFailureReason = userFacingError(error) || "";
     return false;
   }
 }
+// Why the launch restore didn't sign in, for a sign-in that reloaded into it (takeSignInAttempt).
+let restoreFailureReason = "";
 
 function normalizeContact(contact) {
   const name = String(contact?.name || contact?.displayName || "Unnamed").trim() || "Unnamed";
@@ -6397,7 +6514,8 @@ function sortedConversations() {
 // While Node Connection is scanning, the latest log line is mirrored under its button.
 let nodeScanTraceActive = false;
 function appendEngineLog(message) {
-  const line = typeof message === "string" ? message : JSON.stringify(message, null, 2);
+  // Every address cut to its last 8 characters, whoever logged it (iOS d23e6f7a, KaPay 1652437).
+  const line = shortenLogAddresses(typeof message === "string" ? message : JSON.stringify(message, null, 2));
   if (nodeScanTraceActive) {
     const trace = document.querySelector("[data-node-scan-trace]");
     if (trace) { trace.textContent = line; trace.hidden = false; }
@@ -11211,7 +11329,8 @@ function renderSpendingDetailUtxos(address, utxos, loadError = null) {
   if (!spendingDetailUtxoList) return;
   const labels = getUtxoLabels(address);
   const parts = [];
-  if (utxos.length > 1) {
+  // Only coins a send could spend count (iOS d23e6f7a / KaPay 1652437): not just spent, not held.
+  if (excludeJustSpentUtxos(excludeReservedUtxos(utxos)).length > 1) {
     parts.push('<button type="button" class="manage-address-consolidate-btn" data-spending-utxo-compound><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4v6a4 4 0 0 0 4 4v6M16 4v6a4 4 0 0 1-4 4"/><path d="m9 17 3 3 3-3"/></svg><span>Compound UTXOs</span></button>'
       + '<p class="spending-utxo-compound-note">Combines this address\'s UTXOs to reduce the inputs a future send needs. A single transaction can only merge so many at once, so if this address has a very large number, tap Compound again after it confirms to keep reducing.</p>');
   }
@@ -13001,7 +13120,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 271;
+const APP_BUILD = 272;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -13744,9 +13863,10 @@ function sendKaspaLoadBalance() {
   return sendKaspaSourceIndex == null ? engine.balance() : engine.balanceForAddress(sendKaspaSourceAddress());
 }
 function sendKaspaEstimateFee(amountKas, selectedOutpoints) {
+  // Priced with the recipient's own output, as the send builds it (the fee shown is the fee paid).
   return sendKaspaSourceIndex == null
-    ? engine.estimateSendFee(amountKas, selectedOutpoints)
-    : engine.estimateSendFeeForAddress(sendKaspaSourceAddress(), amountKas, selectedOutpoints);
+    ? engine.estimateSendFee(amountKas, selectedOutpoints, 0, sendKaspaRecipient)
+    : engine.estimateSendFeeForAddress(sendKaspaSourceAddress(), amountKas, selectedOutpoints, 0, sendKaspaRecipient);
 }
 
 function sendKaspaCurrencyCode() { return selectedCurrency.toUpperCase(); }
@@ -13861,6 +13981,9 @@ let sendKaspaSdkBaseKas = 0;            // the SDK's automatic base fee engine.s
 // It never goes under the Normal fee, and the tier stays lit (iOS commitCustomFee).
 let sendKaspaCustomFeeKas = null;
 let sendKaspaFeeToken = 0;
+// The fee estimate's failure, shown with Try Again (setSendKaspaFeeError).
+const SEND_FEE_UNKNOWN_TEXT = "Couldn't work out the network fee.";
+let sendKaspaFeeError = "";
 // The usable recipient (iOS hasValidRecipient), from the controller: Max and the fee wait for it.
 let sendKaspaRecipient = null;
 
@@ -13954,28 +14077,51 @@ async function estimateSendKaspaBaseFee() {
   sendKaspaFeeCtl.setEstimating(true);
   let base = null;
   let sdkBase = 0;
+  let failure = "";
   try {
     const selection = sendKaspaGetSelection();
     const detail = await sendKaspaEstimateFee(trimKas8(amountKas), selection.length ? selection : null);
     const policy = Number(detail?.policyFeeKas);
     if (isFinite(policy) && policy > 0) { base = policy; sdkBase = Number(detail?.sdkFeeKas) || 0; }
-  } catch { base = null; }
+  } catch (error) { base = null; failure = userFacingError(error) || ""; }
   if (token !== sendKaspaFeeToken || sendKaspaMaxMode) return; // superseded, or Max was filled meanwhile
   sendKaspaBaseFeeKas = base;
   sendKaspaSdkBaseKas = sdkBase;
+  // No fee, so no swipe: says why, with Try Again (iOS d23e6f7a), never off for good.
+  setSendKaspaFeeError(base == null ? (failure || SEND_FEE_UNKNOWN_TEXT) : "");
   sendKaspaFeeCtl.setEstimating(false);
   applySendKaspaFeeField();
+}
+// Why the fee couldn't be worked out, under the fee card with Try Again (iOS d23e6f7a feeError /
+// tippedFeeError, "Try Again" -> feeRefresh). The swipe stays off while it shows.
+function setSendKaspaFeeError(message) {
+  sendKaspaFeeError = message || "";
+  let el = sendKaspaModal?.querySelector("[data-send-kaspa-fee-error]");
+  if (!el && sendKaspaErrorEl) {
+    sendKaspaErrorEl.insertAdjacentHTML("afterend", '<p class="field-error sk-error sk-fee-error" data-send-kaspa-fee-error role="alert" hidden><span data-send-kaspa-fee-error-text></span> <button type="button" class="cold-inline-link" data-send-kaspa-fee-retry>Try Again</button></p>');
+    el = sendKaspaModal?.querySelector("[data-send-kaspa-fee-error]");
+    el?.querySelector("[data-send-kaspa-fee-retry]")?.addEventListener("click", () => {
+      setSendKaspaFeeError("");
+      scheduleSendKaspaFeeEstimate();
+    });
+  }
+  if (!el) return;
+  const text = el.querySelector("[data-send-kaspa-fee-error-text]");
+  if (text) text.textContent = sendKaspaFeeError;
+  el.hidden = !sendKaspaFeeError;
 }
 // Max owns the fee now: an amount estimate the fill's own input event scheduled stands down.
 function stopSendKaspaFeeEstimate() {
   if (sendKaspaFeeEstimateTimer) clearTimeout(sendKaspaFeeEstimateTimer);
   sendKaspaFeeEstimateTimer = null;
   sendKaspaFeeToken += 1;
+  setSendKaspaFeeError("");
   sendKaspaFeeCtl.setEstimating(false);
 }
 function scheduleSendKaspaFeeEstimate() {
   if (sendKaspaFeeEstimateTimer) clearTimeout(sendKaspaFeeEstimateTimer);
   sendKaspaFeeEstimateTimer = null;
+  setSendKaspaFeeError("");
   if (sendKaspaMaxMode) return;
   if (!sendKaspaRecipient || sendKaspaFeeAmountKas() == null) {
     // No recipient or no amount: "--" at once (iOS feeEstimationKey task).
@@ -14035,11 +14181,13 @@ sendKaspaCoinToggle?.addEventListener("click", () => {
   if (!address) return;
   const source = sendKaspaSourceIndex;
   openCoinControlPicker({
-    // The coins Max and the send can spend (reserved ones left out, DSK-043), in the node's order.
-    loadEntries: async () => sendKaspaUnreservedBalance(await sendKaspaLoadBalance()).entries,
+    // Every coin at the address in the node's order; the ones Max and the send can't spend
+    // (reserved, just spent) greyed out (iOS d23e6f7a).
+    loadEntries: async () => (await sendKaspaLoadBalance())?.entries || [],
     initialSelection: sendKaspaSelected.size ? [...sendKaspaSelected] : null,
     labels: getUtxoLabels(address),
     kasUnit: KAS_UNIT,
+    unavailableReason: coinUnavailableReason,
     onDone: (selection) => {
       // The screen may have closed, or the source changed, while it was open.
       if (sendKaspaModal?.hidden || source !== sendKaspaSourceIndex) return;
@@ -14210,9 +14358,19 @@ function sendKaspaSelectionKey(selection) {
 function sendKaspaMaxDestination() {
   return sendKaspaRecipient || sendKaspaSourceAddress();
 }
-// Available and Max leave out coins a scheduled KaPost has reserved, as the send does (DSK-043).
+// Why a send can't spend a coin right now, null when it can (iOS d23e6f7a / KaPay 1652437 Coin
+// Control unavailableReason): the coins every build here leaves out - just spent by a send still
+// listed by the node, or held by a scheduled KaPost. Coin Control lists them greyed out.
+function coinUnavailableReason(entry) {
+  if (!entry) return null;
+  if (!excludeJustSpentUtxos([entry]).length) return "Just spent by a send";
+  if (!excludeReservedUtxos([entry]).length) return "Held by a scheduled post";
+  return null;
+}
+// Available and Max leave out coins a scheduled KaPost has reserved, as the send does (DSK-043),
+// and coins a send just spent (iOS d23e6f7a: Available counts only what a send can spend).
 function sendKaspaUnreservedBalance(balance) {
-  const entries = excludeReservedUtxos(balance?.entries || []);
+  const entries = excludeJustSpentUtxos(excludeReservedUtxos(balance?.entries || []));
   let sompi = 0n;
   for (const entry of entries) {
     try { sompi += BigInt(entry.amount || 0); } catch { /* an unreadable coin counts as nothing */ }
@@ -14422,6 +14580,14 @@ const sendKaspaController = makeSendController({
     if (request?.toChattingAddress && request.address.toLowerCase() === String(destination || "").toLowerCase()) {
       return payPaymentRequestAsChatPayment(request, { amountKas, feeKas, selectedOutpoints, sourceSpendingIndex: sendKaspaSourceIndex });
     }
+    // The fee the Review shows: a send rebuilt at the swipe from coins that changed since, which
+    // would pay more, sends nothing (SEND_FEE_CHANGED) and the Review works its fee out again
+    // (iOS d23e6f7a / KaPay 1652437 expectedFeeSompi, feeRefresh).
+    const expectedFeeSompi = kasToSompi(trimKas8(sendKaspaTotalFeeKas()));
+    const refreshFeeIfChanged = (error) => {
+      if (error?.code === SEND_FEE_CHANGED) scheduleSendKaspaFeeEstimate();
+      throw error;
+    };
     if (sendKaspaSourceIndex != null) {
       // Change onto a fresh quantum-safe slot when the source is quantum or the primary, and the
       // primary follows it there once the node has the send (iOS bba1b1e withdrawFromSpendingAddress).
@@ -14436,10 +14602,13 @@ const sendKaspaController = makeSendController({
         destinationAddress: destination, amountKas, feeKas,
         selectedOutpoints: outpoints,
         changeAddress: fresh?.address || null,
+        expectedFeeSompi,
       }).catch(keepChangeVisibleIfOutcomeUnknown(fresh, account.owner, rotatePrimarySpendingTo))
-        .then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh, account.owner)); return result; }));
+        .then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh, account.owner)); return result; }))
+        .catch(refreshFeeIfChanged);
     }
-    return engine.send(destination, amountKas, feeKas, outpoints ? { selectedOutpoints: outpoints } : {});
+    return engine.send(destination, amountKas, feeKas, { ...(outpoints ? { selectedOutpoints: outpoints } : {}), expectedFeeSompi })
+      .catch(refreshFeeIfChanged);
   },
   // iOS parity: a send from the CHATTING address (not a spending index, not a
   // compound) surfaces as a chat with the destination holding the payment bubble.
@@ -14503,6 +14672,10 @@ document.querySelector("[data-send-kaspa-recipient]")?.addEventListener("input",
   if (!/\/pay\//i.test(value)) return;
   const link = firstInternalLinkIn(value.trim());
   if (link?.kind !== "pay") return;
+  // Only when the paste is that link and nothing else (iOS d23e6f7a / KaPay 1652437
+  // coversWholeMessage): one inside other text - a message quoting someone's request - isn't
+  // necessarily the one meant, and would set the amount and memo unseen.
+  if (link.raw !== value.trim()) return;
   applyPaymentRequestToSendKaspa(link.request);
   // Pasted on To, it fills everything in: on to From (iOS handleInputChange).
   if (sendKaspaSteps.current === "to") goSendKaspaStep(sendKaspaAfterRecipient());
@@ -14860,9 +15033,10 @@ function renderManageAddressUtxos() {
   }
   const labels = getUtxoLabels(address);
   manageAddressUtxosList.replaceChildren();
-  // Compound UTXOs (matches iOS): shown only with more than one UTXO. Merges them by sending the
-  // balance back to this same address, so future sends need fewer inputs.
-  if (lastManageAddressUtxos.length > 1) {
+  // Compound UTXOs (matches iOS): shown only with more than one UTXO a send could spend (not just
+  // spent, not held; iOS d23e6f7a). Merges them by sending the balance back to this same address,
+  // so future sends need fewer inputs.
+  if (excludeJustSpentUtxos(excludeReservedUtxos(lastManageAddressUtxos)).length > 1) {
     const consolidate = document.createElement("button");
     consolidate.type = "button";
     consolidate.className = "manage-address-consolidate-btn";
@@ -18304,7 +18478,7 @@ function createDeliveryStatusIcon(message, { onRetry = null } = {}) {
     icon.classList.add("warning", "unconfirmed");
     svg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.6.3-1 .8-1 1.5v.2"/><circle class="status-dot-mark" cx="12" cy="17.1" r="1.15"/></svg>';
     word = "Not confirmed";
-    aria = "Not confirmed. It may have gone through. Check before sending it again.";
+    aria = "Not confirmed yet. It may still go through."; // iOS d23e6f7a DeliveryStatusLabel
   } else if (status === MESSAGE_STATUSES.CONFIRMED) {
     icon.classList.add("confirmed");
     svg = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="status-fill" cx="12" cy="12" r="10"/><path class="status-check" d="m7.4 12.3 3 3.1 6.4-7"/></svg>';
@@ -20294,9 +20468,18 @@ function tipRefreshState() {
   const note = tipQ("[data-tip-note]");
   if (note) {
     const error = tip?.error || "";
-    note.classList.toggle("error", Boolean(error));
+    const feeError = tip?.feeError || "";
+    note.classList.toggle("error", Boolean(error || feeError));
     if (error) {
       note.textContent = error;
+      note.hidden = false;
+    } else if (feeError) {
+      // A failed fee estimate holds the swipe, never for good (KaPost 33095ac "Try Again").
+      note.innerHTML = `${escapeHtml(feeError)} <button type="button" class="cold-inline-link" data-tip-fee-retry>Try Again</button>`;
+      note.hidden = false;
+    } else if (activeTipMax()?.capped) {
+      // Max stops at one transaction's coins, and says so (KaPost 33095ac maxCappedNote).
+      note.textContent = MAX_CAPPED_NOTE;
       note.hidden = false;
     } else if (sompi > 0n && sompi < 10_000_001n) {
       // 0.10000001 KAS = 10_000_001 sompi, the network dust limit (iOS).
@@ -20309,7 +20492,9 @@ function tipRefreshState() {
   }
   const sending = Boolean(tip?.sending);
   if (tipSlider.busy !== sending) tipSlider.setBusy(sending);
-  tipSlider.setEnabled(Boolean(tip) && sompi > 0n && !sending);
+  // Only once the fee it shows is the one it pays (KaPost 33095ac canSend): not while the fee or Max
+  // is being worked out, nor when the fee couldn't be.
+  tipSlider.setEnabled(Boolean(tip) && sompi > 0n && !sending && !tip.estimating && !tip.feeError && tipTotalFeeSompi() != null);
   tipFromCtl.setDisabled(sending);
   paintTipAmountStep();
   renderTipReview();
@@ -20319,6 +20504,11 @@ function tipSetError(message) {
   if (tipState) tipState.error = message || "";
   tipRefreshState();
 }
+tipQ("[data-tip-note]")?.addEventListener("click", (event) => {
+  if (!event.target.closest("[data-tip-fee-retry]") || !tipState || tipState.sending) return;
+  tipState.feeError = "";
+  tipScheduleFee();
+});
 
 // The fee card: the base is the tip's own (Normal) fee from the estimate, in sompi; the extra over
 // it - Fast 2x, Priority 5x, or what a custom fee adds - goes to the send as a priority fee.
@@ -20414,7 +20604,8 @@ async function tipLoadAvailable(tip) {
     // Coins a scheduled KaPost holds are not the tip's to spend, so they are not Available (iOS
     // e5a9b11 KaPostsScheduledStore.filterReserved).
     let sompi = 0n;
-    for (const entry of excludeReservedUtxos(balance?.entries || [])) {
+    // Nor coins a send just spent (iOS d23e6f7a: Available counts only what a send can spend).
+    for (const entry of excludeJustSpentUtxos(excludeReservedUtxos(balance?.entries || []))) {
       try { sompi += BigInt(entry.amount || 0); } catch { /* an unreadable coin counts as nothing */ }
     }
     tip.availableSompi = sompi;
@@ -20451,6 +20642,7 @@ function tipScheduleFee() {
   tipFeeTimer = null;
   const state = tipState;
   const token = ++tipFeeEstimateToken;
+  if (state) state.feeError = "";
   // At Max the fee is the exact send-all fee Max was computed with; a coin change re-runs Max.
   if (activeTipMax()) { scheduleTipMaxRefill(300); return; }
   const amountSompi = tipAmountSompi();
@@ -20459,13 +20651,16 @@ function tipScheduleFee() {
     state.estimating = false;
     state.baseFeeSompi = null;
     tipRenderFee();
+    tipRefreshState();
     return;
   }
   state.estimating = true;
   tipRenderFee();
+  tipRefreshState();
   tipFeeTimer = window.setTimeout(async () => {
     tipFeeTimer = null;
     let base = null;
+    let failure = "";
     try {
       await ensureRuntimes({ quiet: true });
       const amountKas = kasTextFromSompi(amountSompi);
@@ -20479,13 +20674,17 @@ function tipScheduleFee() {
         ? await engine.estimateSendFeeForAddress(state.fundingAddress, amountKas, selection)
         : await engine.estimateSendFee(amountKas, selection, payloadBytes);
       base = detail?.sdkFeeSompi ?? null;
-    } catch {
+    } catch (error) {
       base = null;
+      failure = userFacingError(error) || "";
     }
     if (token !== tipFeeEstimateToken || tipState !== state) return;
     state.estimating = false;
     try { state.baseFeeSompi = base == null ? null : BigInt(base); } catch { state.baseFeeSompi = null; }
+    // No fee, so no swipe: the reason and Try Again (KaPost 33095ac feeError).
+    state.feeError = state.baseFeeSompi == null ? (failure || "Couldn't work out the network fee.") : "";
     tipRenderFee();
+    tipRefreshState();
   }, 400);
 }
 
@@ -20536,8 +20735,10 @@ async function tipSetMax({ force = false } = {}) {
   const token = ++tipMaxToken;
   const settingsKey = tipMaxSettingsKey(tip);
   tip.error = "";
+  tip.feeError = "";
   tip.estimating = true;
   tipRenderFee();
+  tipRefreshState(); // the swipe waits for Max
   let plan;
   try {
     await ensureRuntimes({ quiet: true });
@@ -20570,7 +20771,7 @@ async function tipSetMax({ force = false } = {}) {
   // A currency amount is rounded DOWN (DSK-042); the tip pays the pinned sompi either way.
   const text = tip.unit === "fiat" && tip.price > 0 ? fiatTextFloorFromSompi(amountSompi, tip.price, 2) : kasTextFromSompi(amountSompi);
   input.value = text;
-  tip.max = { amountSompi, outpoints: plan.outpoints, extraFeeSompi: extra, settingsKey, text, unit: tip.unit };
+  tip.max = { amountSompi, outpoints: plan.outpoints, extraFeeSompi: extra, settingsKey, text, unit: tip.unit, capped: Boolean(plan.cappedAtInputLimit) };
   tipRefreshUnitUi();
   input.focus();
 }
@@ -20590,6 +20791,7 @@ function tipOpenCoinControl() {
     initialSelection: tip.manualUtxos ? tip.manualUtxos.map((coin) => coin.key) : null,
     labels: getUtxoLabels(address),
     kasUnit: KAS_UNIT,
+    unavailableReason: coinUnavailableReason,
     onDone: (selection) => {
       if (tipState !== tip) return; // the sheet closed or moved on meanwhile
       tip.manualUtxos = selection ? selection.map((coin) => ({ key: coin.key, amountSompi: coin.amountSompi })) : null;
@@ -21061,6 +21263,18 @@ async function sendOutgoingHandshake(contact, conversationEntry, { accepting = f
     stashHandshakeForRecovery(contact, { isResponse: accepting, createdAt });
     return true;
   } catch (error) {
+    if (error?.code === SEND_OUTCOME_UNKNOWN) {
+      // It may have landed (iOS d23e6f7a markSendUnconfirmed(.handshake)): "Not confirmed" under
+      // its own txid, no Retry, and never a second handshake - each one pays the contact 0.2 KAS -
+      // until settleUnconfirmedSends finds it. The chat goes on as if it was sent.
+      updateMessageStatus(conversationEntry.id, message.id, { ...sendFailurePatch(error), messageType: "handshake", transport: "onchain" });
+      contact.handshakeTxid = error.txid ? String(error.txid) : (contact.handshakeTxid || "");
+      contact.relationshipState = accepting ? "established" : "outgoing-request";
+      refreshSubscriptionAddresses({ restart: true });
+      persistState();
+      setStatus(SEND_OUTCOME_UNKNOWN_MESSAGE);
+      return true;
+    }
     updateMessageStatus(conversationEntry.id, message.id, { status: MESSAGE_STATUSES.FAILED });
     // Preserve an incoming request on response failure so Accept can be retried
     // and incoming evidence can still establish the relationship.
@@ -23288,11 +23502,12 @@ async function refreshComposerAvailableBalance({ reset = false } = {}) {
     if (source != null) {
       const address = deriveSpendingAddressAt(source);
       if (!address) throw new Error("No spending address");
-      balanceKas = (await engine.balanceForAddress(address)).totalKas;
+      // what a send can spend: not coins just spent or held (iOS 1652437 SendFromSection)
+      balanceKas = sendKaspaUnreservedBalance(await engine.balanceForAddress(address)).totalKas;
     } else {
       const balance = await engine.balance();
       currentBalanceKas = balance.totalKas; rememberLastBalance();
-      balanceKas = balance.totalKas;
+      balanceKas = sendKaspaUnreservedBalance(balance).totalKas;
     }
     if (token !== composerBalanceToken || !isPaySheetOpen() || source !== paymentSourceIndex) return;
     renderPaymentFrom(balanceKas);
@@ -23404,6 +23619,9 @@ const payFromCtl = sendFromControls(paySheet, "pay", {
 let paymentUnit = "kas";
 let paymentPrice = null;
 let paySheetError = "";
+// The fee estimate failed (iOS d23e6f7a paymentFeeError): the swipe waits, and Try Again works it
+// out again - never a payment at a fee nobody saw.
+let paymentFeeError = "";
 let payFeeTimer = null;
 let payFeeToken = 0;
 // Fee speed, a custom fee and coin control (iOS 62c2773, the same controls as every Send Kaspa
@@ -23646,9 +23864,18 @@ function refreshPaymentSheetState() {
   if (!paySheet) return;
   const sompi = Number(paymentSompiFromInput() ?? 0n);
   if (payNoteEl) {
-    payNoteEl.classList.toggle("error", Boolean(paySheetError));
+    payNoteEl.classList.toggle("error", Boolean(paySheetError || paymentFeeError));
+    const cappedMax = activePaymentMax()?.capped;
     if (paySheetError) {
       payNoteEl.textContent = paySheetError;
+      payNoteEl.hidden = false;
+    } else if (paymentFeeError) {
+      // A failed estimate holds the swipe, never for good (iOS d23e6f7a "Try Again").
+      payNoteEl.innerHTML = `${escapeHtml(paymentFeeError)} <button type="button" class="cold-inline-link" data-pay-fee-retry>Try Again</button>`;
+      payNoteEl.hidden = false;
+    } else if (cappedMax) {
+      // Why Max isn't the whole balance (iOS d23e6f7a paymentCappedMaxText).
+      payNoteEl.textContent = MAX_CAPPED_NOTE;
       payNoteEl.hidden = false;
     } else if (sompi > 0 && sompi < 10_000_001) {
       // 0.10000001 KAS = 10_000_001 sompi, the network dust limit (iOS).
@@ -23719,7 +23946,7 @@ function renderPaymentFeePill(feeSompi, { estimating = false } = {}) {
 // Not while Max or the fee is still being worked out (iOS 3942a5b7): the Review would show a fee
 // other than the one sent.
 function paySwipeCanSend() {
-  return Number(paymentSompiFromInput() ?? 0n) > 0 && !paymentSendInFlight && !paymentFeeEstimating;
+  return Number(paymentSompiFromInput() ?? 0n) > 0 && !paymentSendInFlight && !paymentFeeEstimating && !paymentFeeError;
 }
 function selectPaymentFeeTier(tier) {
   if (!PAYMENT_FEE_MULTIPLIERS[tier]) return;
@@ -23772,6 +23999,7 @@ paySheet?.querySelector("[data-pay-kas-coin-toggle]")?.addEventListener("click",
     initialSelection: paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null,
     labels: getUtxoLabels(address),
     kasUnit: KAS_UNIT,
+    unavailableReason: coinUnavailableReason,
     onDone: (selection) => {
       // The sheet may have closed, or the source changed, while it was open.
       if (!isPaySheetOpen() || paymentFundingAddress() !== address) return;
@@ -23865,6 +24093,8 @@ async function fillPaymentMax() {
   paymentMax = {
     amountSompi, outpoints: plan.outpoints, floorFeeSompi: floor, extraFeeSompi: extra,
     settingsKey: paymentMaxSettingsKey(settings), text, unit: paymentUnit,
+    // more coins than one transaction spends: the note says Max is its largest coins' (iOS d23e6f7a)
+    capped: Boolean(plan.cappedAtInputLimit),
   };
   refreshPaymentUnitUi();
 }
@@ -23879,6 +24109,7 @@ function schedulePaymentFee() {
   if (payFeeTimer) window.clearTimeout(payFeeTimer);
   payFeeTimer = null;
   const token = ++payFeeToken;
+  paymentFeeError = "";
   // At Max the fee is the exact send-all fee Max was computed with; a memo or coin change re-runs
   // Max instead (DSK-042 / DSK-043).
   if (activePaymentMax()) { schedulePaymentMaxRefill(300); return; }
@@ -23900,16 +24131,29 @@ function schedulePaymentFee() {
         ? await engine.estimateSendFeeForAddress(fundingAddress, amountKas, selection, payloadBytes)
         : await engine.estimateSendFee(amountKas, selection, payloadBytes);
       if (token !== payFeeToken) return;
+      if (detail?.sdkFeeSompi == null) paymentFeeError = "Couldn't work out the network fee.";
       renderPaymentFeePill(detail?.sdkFeeSompi ?? null);
-    } catch {
-      if (token === payFeeToken) renderPaymentFeePill(null);
+      refreshPaymentSheetState();
+    } catch (error) {
+      if (token !== payFeeToken) return;
+      // No fee, so no swipe: the reason and Try Again (iOS d23e6f7a).
+      paymentFeeError = userFacingError(error) || "Couldn't work out the network fee.";
+      renderPaymentFeePill(null);
+      refreshPaymentSheetState();
     }
   }, 200);
 }
+payNoteEl?.addEventListener("click", (event) => {
+  if (!event.target.closest("[data-pay-fee-retry]") || paymentSendInFlight) return;
+  paymentFeeError = "";
+  refreshPaymentSheetState();
+  schedulePaymentFee();
+});
 
 function resetPaymentSheetFields() {
   paymentUnit = "kas";
   paySheetError = "";
+  paymentFeeError = "";
   if (payAmountInput) payAmountInput.value = "";
   if (payMemoInput) { payMemoInput.value = ""; payMemoInput.style.height = ""; }
   payFeeToken += 1;
@@ -27813,7 +28057,14 @@ function passphrasePreviewNodes(flow) {
     balance: root.querySelector("[data-passphrase-preview-balance]"),
     verdict: root.querySelector("[data-passphrase-preview-verdict]"),
     found: root.querySelector("[data-passphrase-preview-found]"),
+    incomplete: root.querySelector("[data-passphrase-search-incomplete]"),
   };
+}
+
+/** The funds search failed or ran out of time: Import uses #0, and the screen says so, with Search
+ *  Again (KaPay 1652437 searchIncomplete). */
+function setImportSearchIncomplete(nodes, incomplete) {
+  if (nodes?.incomplete) nodes.incomplete.hidden = !incomplete;
 }
 
 // On import the chatting address isn't known yet: the preview checks the first addresses on the
@@ -27895,7 +28146,7 @@ function schedulePassphrasePreview(flow) {
   const token = ++passphrasePreviewTokens[flow];
   nodes.address.dataset.pending = "1";
   renderPassphrasePreviewBalance(nodes, flow, { looking: true });
-  if (flow === "import") { clearImportFoundAddresses(nodes); setImportAddressSearching(true); }
+  if (flow === "import") { clearImportFoundAddresses(nodes); setImportSearchIncomplete(nodes, false); setImportAddressSearching(true); }
   passphrasePreviewTimers[flow] = setTimeout(async () => {
     try {
       const derived = await engine.deriveIdentityAddressRange(phrase, passphrase, {
@@ -27919,10 +28170,23 @@ function schedulePassphrasePreview(flow) {
       if (token !== passphrasePreviewTokens[flow]) return;
       if (flow === "import") {
         const family = passphrasePreviewFamily(flow);
-        const range = await engine.deriveIdentityAddressRange(phrase, passphrase, { family, start: 0, count: IMPORT_ADDRESS_SEARCH_DEPTH });
+        // A slow or unreachable node lets Import go after 12 s, onto #0, and says so; an answer that
+        // comes later is ignored (KaPay 1652437, KaPlay 4922804, KaPost 33095ac).
+        const outcome = await raceImportSearch((async () => {
+          const range = await engine.deriveIdentityAddressRange(phrase, passphrase, { family, start: 0, count: IMPORT_ADDRESS_SEARCH_DEPTH });
+          const balances = token === passphrasePreviewTokens[flow] ? await spendingBalancesBatchSompi(range.map((entry) => entry.address)) : new Map();
+          return { range, balances };
+        })(), IMPORT_ADDRESS_SEARCH_TIMEOUT_MS);
         if (token !== passphrasePreviewTokens[flow]) return;
-        const balances = await spendingBalancesBatchSompi(range.map((entry) => entry.address));
-        if (token !== passphrasePreviewTokens[flow]) return;
+        if (outcome.timedOut) {
+          importFoundAddresses = [];
+          importChattingIndex = 0;
+          renderPassphrasePreviewBalance(nodes, flow, { failed: true });
+          setImportSearchIncomplete(nodes, true);
+          appendEngineLog("Import: the funds search didn't finish in time; Import uses address #0.");
+          return;
+        }
+        const { range, balances } = outcome.value;
         importFoundAddresses = foundChattingAddresses(range, balances);
         const first = firstFundedAddress(importFoundAddresses);
         if (!first) throw new Error("no addresses to check");
@@ -27935,6 +28199,8 @@ function schedulePassphrasePreview(flow) {
     } catch (error) {
       if (token !== passphrasePreviewTokens[flow]) return;
       if (nodes.address.dataset.pending) nodes.address.textContent = "Could not derive an address from these words.";
+      // the search itself failed: Import goes to #0, and the screen says so (KaPay 1652437)
+      else if (flow === "import") { importFoundAddresses = []; importChattingIndex = 0; setImportSearchIncomplete(nodes, true); }
       renderPassphrasePreviewBalance(nodes, flow, { failed: true });
       appendEngineLog(`Passphrase preview failed: ${error.message}`);
     } finally {
@@ -27970,8 +28236,9 @@ function resetPassphrasePreview(flow) {
   nodes.address.textContent = "Checking...";
   nodes.address.dataset.pending = "1";
   renderPassphrasePreviewBalance(nodes, flow, { looking: true });
-  if (flow === "import") { clearImportFoundAddresses(nodes); setImportAddressSearching(false); }
+  if (flow === "import") { clearImportFoundAddresses(nodes); setImportSearchIncomplete(nodes, false); setImportAddressSearching(false); }
 }
+document.querySelector("[data-passphrase-search-again]")?.addEventListener("click", () => schedulePassphrasePreview("import"));
 
 /// The passphrase fields' eye (iOS eye / eye.slash): shows or hides both fields at once.
 function setPassphraseEye(button, revealed) {
@@ -29372,6 +29639,9 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", pa
   if (!cleanName) throw new Error("Enter an account name.");
   const words = cleanPhrase.split(" ").filter(Boolean);
   if (![12, 24].includes(words.length)) throw new Error("Invalid words. Please enter 12 or 24 words.");
+  // The account in the active slot before this import (signed in, or the last one signed out of),
+  // read before the import moves engine.address (iOS d23e6f7a isNewWallet).
+  const previousSlotAddress = String(engine.address || readActiveAccountAddress() || "").trim();
 
   let wallet;
   try {
@@ -29403,7 +29673,9 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", pa
     }
   }
   activateWalletDataScope(wallet.address, { migrateLegacy: false });
-  if (resetState) {
+  // Compared as an account (iOS d23e6f7a isSameAccount): the same words entered again - on either
+  // network - are the account already in the slot, and must not reset it or delete its chats.
+  if (resetState && !sameStoredAccountAddress(previousSlotAddress, wallet.address)) {
     state = { contacts: [], conversations: [] };
     persistState();
     resetHandshakeSyncStateFor(wallet.address); // empty chats: the handshakes are read again (IOS-004)
@@ -29517,7 +29789,17 @@ function updateImportPassphraseSubmitEnabled() {
     importWithPassphraseBtn.innerHTML = finding ? '<span class="sk-spinner" aria-hidden="true"></span>Finding your address...' : "Import";
   }
   if (importAccountModal?.dataset.busy !== "1") importWithPassphraseBtn.disabled = !typed || importAddressSearching;
+  // While that search runs, a way past it: Import on #0 now (KaPay 1652437 "Skip the Search").
+  if (importSkipSearchBtn) importSkipSearchBtn.hidden = !finding || importAccountModal?.dataset.busy === "1";
 }
+const importSkipSearchBtn = document.querySelector("[data-import-passphrase-skip-search]");
+importSkipSearchBtn?.addEventListener("click", () => {
+  if (importAccountModal?.dataset.busy === "1") return;
+  const pass = String(importPassphraseInput?.value || "");
+  if (!pass) return;
+  importChattingIndex = 0;
+  void commitImport(pass);
+});
 importPassphraseInput?.addEventListener("input", updateImportPassphraseSubmitEnabled);
 // Back on the passphrase question (iOS navigation back): to the words, still filled in.
 document.querySelector("[data-import-passphrase-question-back]")?.addEventListener("click", () => {
@@ -29858,14 +30140,15 @@ async function openDeleteAccountSheet() {
 // Out nothing is saved first, and the page reloads at the end: whatever was still in flight or
 // waiting on a timer for this account ends there instead of writing it back.
 //
-// iOS also revokes the app password it made on the user's Nextcloud. Desktop never makes one: the
-// person pastes their own, which may serve other devices too, so that stays theirs ("Nothing changes
-// on your Nextcloud server"); the copy on this device goes with the account, and the encrypted backup
-// stays on the server, as on iOS.
+// The app password its Nextcloud login holds is revoked, as Disconnect revokes it and as every
+// removal path does on iOS (d23e6f7a, KaPay 1652437); the encrypted backup stays on the server.
 async function deleteCurrentAccount() {
   const address = String(engine.address || "").trim();
   if (!address) return;
   try {
+    // Read while the account is still open: the vault locks below, and a sealed login or seed
+    // can't be read after that.
+    const removal = accountRemovalContext(address);
     closeAccountBackup();
     // No more closed-app notifications for it; signed with the wallet key while it is still here.
     if (engine.privateKeyHex) webPushSignOut({ privateKeyHex: engine.privateKeyHex, address }).catch(() => {});
@@ -29876,9 +30159,11 @@ async function deleteCurrentAccount() {
     lockKeyVault();
     setActiveConversationId(null);
     state = { contacts: [], conversations: [] };
-    removeSavedAccountFromDevice({ address });
+    const revoked = removeSavedAccountFromDevice({ address }, removal);
     appendEngineLog(`Deleted account ${address}`);
     await flushChatStorage();
+    // The reload would cut the revoke off: a few seconds for the server's answer, no more.
+    await Promise.race([revoked, new Promise((resolve) => { setTimeout(resolve, 5000); })]);
     reloadKaChat();
   } catch (error) {
     appendEngineLog(`Delete account failed: ${error.message}`);
@@ -30118,7 +30403,9 @@ async function runLocalHistoryRestore(fileText) {
   await new Promise((resolve) => window.setTimeout(resolve, 50));
   try {
     await advanceHistoryRestore(0.05, "Validating backup...");
-    const text = await openSharedBackupJson(fileText);
+    // Only an encrypted export (iOS d23e6f7a): a plaintext file's chats would be taken as they are,
+    // from anyone who sent it.
+    const text = await openEncryptedArchive(fileText, String(engine.privateKeyHex || "").trim(), String(engine.address || ""));
     await advanceHistoryRestore(0.36, "Preparing messages...");
     const summary = importPhoneChatArchive(text);
     await advanceHistoryRestore(0.92, "Finishing up...");
@@ -31472,6 +31759,10 @@ queueMicrotask(async () => {
       // the sign-in screen instead of an empty main app.
       showLoggedOutScreen();
     }
+    // A sign-in from the sign-in screen that didn't land on its account says why there (iOS
+    // d23e6f7a "Sign In Failed" from signInFailureMessage).
+    const signInFailure = signInFailureMessageFor(takeSignInAttempt(), { restored, activeAddress: engine.address, reason: restoreFailureReason });
+    if (signInFailure) alertDialog({ title: "Sign In Failed", message: signInFailure });
   }
 
   // The network work runs in the background. It used to be awaited here, one step after the

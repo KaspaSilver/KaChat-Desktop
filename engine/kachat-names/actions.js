@@ -77,7 +77,7 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 
 import { getEndpoint } from "../endpoints.js";
 import { ADDRESS_HRP, KAS_UNIT, isNetworkAddress } from "../network.js";
-import { enqueueSend, excludeReservedUtxos, sendKaspa } from "../transactions.js";
+import { enqueueSend, excludeReservedUtxos, sendMaxKaspa } from "../transactions.js";
 import {
   Failure, minFeerate, maxFeerate, safeFeerate, minChange, commitValue, hex, unhex, unhex32, bytesEqual, concat, utf8, normalize, validate,
   gapState, nameState, offerState,
@@ -186,8 +186,9 @@ export const backgroundMaxFeerate = minFeerate * 20;
 
 /** The most coins one combine spends (iOS KasiaTransactionBuilder.maxInputsPerTransaction). */
 export const combineMaxCoins = 80;
-/** What a combine keeps back from the coins it spends (sompi): the fee, with what's left coming
- *  back as change (0.05 KAS, iOS f1c16ec). */
+/** Room for a combine's fee (sompi, 0.05 KAS, iOS f1c16ec): the preview plans the combined coin
+ *  this much short, and a combine needs more than twice it. The combine itself pays only the
+ *  network fee (a Max send, iOS 33095ac). */
 export const combineFeeRoom = 5_000_000n;
 
 /** A name transaction takes at most a few funding inputs (the builder's slots), so a wallet holding
@@ -1060,14 +1061,15 @@ export class KachatNamesActions {
 
   /** Combines the wallet's coins into one: a plain send of up to `combineMaxCoins` largest coins to
    *  the same address (a tiny network fee), then waits until a node has the combined coin, so the
-   *  name transaction can be built from it. Never a coin a scheduled KaPost holds or one carrying a
-   *  covenant. It is a move between your own coins, not a payment: the service's submit listeners
+   *  name transaction can be built from it. Never a coin a scheduled KaPost holds, one a send has
+   *  just spent, an unconfirmed or coinbase coin, or one carrying a covenant. It is a move between your own coins, not a payment: the service's submit listeners
    *  hear it, so the app keeps it out of the chats. Returns the txid. Runs in the per-address send
    *  queue itself, so it must not be called from inside it. Swift `combineCoins` (iOS f1c16ec). */
   async combineCoins(s) {
     const engine = this.engine;
+    // Nor a coin still being mined, nor a mining reward that may not be mature (iOS 33095ac).
     const plain = (await this._walletUtxos(s.address))
-      .filter((u) => u.covenantId == null)
+      .filter((u) => u.covenantId == null && BigInt(u.blockDaaScore ?? 0) > 0n && !u.isCoinbase)
       .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : BigInt(b.amount) < BigInt(a.amount) ? -1 : 0))
       .slice(0, combineMaxCoins);
     const total = plain.reduce((a, u) => a + BigInt(u.amount), 0n);
@@ -1075,16 +1077,15 @@ export class KachatNamesActions {
       throw new Failure("Not enough KAS on your chatting address for this.");
     }
     if (!engine?.kaspa) throw new Failure("Load Rusty Kaspa WASM first.");
-    const amount = total - combineFeeRoom;
-    const result = await sendKaspa({
+    // All of it, less the network fee, as one coin (iOS 33095ac): a fixed 0.05 KAS fee allowance
+    // left change too small to keep. The Max send has one output, so no change can exist.
+    const result = await sendMaxKaspa({
       kaspa: engine.kaspa,
       rpc: engine.rpc,
       withRpc: typeof engine.withRpc === "function" ? engine.withRpc.bind(engine) : null,
       privateKey: s.privateKey,
       sourceAddress: s.address,
       destinationAddress: s.address,
-      amountKas: `${amount / 100_000_000n}.${String(amount % 100_000_000n).padStart(8, "0")}`,
-      feeKas: "0",
       selectedOutpoints: plain.map((u) => `${u.outpoint.transactionId}:${u.outpoint.index}`),
       log: (...a) => engine.log?.(a.join(" ")),
     });

@@ -1,6 +1,7 @@
 import { NETWORK_ID, validateMainnetAddress, sompiToKaspaDisplay } from "./utils.js";
 import { kasToSompi, utxoAmountSompi, MAX_U64, checkedUtxoAnswer } from "./amounts.js";
-import { getEndpoint } from "./endpoints.js";
+import { getEndpoint, ENDPOINT_DEFAULTS } from "./endpoints.js";
+import { KAS_UNIT } from "./network.js";
 import { hex } from "./kachat-names/codec.js";
 import { isRpcConnectionError } from "./rpc.js";
 import { isP2shScript, quantumScriptPublicKey, kip22SignatureScript, sdkTransactionKip22ExtraMass, signedSdkTransactionComputeMass, verifyKip22Spend } from "./quantum.js";
@@ -106,8 +107,17 @@ export function clearJustSpentOutpoints() { justSpent.clear(); }
 // id (known before the submit) is looked up: in the node's mempool, else accepted per the REST
 // API, twice a moment apart. Found means the send went out.
 const ACCEPTANCE_RECHECK_MS = 1500;
+/** The REST API base a look-up may ask: the one in Settings, or after a node's rejection only the
+ *  built-in one (iOS d23e6f7a / KaPay 1652437 isAcceptedViaREST(builtInServerOnly:)) - a server
+ *  typed into Settings could otherwise turn a refused send into Sent. "" when none may be asked. */
+export function restBaseForLookup(afterRejection = false) {
+  const trim = (url) => String(url || "").trim().replace(/\/+$/, "");
+  const base = trim(getEndpoint("kaspaApi"));
+  if (afterRejection && base.toLowerCase() !== trim(ENDPOINT_DEFAULTS.kaspaApi).toLowerCase()) return "";
+  return base;
+}
 /** One look for `id`: in a mempool, or accepted (REST API). */
-async function lookUpTransaction({ rpc, withRpc, id }) {
+async function lookUpTransaction({ rpc, withRpc, id, afterRejection = false }) {
   try {
     const lookup = async (activeRpc) => {
       if (typeof activeRpc?.getMempoolEntry !== "function") return null;
@@ -117,7 +127,7 @@ async function lookUpTransaction({ rpc, withRpc, id }) {
     if (entry?.mempoolEntry || entry?.entry) return true;
   } catch { /* not in this node's mempool (or no answer): ask the REST API */ }
   try {
-    const base = String(getEndpoint("kaspaApi") || "").replace(/\/+$/, "");
+    const base = restBaseForLookup(afterRejection);
     if (base && typeof fetch === "function") {
       const response = await fetch(`${base}/transactions/${id}?inputs=false&outputs=false&resolve_previous_outpoints=no`, { headers: { Accept: "application/json" }, cache: "no-store" });
       if (response.ok && (await response.json())?.is_accepted === true) return true;
@@ -125,13 +135,14 @@ async function lookUpTransaction({ rpc, withRpc, id }) {
   } catch { /* unknown: treated as not found */ }
   return false;
 }
-/** Whether the network already has `txid`: in a mempool, or accepted (REST API). */
-export async function isTransactionKnown({ rpc = null, withRpc = null, txid } = {}) {
+/** Whether the network already has `txid`: in a mempool, or accepted (REST API). `afterRejection`:
+ *  a node turned it down, so only a mempool or the built-in REST server counts (restBaseForLookup). */
+export async function isTransactionKnown({ rpc = null, withRpc = null, txid, afterRejection = false } = {}) {
   const id = String(txid || "").trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(id)) return false;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) await sleep(ACCEPTANCE_RECHECK_MS);
-    if (await lookUpTransaction({ rpc, withRpc, id })) return true;
+    if (await lookUpTransaction({ rpc, withRpc, id, afterRejection })) return true;
   }
   return false;
 }
@@ -146,6 +157,32 @@ export function sendOutcomeUnknownError(txid) {
   error.code = SEND_OUTCOME_UNKNOWN;
   error.txid = txid;
   return error;
+}
+// A send is built again at the swipe, from the coins of that moment (iOS d23e6f7a / KaPay 1652437
+// checkFeeAgainstReview). If they changed since the Review - another send spent one, a coin
+// arrived - it can pick other coins and pay more: then nothing is sent, and the Review works its
+// fee out again. Within REVIEW_FEE_MARGIN_SOMPI of the Review's fee it still goes out.
+export const SEND_FEE_CHANGED = "SEND_FEE_CHANGED";
+export const REVIEW_FEE_MARGIN_SOMPI = 1_000n;
+export function sendFeeChangedError(feeSompi) {
+  const kas = sompiToKasText(BigInt(feeSompi));
+  const error = new Error(`The network fee is now ${kas} ${KAS_UNIT}, more than the Review showed. Nothing was sent: check the new fee and swipe again.`);
+  error.code = SEND_FEE_CHANGED;
+  error.feeSompi = BigInt(feeSompi);
+  return error;
+}
+/** Throws SEND_FEE_CHANGED when `paidSompi` is over the Review's `expectedFeeSompi` by more than the
+ *  margin; no expectation (null) never throws. */
+export function checkFeeAgainstReview(paidSompi, expectedFeeSompi) {
+  if (expectedFeeSompi == null || paidSompi == null) return;
+  let expected;
+  try { expected = BigInt(expectedFeeSompi); } catch { return; }
+  if (BigInt(paidSompi) > expected + REVIEW_FEE_MARGIN_SOMPI) throw sendFeeChangedError(paidSompi);
+}
+function sompiToKasText(sompi) {
+  const whole = sompi / 100_000_000n;
+  const frac = String(sompi % 100_000_000n).padStart(8, "0").replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : String(whole);
 }
 /** A submit that reached a node and got no answer: a timeout or a dropped stream. A connection that
  *  was never open means no node saw it, and an error the node sent is its answer. */
@@ -194,6 +231,16 @@ export const ORPHAN_WAIT_MS = 1500;
 export function isOrphanRejection(error) {
   return String(error?.message || error || "").toLowerCase().includes("orphan");
 }
+/** A rejection that decides the transaction itself (bad signature, low fee, too much mass): not one a
+ *  node also gives when another node - the one whose answer was lost - already took and relayed this
+ *  very transaction (in a mempool, accepted, its inputs spent by it, its parents not seen yet). Only
+ *  a verdict cancels the lost-answer path (iOS d23e6f7a rejectionMayMeanAlreadyKnown, KaPay 1652437
+ *  isVerdict, KaPlay 4922804). */
+const NOT_A_VERDICT = ["already", "orphan", "double spend", "double-spend", "spent", "missing outpoint", "mempool", "memory pool"];
+export function isVerdictRejection(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return !NOT_A_VERDICT.some((word) => message.includes(word));
+}
 /**
  * Submits through `submit(activeRpc, { allowOrphan })` (via `withRpc` when given) and returns the
  * transaction id. `submit` should pass `allowOrphan` on to `submitTransaction` (default false).
@@ -218,14 +265,16 @@ export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, s
 async function submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, orphanWaitMs, lostAnswerWaitMs, recheckMs }) {
   let answerLost = false;
   // A node that rejected the transaction gave its verdict on it: the answer isn't lost even if
-  // another node timed out, and "may have gone through" would be wrong (iOS 3942a5b7).
+  // another node timed out, and "may have gone through" would be wrong (iOS 3942a5b7). Only a
+  // verdict counts: "already in the mempool", orphan or spent-input answers say nothing about the
+  // node that took it and timed out (iOS d23e6f7a, isVerdictRejection).
   let rejected = false;
   const submitOnce = async (allowOrphan) => {
     const run = async (activeRpc) => {
       try { return await submit(activeRpc, { allowOrphan }); }
       catch (error) {
         if (isLostSubmitAnswer(error)) answerLost = true;
-        else if (!isRpcConnectionError(error) && !isOrphanRejection(error)) rejected = true;
+        else if (!isRpcConnectionError(error) && isVerdictRejection(error)) rejected = true;
         throw error;
       }
     };
@@ -257,7 +306,9 @@ async function submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label
         return await checked(orphaned);
       } catch (retryError) { if (retryError?.code === SEND_OUTCOME_UNKNOWN) throw retryError; /* fall through to the acceptance check with the original error */ }
     }
-    if (txid && await isTransactionKnown({ rpc, withRpc, txid })) {
+    // After a node's rejection (no answer lost), a REST "accepted" counts only from the built-in
+    // server (iOS d23e6f7a isTransactionKnown(afterRejection:)).
+    if (txid && await isTransactionKnown({ rpc, withRpc, txid, afterRejection: !answerLost })) {
       log(`${label}: the submit reported "${error?.message || error}" but the network has ${txid}; treated as sent.`);
       return String(txid);
     }
@@ -337,7 +388,9 @@ export function extraFeeSompiFrom(value) {
 // `redeemScript` (iOS senderRedeemScript): a quantum-safe (KIP-22) source's redeem script, pushed
 // after each signature and priced into the fee (see "Quantum-safe sources" below). Null = a plain
 // Schnorr source, as before.
-export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, log = () => {} }) {
+// `expectedFeeSompi` (iOS d23e6f7a expectedFeeSompi): the fee the Review showed. A send rebuilt here
+// that would pay more (checkFeeAgainstReview) throws SEND_FEE_CHANGED before anything is signed.
+export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, expectedFeeSompi = null, log = () => {} }) {
   const outpoints = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : outpointKeysFrom(manualUtxos);
   // Coin control never falls back to coins the person didn't pick (iOS IOS-012): a non-empty pick
   // that names no readable coin is refused, not sent as an automatic selection.
@@ -345,7 +398,7 @@ export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, source
     throw new Error("Selected UTXOs are no longer available - please reselect.");
   }
   const extraFee = extraFeeSompiFrom(extraFeeSompi);
-  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, extraFeeSompi: extraFee, payload, selectedOutpoints: outpoints.length ? outpoints : null, changeAddress, singleInput, exactAmount, redeemScript, log }));
+  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, extraFeeSompi: extraFee, payload, selectedOutpoints: outpoints.length ? outpoints : null, changeAddress, singleInput, exactAmount, redeemScript, expectedFeeSompi, log }));
 }
 
 // Consolidate ("compound") every UTXO at `sourceAddress` into a single self-output with NO change,
@@ -830,7 +883,7 @@ async function createKip22Transactions(kaspa, settings, prioritySompi) {
   throw new Error("Could not price this quantum-safe transaction. Try again.");
 }
 
-async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", extraFeeSompi = 0n, payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, log = () => {} }) {
+async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", extraFeeSompi = 0n, payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, expectedFeeSompi = null, log = () => {} }) {
   const to = validateMainnetAddress(destinationAddress);
   const amount = String(amountKas ?? "").trim();
   // Exact sompi (engine/amounts.js, iOS IOS-010): "1,5" is 1.5 KAS, never NaN, and an absurd
@@ -899,6 +952,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
       const totalFee = floorFee + prioritySompi;
       if (totalSompi < amountSompi + totalFee && totalSompi > totalFee) {
         const reduced = totalSompi - totalFee;
+        checkFeeAgainstReview(totalFee, expectedFeeSompi);
         log(`Balance holds the amount but not the fee; sending ${reduced} sompi as one output (total minus fee).`);
         const tx = kaspa.createTransaction(entries, [{ address: to, amount: reduced }], 0n, payload || undefined);
         const signed = signSdkTransaction(kaspa, tx, privateKey, redeemScript);
@@ -927,6 +981,9 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
     ? await createKip22Transactions(kaspa, settings, prioritySompi)
     : await kaspa.createTransactions({ ...settings, priorityFee: prioritySompi });
   log("Transaction summary:", result.summary);
+  // What this build pays (the generator's fees: network fee plus the priority fee, every chained
+  // transaction included), against what the Review showed - before anything is signed.
+  if (expectedFeeSompi != null) checkFeeAgainstReview(generatorFeesSompi(result), expectedFeeSompi);
 
   const txids = [];
   const signer = signingKeyArg(privateKey);
@@ -960,6 +1017,18 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
 }
 
 
+/** What a generator result pays in all (summary.fees, else each pending transaction's feeAmount);
+ *  null when it can't be read. */
+function generatorFeesSompi(result) {
+  try {
+    const fees = result?.summary?.fees;
+    if (fees != null) return BigInt(fees);
+    let total = 0n;
+    for (const pending of result?.transactions || []) total += BigInt(pending.feeAmount);
+    return total;
+  } catch { return null; }
+}
+
 /** The "txid:index" keys of the coins a generator's pending transaction spends; none if unreadable. */
 function pendingSpends(pending) {
   try { return (pending.getUtxoEntries() || []).map(outpointKeyOf); } catch { return []; }
@@ -971,7 +1040,9 @@ function pendingSpends(pending) {
 // estimate of the real Kasia COMM payload's byte length for the draft text,
 // since mass (and therefore fee) scales with payload size.
 // Builds the representative tx and returns { feeSompi, massGrams } from the generator summary.
-export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddress, amountKas = "0.2", payloadBytes = 0, selectedOutpoints = null, singleInput = false }) {
+// `destinationAddress` (optional): the recipient, so its output script is priced as the send's will
+// be (the fee shown is the fee paid, iOS 4922804); without one, or an unreadable one, the source.
+export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddress, destinationAddress = null, amountKas = "0.2", payloadBytes = 0, selectedOutpoints = null, singleInput = false }) {
   // An amount that isn't one (or is past the supply) has no estimate, rather than a WASM panic.
   const amountSompi = kasToSompi(amountKas);
   if (amountSompi == null) return null;
@@ -988,7 +1059,9 @@ export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sou
       const outpoint = entry.outpoint || {};
       return wanted.has(`${outpoint.transactionId}:${outpoint.index}`);
     });
-    if (entries.length === 0) return null;
+    // Every picked coin is gone: the send's own error, never an automatic estimate for a send that
+    // would then refuse to go (iOS d23e6f7a resolveReviewSelection).
+    if (entries.length === 0) throw new Error("Selected UTXOs are no longer available - please reselect.");
   }
   if (singleInput && !selectedOutpoints?.length) {
     const one = singleInputFor(entries, amountSompi);
@@ -996,9 +1069,13 @@ export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sou
   }
   entries.sort(bySompiAsc);
 
+  let to = sourceAddress;
+  if (destinationAddress) {
+    try { to = validateMainnetAddress(destinationAddress); } catch { to = sourceAddress; }
+  }
   const result = await kaspa.createTransactions({
     entries,
-    outputs: [{ address: sourceAddress, amount: amountSompi }],
+    outputs: [{ address: to, amount: amountSompi }],
     priorityFee: 0n,
     changeAddress: sourceAddress,
     networkId: NETWORK_ID,

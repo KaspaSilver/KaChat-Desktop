@@ -217,7 +217,7 @@ for (const [what, extra, batch] of [
   ["an indexer without the endpoint", {}, 404],
   ["the chain walker", { indexerBase: () => "" }, "live"],
 ]) {
-  // no batch: one at a time, most recent first, at most 40 a pass
+  // no batch: four at a time, most recent first, at most 40 a pass
   const idx = fakeIndexer({ batch });
   const reg = registryOver(idx.fetch, extra);
   // the chain walker's identity() reads the walked names; stub it to the per-address answer

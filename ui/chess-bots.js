@@ -370,8 +370,10 @@ function notation(played) {
 
 /** Share to KaPost, once the win is on chain: what the post shows off can be looked up. */
 function shareButtonHtml(g) {
-  const title = g.stamp === "stamped" ? "Share to KaPost" : g.stamp === "failed" ? "Retry the stamp" : "Stamping the result…";
-  const waiting = g.stamp === "sending" || g.stamp === "none";
+  // May have gone through (iOS 4922804): no Retry - a second stamp of the same game - and nothing
+  // to share until it is known to be on chain.
+  const title = g.stamp === "stamped" ? "Share to KaPost" : g.stamp === "failed" ? "Retry the stamp" : g.stamp === "unconfirmed" ? "Not confirmed" : "Stamping the result…";
+  const waiting = g.stamp === "sending" || g.stamp === "none" || g.stamp === "unconfirmed";
   return `<button class="chess-bot-share" type="button" data-chess-bot-share ${waiting ? "disabled" : ""}>${ICON_SHARE}<span>${title}</span></button>`;
 }
 
@@ -432,11 +434,13 @@ function renderGame() {
   if (g.stamp === "failed") chainTrailing = `<button class="chess-bot-retry" type="button" data-chess-bot-retry>Retry</button>`;
   else if (g.stamp === "sending") chainTrailing = `<span class="chess-bot-spinner small" role="progressbar" aria-label="Sending"></span>`;
   else if (g.stamp === "stamped") chainTrailing = ICON_CHECK;
+  else if (g.stamp === "unconfirmed") chainTrailing = `<span class="chess-bot-unconfirmed" role="img" aria-label="Not confirmed" style="color: var(--ios-orange); font-weight: 700">?</span>`;
   const chainText = {
     none: "The result goes on Kaspa when the game ends",
     sending: "Stamping the result on Kaspa…",
     stamped: "Result stamped on Kaspa",
     failed: "Couldn't stamp the result on Kaspa",
+    unconfirmed: "The stamp may have gone through",
   }[g.stamp];
 
   const moves = g.moves;
@@ -460,6 +464,7 @@ function renderGame() {
       <div class="chess-bot-chain">
         <div class="chess-bot-chain-row">${ICON_LINK}<span class="chess-bot-chain-label">${chainText}</span>${chainTrailing}</div>
         ${g.stamp === "failed" ? `<p class="chess-bot-chain-error">${esc(g.stampError)}</p>` : ""}
+        ${g.stamp === "unconfirmed" ? `<p class="chess-bot-chain-note field-hint">${esc(g.stampError)}</p>` : ""}
       </div>
       <div class="chess-bot-moves" data-chess-bot-moves>${moveList}</div>
     </div>`;

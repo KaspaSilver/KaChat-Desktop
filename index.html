@@ -1884,11 +1884,18 @@
           <p class="passphrase-preview-balance-row"><span>Balance</span> <strong data-passphrase-preview-balance></strong></p>
           <p class="passphrase-preview-verdict" data-passphrase-preview-verdict hidden></p>
           <div class="passphrase-found" data-passphrase-preview-found hidden></div>
+          <!-- The funds search failed or ran out of time (KaPay 1652437): Import uses #0, and says so. -->
+          <div class="passphrase-search-incomplete" data-passphrase-search-incomplete hidden>
+            <p>The search for funds on this account's other addresses didn't finish, so Import uses address #0.</p>
+            <button class="linklike-button" type="button" data-passphrase-search-again>Search Again</button>
+          </div>
           <p class="passphrase-preview-note" data-passphrase-preview-note>This is the account your 12 or 24 words open on their own.</p>
         </div>
         <p class="field-error" data-import-passphrase-error hidden></p>
         <div class="modal-actions passphrase-actions">
           <button class="primary-button full" type="button" data-import-passphrase-submit>Import</button>
+          <!-- The search is a network round trip: never the only way forward (KaPay 1652437). -->
+          <button class="linklike-button full" type="button" data-import-passphrase-skip-search hidden>Skip the Search: Import on Address #0</button>
           <!-- The entry screen links the explainer too; its Back returns here (iOS 3942a5b7). -->
           <button class="linklike-button full" type="button" data-import-passphrase-entry-explain>What is a passphrase?</button>
           <button class="secondary-button full" type="button" data-import-passphrase-back>Back</button>

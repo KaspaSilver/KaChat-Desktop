@@ -1231,6 +1231,8 @@ export class KaspaEngine {
       extraFeeSompi: options.extraFeeSompi || 0,
       payload: options.payload || null,
       exactAmount: Boolean(options.exactAmount),
+      // the fee the Review showed: a send rebuilt here that would pay more sends nothing
+      expectedFeeSompi: options.expectedFeeSompi ?? null,
       log: this.log,
     });
   }
@@ -1368,7 +1370,7 @@ export class KaspaEngine {
 
   // Send from a spending address, signing with its derived key.
   // `manualUtxos` / `extraFeeSompi`: coin control and a priority fee on top, as for send().
-  async sendFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, payload = null, exactAmount = false, owner = this.address }) {
+  async sendFromSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", destinationAddress, amountKas, feeKas = "0", selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, payload = null, exactAmount = false, expectedFeeSompi = null, owner = this.address }) {
     this.requireSdk();
     await this.confirmSpend({ to: destinationAddress, amountKas });
     await this.connect();
@@ -1389,6 +1391,7 @@ export class KaspaEngine {
       payload,
       exactAmount: Boolean(exactAmount),
       redeemScript: spending.redeemScript || null,
+      expectedFeeSompi,
       log: this.log,
     }).catch((error) => this.noteSpendingOutcomeUnknown(error, spending, owner));
     this.noteSpendingSpent(spending, owner);
@@ -1398,7 +1401,7 @@ export class KaspaEngine {
   // Fee estimate ({ sdkFeeKas, policyFeeKas }) for a send FROM an arbitrary address (spending
   // addresses), mirroring estimateSendFee for the chatting address. `payloadBytes` sizes a payment
   // that carries its encrypted payment payload (a memo makes it longer).
-  async estimateSendFeeForAddress(address, amountKas = "0.2", selectedOutpoints = null, payloadBytes = 0) {
+  async estimateSendFeeForAddress(address, amountKas = "0.2", selectedOutpoints = null, payloadBytes = 0, destinationAddress = null) {
     if (!this.kaspa || !address) return null;
     await this.connect();
     return estimateSendFeeDetail({
@@ -1406,6 +1409,7 @@ export class KaspaEngine {
       rpc: this.rpc,
       withRpc: this.withRpc.bind(this),
       sourceAddress: address,
+      destinationAddress,
       amountKas: String(amountKas || "0.2"),
       payloadBytes: Math.max(0, Number(payloadBytes) || 0),
       selectedOutpoints,
@@ -1646,7 +1650,9 @@ export class KaspaEngine {
   // reflects the UTXOs actually present — matches iOS's per-amount fee estimate.
   // Returns { sdkFeeKas, policyFeeKas }: the SDK's automatic base fee, and the iOS-policy fee
   // (mass * 100 sompi/gram) the Send screen displays and pays.
-  async estimateSendFee(amountKas = "0.2", selectedOutpoints = null, payloadBytes = 0) {
+  // `destinationAddress` (optional): priced with the recipient's own output script, so the fee
+  // shown is the fee the send pays (iOS 4922804) - a longer script costs more mass.
+  async estimateSendFee(amountKas = "0.2", selectedOutpoints = null, payloadBytes = 0, destinationAddress = null) {
     if (!this.kaspa || !this.address) return null;
     await this.connect();
     return estimateSendFeeDetail({
@@ -1654,6 +1660,7 @@ export class KaspaEngine {
       rpc: this.rpc,
       withRpc: this.withRpc.bind(this),
       sourceAddress: this.address,
+      destinationAddress,
       amountKas: String(amountKas || "0.2"),
       payloadBytes: Math.max(0, Number(payloadBytes) || 0),
       selectedOutpoints,

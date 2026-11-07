@@ -1,5 +1,5 @@
 import { confirmDialog } from "./dialogs.js";
-import { IS_TESTNET } from "../engine/network.js";
+import { IS_TESTNET, reencodeAddress } from "../engine/network.js";
 import { cssUrlValue } from "./css-url.js";
 import { readNextcloudAccount, writeNextcloudAccount, onKeyVaultStateChanged } from "./key-vault.js";
 import { talkCallsFromCapabilities } from "./talk.js";
@@ -9,7 +9,7 @@ import {
 } from "./address-book-store.js";
 import { parseBackupEnvelope } from "./backup-crypto.js";
 import {
-  PORTFOLIO_FILE_MAX_BYTES, isOwnPortfolioFile, isPortfolioFileCandidate, mergePortfolioSync, parsePortfolioBackupFile,
+  PORTFOLIO_FILE_MAX_BYTES, isOwnPortfolioFile, isPortfolioFileCandidate, isPristinePortfolioSeed, mergePortfolioSync, parsePortfolioBackupFile,
   portfolioBackupFileJson, portfolioFileNames, portfolioSyncFor,
 } from "./portfolio-sync.js";
 // Nextcloud integration — desktop port of the iOS stack:
@@ -542,7 +542,13 @@ async function readPortfolioFile(text) {
  *  be told from anyone else's. */
 async function readServerPortfolios(wallet) {
   if (!deps.backupKeyAvailable?.()) throw new Error(PORTFOLIO_KEY_UNAVAILABLE_MESSAGE);
-  const result = { own: [], taken: new Set() };
+  // `ownUnreadable`: this account's encrypted files that won't decrypt - never read, but still its
+  // own, so deleting the backup takes them too (KaPay 1652437).
+  const result = { own: [], ownUnreadable: [], taken: new Set() };
+  // A plain file carries no proof of who wrote it (the owner inside is a public address), so plain
+  // files count only until this account's own have been encrypted by one full backup (KaPay
+  // 1652437 plainPortfoliosRetiredKey); after that one is anybody's file, and its name is taken.
+  const plainRetired = Boolean(nc?.plainPortfoliosRetired);
   let listing;
   try {
     listing = await listFolder(backupFolderPath());
@@ -564,16 +570,34 @@ async function readServerPortfolios(wallet) {
         portfolioFileCache.set(file.path, { modified, size: file.size, wallet, read });
       }
     }
-    if (isOwnPortfolioFile(read?.parsed, wallet)) {
+    if (isOwnPortfolioFile(read?.parsed, wallet) && !(read.plain && plainRetired)) {
       result.own.push({ file, parsed: read.parsed, plain: read.plain });
     } else if (read?.ownUnreadable) {
       // This account's, so its name stays free for this account's portfolio of that name.
+      result.ownUnreadable.push(file);
       deps.appendEngineLog?.(`[Nextcloud] A Portfolio file of this account can't be decrypted: ${file.name}`);
     } else {
       result.taken.add(String(file.name).toLowerCase());
     }
   }
   return result;
+}
+
+// Every Nextcloud login (server and user, in this browser) whose single Portfolio file, which had no
+// owner inside, has been merged: it goes to one account, not every one on that login (KaPay
+// 1652437 singlePortfolioLoginsKey). Browser-wide, not per account, like iOS's.
+const SINGLE_PORTFOLIO_LOGINS_KEY = "kachat-nextcloud-single-portfolio-logins-v1";
+function singlePortfolioLogin(account) {
+  return `${String(account?.server || "").replace(/\/+$/, "").toLowerCase()}|${String(account?.username || "").toLowerCase()}`;
+}
+function readSinglePortfolioLogins() {
+  try {
+    const list = JSON.parse(localStorage.getItem(SINGLE_PORTFOLIO_LOGINS_KEY) || "[]");
+    return Array.isArray(list) ? list.map(String) : [];
+  } catch { return []; }
+}
+function writeSinglePortfolioLogins(list) {
+  try { localStorage.setItem(SINGLE_PORTFOLIO_LOGINS_KEY, JSON.stringify(list)); } catch { /* merged again next time */ }
 }
 
 /** Once per account: merges the one file the Portfolio used to be kept in. It stays where it is and
@@ -591,7 +615,23 @@ async function mergeSinglePortfolioFileIfNeeded(account, stillCurrent) {
       }
     }
     if (!stillCurrent()) return false;
-    const changed = text != null && deps.importPortfolioSync(parsePortfolioBackupFile(text)?.sync ?? { portfolios: [], transactions: [], fees: [], tombstones: [] });
+    let changed = false;
+    if (text != null) {
+      const file = parsePortfolioBackupFile(text);
+      // One file per Nextcloud login (KaPay 1652437): with an owner inside, only that account's;
+      // without one, only the first account here to connect with that login takes it, so a second
+      // account on the same login doesn't take the first one's portfolios as its own.
+      const login = singlePortfolioLogin(account);
+      const logins = readSinglePortfolioLogins();
+      const wallet = addressBookWalletAddress();
+      const isOurs = file?.walletAddress != null
+        ? String(file.walletAddress).toLowerCase() === String(wallet).toLowerCase()
+        : !logins.includes(login);
+      if (isOurs) {
+        changed = deps.importPortfolioSync(file?.sync ?? { portfolios: [], transactions: [], fees: [], tombstones: [] });
+        if (!logins.includes(login)) writeSinglePortfolioLogins([...logins, login]);
+      }
+    }
     account.singlePortfolioMerged = true;
     saveState();
     return changed;
@@ -653,11 +693,18 @@ async function performPortfolioBackup() {
     await uploadToKaChatFolder(sealed, name, "application/json", { keepSpaces: true, stillCurrent });
   }
   const deletedIds = new Set(sync.tombstones.filter((t) => t.kind === "portfolio").map((t) => t.id));
+  // Real portfolios went up just now, each file carrying every deletion: an untouched "Portfolio 1"
+  // uploaded earlier only to carry a deletion has no job left and goes too (KaPay 1652437 seedIds).
+  const uploadedReal = sync.portfolios.length > 0
+    && !sync.portfolios.some((p) => isPristinePortfolioSeed(p, sync.transactions, sync.fees));
   for (const found of server.own) {
     const ids = found.parsed.sync.portfolios.map((p) => p.id);
     if (ids.some((id) => names.get(id)?.toLowerCase() === String(found.file.name).toLowerCase())) continue;
+    const { transactions: fileTransactions, fees: fileFees } = found.parsed.sync;
+    const seedCarrier = uploadedReal && found.parsed.sync.portfolios.length > 0
+      && found.parsed.sync.portfolios.every((p) => isPristinePortfolioSeed(p, fileTransactions, fileFees));
     // Only for what this device knows the fate of: never a portfolio it simply doesn't have.
-    if (!ids.every((id) => names.has(id) || deletedIds.has(id))) continue;
+    if (!seedCarrier && !ids.every((id) => names.has(id) || deletedIds.has(id))) continue;
     // A deleted portfolio's file stays until an uploaded file carries the deletion, or other
     // devices would never hear of it (and upload it again, and this device delete it again).
     if (!sync.portfolios.length && ids.some((id) => deletedIds.has(id))) continue;
@@ -665,6 +712,9 @@ async function performPortfolioBackup() {
     await deleteBackupFile(found.file.path);
     portfolioFileCache.delete(found.file.path);
   }
+  // Every file of this account read as plain was written again encrypted (or deleted): plain files
+  // aren't read any more (KaPay 1652437).
+  if (stillCurrent() && !account.plainPortfoliosRetired) { account.plainPortfoliosRetired = true; saveState(); }
   // An edit made during the upload is still owed (its own debounced backup is on the way).
   if (stillCurrent() && portfolioChangeCount === changeCountAtStart) { account.portfolioBackupOwed = false; saveState(); }
   deps.appendEngineLog?.("[Nextcloud] Portfolio backed up");
@@ -746,6 +796,36 @@ export async function revokeAppPassword(account) {
   } catch (error) {
     deps.appendEngineLog?.(`[Nextcloud] App password revoke failed: ${error.message}`);
   }
+}
+
+/**
+ * The Nextcloud logins an account being removed from this device keeps, on both network encodings
+ * (iOS d23e6f7a revokeAndPurgeStoredState, KaPay 1652437 revokeStoredAppPassword): read before its
+ * data is erased, so every removal path - Settings' Delete Account, the sign-in screen's Delete -
+ * can revoke the app password, signed in or not, as Disconnect does. Only a login whose password
+ * can be read: in plaintext, or sealed with a vault that is open now; a sealed one whose account's
+ * password wasn't entered is erased without a revoke. None on a site KaChat hosts, where the
+ * request would pass through that site's relay.
+ */
+export function storedNextcloudLoginsFor(address) {
+  if (!deps || NC_OFF === "hosted" || !address) return [];
+  const seen = new Set();
+  const out = [];
+  for (const encoded of new Set([address, reencodeAddress(address, "kaspa"), reencodeAddress(address, "kaspatest")].filter(Boolean))) {
+    let account = null;
+    try { account = readNextcloudAccount(deps.accountScopedKey(NC_KEY, encoded)); } catch { account = null; }
+    if (!account?.server || !account.username || !account.appPassword || account.locked) continue;
+    const id = `${account.server}\u0000${account.username}\u0000${account.appPassword}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ server: account.server, username: account.username, appPassword: account.appPassword });
+  }
+  return out;
+}
+
+/** Revokes each of `logins` (storedNextcloudLoginsFor) on its server, best effort, all at once. */
+export async function revokeNextcloudLogins(logins) {
+  await Promise.allSettled((Array.isArray(logins) ? logins : []).map((account) => revokeAppPassword(account)));
 }
 
 let pickerAllowedExtensions = null;
@@ -1365,7 +1445,7 @@ function renderSettings() {
       <button class="settings-list-row" type="button" data-nc-portfolio-backup><span class="settings-row-copy"><strong>Back Up Portfolio Now</strong></span></button>
       <div class="settings-list-row settings-info-row" data-nc-portfolio-result-row hidden><span class="settings-row-copy"><small data-nc-portfolio-result></small></span></div>
     </div>
-    <p class="settings-group-footer">Each portfolio has its own file, named after it. These files aren't encrypted.</p>
+    <p class="settings-group-footer">Each portfolio has its own file, named after it, encrypted with this account's key.</p>
     <div class="settings-list-card danger-list-card">
       <button class="settings-list-row danger-row" type="button" data-nc-disconnect><span class="settings-row-copy"><strong>Disconnect</strong></span></button>
     </div>`;
@@ -1811,17 +1891,26 @@ export async function deleteRemoteNextcloudBackup() {
   if (!nc?.server || !nc?.username || !nc?.appPassword) return;
   const davRoot = `${apiBase()}/remote.php/dav/files/${davUser()}`;
   const folder = backupFolderPath().split("/").map(encodeURIComponent).join("/");
-  // The portfolios' files too. One that can't be read stays, as does anything of another account's.
+  // The portfolios' files too, this account's damaged ones included (KaPay 1652437); anything of
+  // another account's stays. Without the key (or a listing) this account's Portfolio files can't be
+  // told from anyone else's: the contacts still go, and the error afterwards says the rest didn't.
   const wallet = addressBookWalletAddress();
   let portfolioNames = [];
-  try { portfolioNames = wallet ? (await readServerPortfolios(wallet)).own.map((found) => found.file.name) : []; }
-  catch (error) { deps.appendEngineLog?.(`[Nextcloud] Reading the Portfolio files to delete them failed: ${error.message}`); }
+  let portfolioError = null;
+  try {
+    const server = wallet ? await readServerPortfolios(wallet) : null;
+    portfolioNames = server ? [...server.own.map((found) => found.file.name), ...server.ownUnreadable.map((file) => file.name)] : [];
+  } catch (error) {
+    portfolioError = error;
+    deps.appendEngineLog?.(`[Nextcloud] Reading the Portfolio files to delete them failed: ${error.message}`);
+  }
   for (const name of [BACKUP_FILENAME, ...RETIRED_BACKUP_FILENAMES, ...SINGLE_PORTFOLIO_FILENAMES, ...portfolioNames]) {
     const response = await ncFetch(`${davRoot}/${folder}/${encodeURIComponent(name)}`, { method: "DELETE", headers: { Authorization: authHeader() } });
     if (response.status === 401) throw new Error("Nextcloud rejected the stored app password. Reconnect in Settings.");
     if (!(response.ok || response.status === 404)) throw new Error(`Nextcloud returned HTTP ${response.status}.`);
   }
   rememberBackupETag(null);
+  if (portfolioError) throw new Error(`The contacts backup was deleted, but the Portfolio files weren't: ${portfolioError.message}`);
   deps.appendEngineLog?.("[Nextcloud] Remote backup deleted");
 }
 

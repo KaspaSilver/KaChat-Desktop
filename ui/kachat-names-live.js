@@ -4513,7 +4513,7 @@ export async function kachatRescanProfile(address) {
 // cache only re-asks when a render reads it, so while the app is open, once a minute, everyone with
 // no name you gave them and no .kachat name known may be asked again - all of them in one
 // POST /identity/batch (iOS 710b78f; chunks of 200), or, without it (the chain walker, an indexer
-// without the endpoint), one at a time, most recent chats first, up to 40 a pass; the answers
+// without the endpoint), four at a time, most recent chats first, up to 40 a pass; the answers
 // update every screen at once (onKachatIdentityChange, one notify per pass). Never asked yet,
 // or the last lookup failed (the registry still loading at launch): this pass. A "no name" answer
 // backs off - asked again after 1, then 5, 15 and 60 minutes - and sooner (after a minute) only

@@ -2,7 +2,7 @@
 // refreshUnnamedIdentities). Pure (the pass takes its lookups and cache as arguments), so
 // tools/test-kachat-unnamed-sweep.mjs can run them without the app; the sweep itself is
 // kachat-names-live.js startKachatUnnamedIdentitySweep. Since iOS 710b78f a pass asks the indexer
-// once for everyone due (`unnamedSweepPass`, POST /identity/batch), one at a time only without it.
+// once for everyone due (`unnamedSweepPass`, POST /identity/batch), four at a time only without it.
 //
 // A contact with no name was asked again every minute, forever. Now: never asked, or the last
 // lookup failed (the registry still loading at launch) - this pass. A "no name" answer is trusted
@@ -37,7 +37,7 @@ export function nextUnnamedAnswers(answers, entry) {
 }
 
 /** Without the batch (the chain walker, or an indexer without `/identity/batch`), a pass asks at
- *  most this many, one at a time. */
+ *  most this many, four at a time. */
 export const UNNAMED_SWEEP_FALLBACK_MAX = 40;
 
 /**
@@ -49,7 +49,7 @@ export const UNNAMED_SWEEP_FALLBACK_MAX = 40;
  * again in a minute), then `answered(key)` counts its "no name" for the backoff - and `notify()`
  * runs once for the whole pass, only if anything changed. A null batch (no registry here, the
  * chain walker, an indexer without the endpoint) falls back to `lookUp(key)` for the first
- * `UNNAMED_SWEEP_FALLBACK_MAX`, one at a time while `visible()`; `lookUp` -> false skips the
+ * `UNNAMED_SWEEP_FALLBACK_MAX`, four at a time while `visible()`; `lookUp` -> false skips the
  * address (a lookup already in flight), a throw is asked again next minute.
  * -> "batch" | "each" | "none" (nothing due).
  */
@@ -73,13 +73,27 @@ export async function unnamedSweepPass(targets, { batch, store, miss, answered, 
     if (anyChanged) notify();
     return "batch";
   }
-  // a few at a time, the people you talk to most recently first
-  for (const key of targets.slice(0, UNNAMED_SWEEP_FALLBACK_MAX)) {
+  // four at a time, the people you talk to most recently first (iOS d23e6f7a refreshUnnamedIdentities)
+  const due = targets.slice(0, UNNAMED_SWEEP_FALLBACK_MAX);
+  for (let start = 0; start < due.length; start += IDENTITY_FALLBACK_PARALLEL) {
     if (!visible()) break;
-    try { if ((await lookUp(key)) === false) continue; } catch { continue; /* asked again next minute */ }
-    answered(key);
+    await Promise.all(due.slice(start, start + IDENTITY_FALLBACK_PARALLEL).map(async (key) => {
+      try { if ((await lookUp(key)) === false) return; } catch { return; /* asked again next minute */ }
+      answered(key);
+    }));
   }
   return "each";
+}
+
+/** Lookups one at a time per address, side by side in groups of this many, when there is no batch
+ *  answer (iOS 33095ac / d23e6f7a: four at a time). */
+export const IDENTITY_FALLBACK_PARALLEL = 4;
+
+/** Runs `task(item)` for every item, `size` at a time; a throw is that item's alone. */
+async function inGroupsOf(items, size, task) {
+  for (let start = 0; start < items.length; start += size) {
+    await Promise.all(items.slice(start, start + size).map((item) => Promise.resolve().then(() => task(item)).catch(() => {})));
+  }
 }
 
 /** What an address the render-time batch left out of its answer is stored as: no names and no
@@ -98,14 +112,15 @@ export const IDENTITY_BATCH_DELAY_MS = 150;
  * `identities`). Each is filed with `store(key, identity)` (true when it changed what the app
  * shows) - an address the answer left out as `emptyKachatIdentity` - and `notify()` runs once, only
  * if anything changed. A null batch (the whole request failed, or no indexer to ask) falls back to
- * `lookUp(key)` for each, side by side, as before batching. -> "batch" | "each" | "none".
+ * `lookUp(key)` for each, four at a time. -> "batch" | "each" | "none".
  */
 export async function identityBatchFlush(keys, { batch, store, notify, lookUp }) {
   if (!keys?.length) return "none";
   let found = null;
   try { found = await batch(keys); } catch { found = null; }
   if (!found) {
-    await Promise.all(keys.map((key) => Promise.resolve().then(() => lookUp(key)).catch(() => {})));
+    // four at a time, not a whole screen of authors at once (iOS 33095ac scheduleIdentityBatch)
+    await inGroupsOf(keys, IDENTITY_FALLBACK_PARALLEL, (key) => lookUp(key));
     return "each";
   }
   let anyChanged = false;

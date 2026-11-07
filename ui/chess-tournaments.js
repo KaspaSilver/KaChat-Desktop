@@ -65,15 +65,19 @@ let historyDeadline = 0;
 let now = Date.now();
 let lastError = "";
 const pendingMoveGames = new Set();   // "<tournament>|<game>" sent and not yet seen back
-/** When each pending move went out (wall ms): one the chain has not shown after
- *  T.PENDING_MOVE_TIMEOUT_MS can be played again (iOS 8d5f925). */
+/** When each pending move went out (wall ms): one the reducer still has not applied after
+ *  T.PENDING_MOVE_TIMEOUT_MS stops showing as sending (iOS 4922804). */
 const pendingMoveSentAt = new Map();
-/** Our own moves applied at once with this device's clock and not yet seen on chain: txId ->
- *  { tournamentId, gameId, sentAt }. Timed whoever's turn the local row made it (the row itself
- *  clears pendingMoveGames), so a move accepted but never mined is dropped after
- *  T.PENDING_MOVE_TIMEOUT_MS and offered again (T.unconfirmedLocalMoves). Device-wide, like the
- *  rows. */
-const sentMoves = new Map();
+/** Our own arena rows (a move, join, claim, anything) applied at once with this device's clock and
+ *  not yet seen on chain: txId -> when this device started waiting for it (wall ms). One the chain
+ *  has not shown T.UNCONFIRMED_ROW_MS later is looked up and dropped if it never landed (iOS
+ *  4922804 checkUnconfirmedServiceRows). Device-wide, like the rows; a reload restarts the wait,
+ *  as the chain's answer may have come while the app was closed. */
+const sentRows = new Map();
+/** When a due row may next be looked up (wall ms): one still in a mempool, or one the REST API
+ *  could not answer for, is asked about again later, not on every tick. */
+const sentRowNextCheck = new Map();
+let checkingSentRows = false;
 /** When a claim was last posted for a game (wall ms). One is enough when it takes; one the chain
  *  voided or that failed to send goes again after T.CLAIM_RETRY_MS while the game is still
  *  undecided on chain (iOS 8d5f925). */
@@ -82,8 +86,8 @@ const claimedGames = new Map();
  *  more until it is done. */
 const claimsInFlight = new Set();
 let queuedPublicRoomId = null;
-/** A bot challenge link that came while this player was seated or playing online: it waits
- *  until that is over and Chess's home is showing (iOS 8d5f925 ChessHomeView.takeChallenge). */
+/** A bot challenge link that came while this player was busy online (isBusyOnline): it waits
+ *  until that is over and Chess's home is showing (iOS 4922804 ChessHomeView.takeChallenge). */
 let heldBotChallenge = null;
 /** The waiting room on screen (iOS 8d5f925 ChessWaitingRoomView): the reducer has shown this
  *  player seated there; their Leave went out; when it opened. */
@@ -125,15 +129,20 @@ const keyOf = (tid, gid) => `${tid}|${gid}`;
 // Arena rows: cache, backfill, live scan
 // ---------------------------------------------------------------------------------------------
 
-/** Starts timing a move of ours applied with this device's clock (see sentMoves). */
-function trackSentMove(txId, message, sentAt) {
-  if (message?.a !== "move" || message.t == null || message.g == null) return;
-  sentMoves.set(txId, { tournamentId: message.t, gameId: message.g, sentAt });
+/** Starts timing a row of ours applied with this device's clock (see sentRows). */
+function trackSentRow(txId, sentAt) {
+  sentRows.set(txId, sentAt);
+}
+/** The chain (a scanned block, the indexer or the REST API) showed the row. */
+function confirmSentRow(txId) {
+  sentRows.delete(txId);
+  sentRowNextCheck.delete(txId);
 }
 
 function loadCache() {
   rows = new Map();
-  sentMoves.clear();
+  sentRows.clear();
+  sentRowNextCheck.clear();
   unverifiedCachedRows = [];
   try {
     const list = JSON.parse(localStorage.getItem(ARENA_CACHE_KEY) || "[]");
@@ -145,10 +154,9 @@ function loadCache() {
       // reducer sees it. This device's own sends are trusted - it signed them.
       if (row.verified || row.local) rows.set(r.txId, row);
       else unverifiedCachedRows.push(row);
-      // A recent move of ours the chain had not shown yet: timed again from now, so the indexer
-      // gets its chance to return it before it is dropped. An older one is left as it was: its
-      // game is long over on the clock.
-      if (row.local && Date.now() - row.blockTime < T.AUTO_CLAIM_WINDOW_MS) trackSentMove(row.txId, T.decodeMessage(row.content), Date.now());
+      // A row of ours the chain had not shown yet: timed again from now (iOS 4922804
+      // loadLocalStamps), so the indexer gets its chance to return it before it is looked up.
+      if (row.local) trackSentRow(row.txId, Date.now());
     }
   } catch { rows = new Map(); unverifiedCachedRows = []; }
 }
@@ -175,7 +183,7 @@ function mergeRows(list) {
     const blockTime = Number(r.blockTime) || 0;
     if (existing && existing.blockTime === blockTime && !existing.local) continue;
     rows.set(r.txId, { txId: r.txId, senderAddress: r.senderAddress, content: r.content || "", blockTime, verified: true });
-    sentMoves.delete(r.txId); // the chain has it
+    confirmSentRow(r.txId); // the chain has it
     changed += 1;
   }
   if (changed) { saveCache(); reduceArena(); }
@@ -439,27 +447,39 @@ const joinLabel = () => (joinFeeText ? `Join (Fee: ${joinFeeText})` : "Join");
 /** One broadcast transaction, with the retries a fast sequence of sends needs: the change of the
  *  previous transaction is not spendable until it is mined, so a move sent within a second of
  *  the last one can hit "no spendable UTXO" - the same retry KaPosts threads use. Only that kind
- *  of error is retried (T.isRetryableSendError): no KAS on the chatting address, or a send whose
- *  outcome is unknown (SEND_OUTCOME_UNKNOWN), fails at once with its message (iOS 8d5f925). */
+ *  of error is retried (T.isRetryableSendError): no KAS on the chatting address fails at once with
+ *  its message (iOS 8d5f925). A send whose outcome is unknown (SEND_OUTCOME_UNKNOWN) is never
+ *  retried: it counts as sent until the chain settles it (iOS 4922804). */
 async function send(message) {
   if (deps.isChattingBalanceZero?.()) { deps.showFundingGate?.(); return false; }
   const content = T.encodeMessage(message);
   const sender = me();
   let attempt = 0;
+  // Applied at once with this device's clock; the chain's row replaces the time when it lands,
+  // and one it never shows is looked up after T.UNCONFIRMED_ROW_MS (dropUnconfirmedRowsIfDue).
+  const keep = (txid) => {
+    rows.set(txid, { txId: txid, senderAddress: sender, content, blockTime: Date.now(), local: true });
+    trackSentRow(txid, Date.now());
+    saveCache();
+    lastError = "";
+    reduceArena();
+    // Sent, but another account came on meanwhile: nothing that follows a send (a waiting room
+    // to open, a queue, leaving the board) is for that one.
+    return me() === sender;
+  };
   for (;;) {
     try {
       // One input, like every arena send on the phones: the fee is the one the Join button showed.
-      const txid = await sendBroadcastMessage({ engine: deps.engine, channel: T.ARENA_CHANNEL, content, feeKas: "0", singleInput: true });
-      // Applied at once with this device's clock; the chain's row replaces the time when it lands.
-      rows.set(txid, { txId: txid, senderAddress: sender, content, blockTime: Date.now(), local: true });
-      trackSentMove(txid, message, Date.now());
-      saveCache();
-      reduceArena();
-      lastError = "";
-      // Sent, but another account came on meanwhile: nothing that follows a send (a waiting room
-      // to open, a queue, leaving the board) is for that one.
-      return me() === sender;
+      return keep(await sendBroadcastMessage({ engine: deps.engine, channel: T.ARENA_CHANNEL, content, feeKas: "0", singleInput: true }));
     } catch (error) {
+      // A node may hold it (SEND_OUTCOME_UNKNOWN): kept as sent - a move's ply stays taken - and
+      // the unconfirmed-row check settles it: the chain shows it, or it is dropped (iOS 4922804).
+      // Never sent again blind. Its coins are held by the engine meanwhile.
+      const unknownTxid = T.sendOutcomeUnknownTxid(error);
+      if (unknownTxid) {
+        deps.appendEngineLog?.(`Chess send ${unknownTxid} outcome unknown: kept until the chain settles it`);
+        return keep(unknownTxid);
+      }
       attempt += 1;
       // A switched account: nothing more goes out for the old one.
       if (me() !== sender) return false;
@@ -496,9 +516,11 @@ async function joinPublicRoom(duel) {
   const room = tournaments[id];
   if (room && T.isSeated(room, my, now)) { deps.showToast?.("You're already in this room."); return false; }
   queuedPublicRoomId = id;
-  // A join that did not go out queues nothing: the next room must not be joined for it (iOS 8d5f925).
+  // A join that did not go out queues nothing: the next room must not be joined for it (iOS
+  // 8d5f925) - unless the queue has already moved on to another room while it was being sent
+  // (iOS 4922804).
   const ok = await send(T.messages.join(id));
-  if (!ok) queuedPublicRoomId = null;
+  if (!ok && queuedPublicRoomId === id) queuedPublicRoomId = null;
   return ok;
 }
 
@@ -630,7 +652,8 @@ async function cancelTournament(t) {
 async function play(t, game, mv) {
   const my = me();
   const key = keyOf(t.id, game.id);
-  if (!my || T.playerToMove(game) !== my || game.winner || pendingMoveGames.has(key)) return;
+  // Not once the clock has decided it: a move after the flag is void on chain (iOS 4922804).
+  if (!my || T.playerToMove(game) !== my || T.isDecided(game, Date.now()) || pendingMoveGames.has(key)) return;
   if (!Chess.isLegalMove(game.board, mv)) return;
   const normalized = Chess.normalizingPromotion(game.board, mv);
   pendingMoveGames.add(key);
@@ -648,8 +671,9 @@ async function play(t, game, mv) {
   }
 }
 
-/** A move the chain never showed (the network dropped it): the board offers the move again
- *  instead of "Sending your move…" until the clock runs out (iOS 8d5f925 expirePendingMoves). */
+/** A move the reducer never applied (it came too late for the clock, say): the board stops saying
+ *  "Sending your move…" (iOS 4922804 expirePendingMoves). One the network dropped is
+ *  dropUnconfirmedRowsIfDue's. */
 function expirePendingMoves() {
   let expired = false;
   for (const [key, sentAt] of [...pendingMoveSentAt]) {
@@ -659,37 +683,89 @@ function expirePendingMoves() {
     lastError = T.PENDING_MOVE_EXPIRED_MESSAGE;
     expired = true;
   }
-  if (dropUnconfirmedMoves()) return; // its reduce rendered
   if (expired && active) render();
 }
 
-/** Our moves applied at once that the chain never showed (accepted by the node, never mined):
- *  the local row goes, the board is back on our turn and says "Play it again". Without this the
- *  row - which already took the move off pendingMoveGames - kept the game stuck on the
- *  opponent's turn. KaPlay iOS has no such step; Desktop adds it. True when anything was dropped. */
-function dropUnconfirmedMoves() {
-  if (!sentMoves.size) return false;
-  const { drop, seen } = T.unconfirmedLocalMoves(sentMoves, tournaments, now);
-  for (const txId of seen) sentMoves.delete(txId);
-  const my = me();
-  let dropped = false;
-  for (const txId of drop) {
-    const sent = sentMoves.get(txId);
-    sentMoves.delete(txId);
-    const row = rows.get(txId);
-    if (!row?.local) continue; // the chain's copy landed meanwhile
-    rows.delete(txId);
-    dropped = true;
-    const key = keyOf(sent.tournamentId, sent.gameId);
-    pendingMoveGames.delete(key);
-    pendingMoveSentAt.delete(key);
-    if (my && row.senderAddress === my) lastError = T.PENDING_MOVE_EXPIRED_MESSAGE;
-    deps.appendEngineLog?.(`Chess move ${txId} not seen on chain after ${T.PENDING_MOVE_TIMEOUT_MS / 1000} s; dropped`);
+/** The REST API's view of one of our arena transactions (8 s at most): see
+ *  T.transactionLookupFromRest. */
+async function lookUpArenaTransaction(txId) {
+  const base = String(getEndpoint("kaspaApi") || "").trim().replace(/\/+$/, "");
+  if (!base || typeof fetch !== "function") return { status: "unanswered" };
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = setTimeout(() => controller?.abort(), 8_000);
+  try {
+    const response = await fetch(`${base}/transactions/${encodeURIComponent(txId)}?inputs=false&outputs=false&resolve_previous_outpoints=no`, { headers: { Accept: "application/json" }, cache: "no-store", signal: controller?.signal });
+    const json = response.status === 200 ? await response.json().catch(() => null) : null;
+    return T.transactionLookupFromRest(response.status, json);
+  } catch {
+    return { status: "unanswered" };
+  } finally {
+    clearTimeout(timer);
   }
-  if (!dropped) return false;
+}
+async function isInMempool(txId) {
+  try { return (await deps.engine?.getMempoolEntry?.(txId)) != null; } catch { return false; }
+}
+
+/**
+ * Our own arena rows the network never took (T.UNCONFIRMED_ROW_MS) stop counting on this device:
+ * the row goes and the board is the chain's again - a dropped move is the player's to play again,
+ * and a timeout claim the board was waiting on goes out after all (iOS 4922804
+ * dropUnconfirmedRowsIfDue / checkUnconfirmedServiceRows). Only once the arena's history is in,
+ * so a row the chain showed while the app was closed is found there first. One at a time; a row
+ * the chain shows later comes back with its block time and counts again (mergeRows).
+ */
+async function dropUnconfirmedRowsIfDue() {
+  if (!historyReady || checkingSentRows || !sentRows.size) return;
+  const started = Date.now();
+  const due = T.unconfirmedRowsDue(sentRows, sentRowNextCheck, started);
+  if (!due.length) return;
+  checkingSentRows = true;
+  const dropped = [];
+  let changed = false;
+  try {
+    for (const txId of due) {
+      const sentAt = sentRows.get(txId);
+      const lookup = await lookUpArenaTransaction(txId);
+      // The chain showed it while the look-up ran.
+      if (!sentRows.has(txId)) continue;
+      const inMempool = lookup.status === "notAccepted" ? await isInMempool(txId) : false;
+      if (!sentRows.has(txId)) continue;
+      const verdict = T.unconfirmedRowVerdict({ lookup, inMempool, sentAt, now: started });
+      if (verdict === "later") { sentRowNextCheck.set(txId, Date.now() + T.UNCONFIRMED_RECHECK_MS); continue; }
+      confirmSentRow(txId);
+      const row = rows.get(txId);
+      if (!row?.local) continue; // the chain's copy landed meanwhile
+      if (verdict === "confirm") {
+        // Accepted: it carries the block's time now, like a row the scan or the indexer returned.
+        rows.set(txId, { ...row, blockTime: lookup.blockTime || row.blockTime, local: false, verified: true });
+        changed = true;
+        continue;
+      }
+      dropped.push(row);
+      deps.appendEngineLog?.(`Chess arena tx ${txId} never reached the chain: dropped`);
+    }
+  } finally {
+    checkingSentRows = false;
+  }
+  if (!changed && !dropped.length) return;
+  const my = me();
+  // A move the board had applied, or anything else (a join, a claim) - said before the rows go.
+  const appliedMoves = new Set(Object.values(tournaments).flatMap((t) => Object.values(t.games).flatMap((g) => g.moves.map((m) => m.txId))));
+  let mineDropped = null;
+  for (const row of dropped) {
+    rows.delete(row.txId);
+    const message = T.decodeMessage(row.content);
+    if (message?.a === "move" && message.t != null && message.g != null) {
+      pendingMoveGames.delete(keyOf(message.t, message.g));
+      pendingMoveSentAt.delete(keyOf(message.t, message.g));
+    }
+    // This device's rows are device-wide: only the account on now hears about its own.
+    if (my && row.senderAddress === my && mineDropped !== "move") mineDropped = appliedMoves.has(row.txId) ? "move" : "other";
+  }
+  if (mineDropped) lastError = mineDropped === "move" ? T.MOVE_DROPPED_MESSAGE : T.ROW_DROPPED_MESSAGE;
   saveCache();
   reduceArena();
-  return true;
 }
 
 /** Resign asks on a sheet that says what resigning means (iOS 30d0cca); behind the back button
@@ -743,17 +819,26 @@ function canClaimWin(game) {
   const my = me();
   return Boolean(game && my && !game.winner && T.decidedWinner(game, now) === my);
 }
-/** The board's Claim win - the way off the board for its winner that is not Resign. */
+/** The board's Claim win - the way off the board for its winner that is not Resign. Repeated taps
+ *  are one claim: nothing while one is being sent or within T.CLAIM_TAP_GAP_MS of the last
+ *  (iOS 4922804). */
 function claimWin(t, game) {
   if (!canClaimWin(game)) return;
+  if (!T.claimTapAllowed(claimedGames.get(keyOf(t.id, game.id)), Date.now())) return;
   postClaim(t, game, { force: true });
 }
 function postClaim(t, game, { force = false } = {}) {
   const key = keyOf(t.id, game.id);
-  if (claimsInFlight.has(key) || !T.claimMayPost(claimedGames.get(key), now, force)) return;
-  claimedGames.set(key, now);
+  const at = Date.now();
+  if (claimsInFlight.has(key) || !T.claimMayPost(claimedGames.get(key), at, force)) return;
+  claimedGames.set(key, at);
   claimsInFlight.add(key);
-  send(T.messages.claim(t.id, game.id)).catch(() => {}).finally(() => claimsInFlight.delete(key));
+  // The board's button reads "Claiming…" while it goes out.
+  if (active && view.name === "game") render();
+  send(T.messages.claim(t.id, game.id)).catch(() => {}).finally(() => {
+    claimsInFlight.delete(key);
+    if (active && view.name === "game") render();
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1130,9 +1215,11 @@ function renderLeaderboardPage() {
 // --- Waiting room (iOS 64aca7c) ---
 
 /** The room has filled and the match-found countdown is still running: everyone sees it for
- *  the same ten seconds of chain time, then every device opens the board together. */
+ *  the same ten seconds of chain time, then every device opens the board together. Only for a
+ *  room this player is in: one that filled without them is no match (iOS 4922804). */
 function matchFound(t) {
-  return Boolean(t) && T.tournamentStatus(t) === "live" && now < (t.startedAt || 0) + T.MATCH_FOUND_DELAY_MS;
+  const my = me();
+  return Boolean(t && my) && T.tournamentStatus(t) === "live" && t.players.includes(my) && now < (t.startedAt || 0) + T.MATCH_FOUND_DELAY_MS;
 }
 function matchFoundSecondsLeft(t) {
   return Math.max(0, Math.ceil(((t.startedAt || 0) + T.MATCH_FOUND_DELAY_MS - now) / 1000));
@@ -1371,7 +1458,8 @@ function renderGame() {
   const my = me();
   const myColor = my ? T.colorOf(game, my) : null;
   const pendingKey = keyOf(t.id, game.id);
-  const isMyTurn = Boolean(myColor) && !game.winner && game.board.sideToMove === myColor && !pendingMoveGames.has(pendingKey);
+  // Not once the clock has decided the game: a move after the flag is void on chain (iOS 4922804).
+  const isMyTurn = Boolean(myColor) && !T.isDecided(game, now) && game.board.sideToMove === myColor && !pendingMoveGames.has(pendingKey);
   const flipped = myColor === Chess.BLACK;
   const locked = Boolean(myColor) && !T.isDecided(game, now);
   const claimable = canClaimWin(game);
@@ -1430,7 +1518,9 @@ function renderGame() {
       back: true,
       // Won on time with the claim not on chain yet: Claim win, past the 30 s throttle (iOS 8d5f925).
       trailing: locked ? `<button class="chess-t-resign" type="button" data-chess-t-resign>Resign</button>`
-        : claimable ? `<button class="chess-t-resign" style="color: var(--accent)" type="button" data-chess-t-claim>Claim win</button>` : "",
+        : claimable ? (claimsInFlight.has(pendingKey)
+          ? `<button class="chess-t-resign" style="color: var(--accent)" type="button" data-chess-t-claim disabled>Claiming…</button>`
+          : `<button class="chess-t-resign" style="color: var(--accent)" type="button" data-chess-t-claim>Claim win</button>`) : "",
     })}
     <div class="chess-t-body chess-t-game">
       <div class="chess-t-game-head">
@@ -1657,7 +1747,7 @@ function autoOpenMyGameIfNeeded() {
   const my = me();
   if (!t || !my) return;
   // A room that just filled shows the countdown first, on every device together (players only).
-  if (matchFound(t)) { if (t.players.includes(my) && view.name !== "waiting") openWaitingRoom(t.id); return; }
+  if (matchFound(t)) { if (view.name !== "waiting") openWaitingRoom(t.id); return; }
   const game = T.currentGameFor(t, my);
   if (!game || game.winner || autoOpenedGameId === game.id) return;
   // Already on this board (opened by hand): nothing to do, and re-opening would drop the
@@ -1686,7 +1776,7 @@ function tapSquare(file, rank) {
   if (!t || !game) return;
   const my = me();
   const myColor = T.colorOf(game, my);
-  const isMyTurn = Boolean(myColor) && !game.winner && game.board.sideToMove === myColor && !pendingMoveGames.has(keyOf(t.id, game.id));
+  const isMyTurn = Boolean(myColor) && !T.isDecided(game, Date.now()) && game.board.sideToMove === myColor && !pendingMoveGames.has(keyOf(t.id, game.id));
   if (!isMyTurn) return;
   const square = { file, rank };
   const piece = Chess.pieceAt(game.board, square);
@@ -1873,9 +1963,8 @@ export function showChessTournaments() {
   if (!deps || active) { if (active) render(); return; }
   active = true;
   now = Date.now();
-  // Our moves still unseen were not looked for while Chess was off (no poll, no scan): they are
-  // timed from now, so the indexer gets its chance before the first tick drops them.
-  for (const sent of sentMoves.values()) sent.sentAt = Math.max(sent.sentAt, now);
+  // Our rows still unseen are looked up on the chain once the history is in (iOS 4922804): a row
+  // that landed while Chess was off is found there, never dropped blind.
   historyReady = !hasBroadcastIndexer();
   historyDeadline = Date.now() + HISTORY_WAIT_MS;
   render();
@@ -1891,6 +1980,7 @@ export function showChessTournaments() {
     now = Date.now();
     if (!historyReady && Date.now() > historyDeadline) { historyReady = true; render(); }
     expirePendingMoves();
+    dropUnconfirmedRowsIfDue().catch(() => {});
     claimTimeoutsIfDue();
     checkMonthRollover();
     if (document.hidden || !screenEl) return;
@@ -1938,7 +2028,7 @@ export async function chessTournamentsMayLeave({ challenge = null } = {}) {
 function holdBotChallengeIfBusy(link) {
   if (!deps || !link) return false;
   now = Date.now();
-  if (!myActiveTournament()) return false;
+  if (!isBusyOnline()) return false;
   heldBotChallenge = link;
   if (view.name === "games") { view = { ...view, name: "home", tournamentId: null, gameId: null }; render(); }
   return true;
@@ -1946,8 +2036,17 @@ function holdBotChallengeIfBusy(link) {
 function takeHeldBotChallengeIfReady() {
   if (!heldBotChallenge) return;
   if (view.name === "games") { view = { ...view, name: "home", tournamentId: null, gameId: null }; render(); }
-  if (view.name !== "home" || myActiveTournament()) return;
+  if (view.name !== "home" || isBusyOnline()) return;
   openChessBotChallenge(heldBotChallenge);
+}
+/** Too busy online for a challenge link to open a bot screen (iOS 4922804 isBusyOnline): the
+ *  rooms are still loading (a game in play may not be known yet), the player is seated or
+ *  playing, or a game of theirs was decided on the clock lately with the claim not on chain yet -
+ *  its winner is still on the board to claim it. */
+function isBusyOnline() {
+  if (!historyReady) return true;
+  if (myActiveTournament()) return true;
+  return T.hasRecentUnclaimedFlag(tournaments, me(), now);
 }
 
 /** A bot challenge link (KaPlay ddec987): the caller has the dock on KaPlay, and has asked

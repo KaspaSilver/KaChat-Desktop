@@ -388,6 +388,100 @@ test("a scheduled KaPost is never signed on a coin a send just spent", async () 
   clearJustSpentOutpoints();
 });
 
+// MARK: iOS d23e6f7a / KaPay 1652437 / KaPlay 4922804 - only a verdict cancels a lost answer, the
+// built-in REST server after a rejection, a swipe-time fee above the Review sends nothing
+const T2 = await import("../engine/transactions.js");
+const E2 = await import("../engine/endpoints.js");
+test("only a verdict is a rejection: already-known, orphan and spent answers are not", () => {
+  for (const message of ["transaction already in the mempool", "already accepted", "orphan transaction", "double spend", "double-spend in mempool",
+    "outpoint already spent", "missing outpoint", "rejected by the memory pool"]) {
+    assert.equal(T2.isVerdictRejection(new Error(message)), false, message);
+  }
+  for (const message of ["fee too low", "bad signature", "transaction mass exceeds maximum", "storage mass exceeds"]) {
+    assert.equal(T2.isVerdictRejection(new Error(message)), true, message);
+  }
+});
+test("a lost answer then an 'already' or spent answer from the next node stays Not confirmed", () => withNoRest(async () => {
+  for (const second of ["transaction already in the mempool", "outpoint already spent", "double spend"]) {
+    let calls = 0;
+    await assert.rejects(
+      submitConfirmingAcceptance({ withRpc: twoNodes, submit: async () => { calls += 1; throw new Error(calls === 1 ? "timed out" : second); }, txid: TXID, lostAnswerWaitMs: 1 }),
+      (error) => error.code === SEND_OUTCOME_UNKNOWN && error.txid === TXID,
+      second,
+    );
+  }
+}));
+test("after a rejection only the built-in REST server can call a send sent", async () => {
+  const saved = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (url) => { asked.push(String(url)); return new Response(JSON.stringify({ is_accepted: true }), { status: 200 }); };
+  try {
+    assert.equal(T2.restBaseForLookup(true), E2.ENDPOINT_DEFAULTS.kaspaApi, "the built-in server is asked");
+    E2.setEndpoint("kaspaApi", "https://rest.example.test/");
+    assert.equal(T2.restBaseForLookup(false), "https://rest.example.test");
+    assert.equal(T2.restBaseForLookup(true), "", "a server typed into Settings is not asked after a rejection");
+    await assert.rejects(
+      submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => { throw new Error("orphan"); }, txid: TXID, orphanWaitMs: 0, lostAnswerWaitMs: 1 }),
+      /orphan/, "a refused send stays refused whatever that server says",
+    );
+    assert.equal(asked.length, 0);
+    // a lost answer is not a rejection: the server in Settings may confirm it
+    const txid = await submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => { throw new Error("timed out"); }, txid: TXID, lostAnswerWaitMs: 1, recheckMs: 60_000 });
+    assert.equal(txid, TXID);
+    assert.ok(asked.every((url) => url.startsWith("https://rest.example.test/transactions/")));
+  } finally {
+    E2.resetEndpoints();
+    globalThis.fetch = saved;
+  }
+});
+test("a fee above the Review's by more than the margin is refused, with the new fee", () => {
+  assert.equal(T2.REVIEW_FEE_MARGIN_SOMPI, 1_000n);
+  assert.doesNotThrow(() => T2.checkFeeAgainstReview(10_000n, null), "no Review, no check");
+  assert.doesNotThrow(() => T2.checkFeeAgainstReview(11_000n, 10_000n), "within the margin");
+  assert.throws(() => T2.checkFeeAgainstReview(11_001n, 10_000n), (error) => error.code === T2.SEND_FEE_CHANGED && error.feeSompi === 11_001n
+    && error.message === "The network fee is now 0.00011001 KAS, more than the Review showed. Nothing was sent: check the new fee and swipe again.");
+});
+test("the fee estimate prices the recipient's own script: the fee shown is the fee paid", async () => {
+  const ecdsa = new kaspa.PrivateKey("5a".padEnd(62, "0") + "4e").toPublicKey().toAddressECDSA("mainnet").toString();
+  const coins = [coin(5n * KAS), coin(3n * KAS)];
+  const rpc = node(coins);
+  const bySource = await T2.estimateOnchainFeeDetail({ kaspa, rpc, sourceAddress: me, amountKas: "6" });
+  const byRecipient = await T2.estimateOnchainFeeDetail({ kaspa, rpc, sourceAddress: me, destinationAddress: ecdsa, amountKas: "6" });
+  assert.ok(byRecipient.feeSompi - bySource.feeSompi > T2.REVIEW_FEE_MARGIN_SOMPI, "a longer script is more than the margin");
+  // priced to the source, the swipe would refuse it; priced to the recipient it goes, paying exactly that
+  await assert.rejects(
+    sendKaspa({ kaspa, rpc, privateKey: key, sourceAddress: me, destinationAddress: ecdsa, amountKas: "6", expectedFeeSompi: bySource.feeSompi - T2.REVIEW_FEE_MARGIN_SOMPI }),
+    (error) => error.code === T2.SEND_FEE_CHANGED,
+  );
+  assert.equal(rpc.submitted.length, 0, "nothing signed or sent");
+  await sendKaspa({ kaspa, rpc, privateKey: key, sourceAddress: me, destinationAddress: ecdsa, amountKas: "6", expectedFeeSompi: byRecipient.feeSompi });
+  assert.equal(rpc.submitted.length, 1);
+  const tx = rpc.submitted[0];
+  const paid = coins.filter((c) => tx.inputs.some((i) => i.previousOutpoint.transactionId === c.outpoint.transactionId)).reduce((s, c) => s + c.amount, 0n)
+    - tx.outputs.reduce((s, o) => s + BigInt(o.value), 0n);
+  assert.equal(paid, byRecipient.feeSompi);
+  clearJustSpentOutpoints();
+  await assert.rejects(T2.estimateOnchainFeeDetail({ kaspa, rpc, sourceAddress: me, amountKas: "1", selectedOutpoints: ["ff:9"] }),
+    /no longer available/, "a coin pick that is gone is the send's own error, not an automatic estimate");
+});
+test("coins that changed since the Review: the send rebuilt at the swipe pays more and sends nothing", async () => {
+  clearJustSpentOutpoints();
+  const big = coin(5n * KAS);
+  const rpc = node([big]);
+  const review = await T2.estimateOnchainFeeDetail({ kaspa, rpc, sourceAddress: me, destinationAddress: them, amountKas: "4" });
+  // the big coin went (another send), two small ones came in: two inputs now
+  const small = [coin(3n * KAS), coin(2n * KAS)];
+  const later = node(small);
+  await assert.rejects(
+    sendKaspa({ kaspa, rpc: later, privateKey: key, sourceAddress: me, destinationAddress: them, amountKas: "4", expectedFeeSompi: review.feeSompi }),
+    (error) => error.code === T2.SEND_FEE_CHANGED && error.feeSompi > review.feeSompi,
+  );
+  assert.equal(later.submitted.length, 0);
+  await sendKaspa({ kaspa, rpc, privateKey: key, sourceAddress: me, destinationAddress: them, amountKas: "4", expectedFeeSompi: review.feeSompi });
+  assert.equal(rpc.submitted.length, 1, "the same coins as the Review: sent");
+  clearJustSpentOutpoints();
+});
+
 for (const [name, fn] of tests) {
   try { await fn(); pass++; }
   catch (error) { console.error(`FAIL ${name}\n  ${error?.message || error}`); process.exitCode = 1; }

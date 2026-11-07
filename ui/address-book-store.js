@@ -493,7 +493,9 @@ export function importAddressBookExport(input) {
   const skipped = named - valid.length;
   let added = 0;
   let updated = 0;
-  for (const { entry: incoming, photo } of valid) {
+  for (const { entry: dated, photo } of valid) {
+    // a file dated in the future would otherwise win over every later edit (iOS d23e6f7a)
+    const incoming = dated.updatedAt > config.now() ? { ...dated, updatedAt: config.now() } : dated;
     const address = incoming.address;
     const existing = c.entries.get(address);
     if (existing) {
@@ -571,16 +573,21 @@ function archiveTombstones(book) {
  * carry ISO strings or ms; the winners come back as they were given (their `photo` included).
  */
 export function mergeAddressBooks(entrySides = [], tombstoneSides = []) {
+  // Nothing dated in the future (iOS d23e6f7a, KaPay 1652437): newest wins, so a file dated 2099
+  // would win over every later edit for good. No side dates a change after the moment it's read.
+  const now = config.now();
   const latest = new Map();
   for (const side of entrySides) {
     for (const raw of Array.isArray(side) ? side : []) {
       if (!raw || typeof raw !== "object") continue;
       const address = normalizeAddressBookAddress(raw.address);
       if (!address) continue;
-      const at = parseTime(raw.updatedAt);
+      let at = parseTime(raw.updatedAt);
+      const future = at > now;
+      if (future) at = now;
       const have = latest.get(address);
       if (have && have.at >= at) continue;
-      latest.set(address, { at, entry: { ...raw, address } });
+      latest.set(address, { at, entry: future ? { ...raw, address, updatedAt: now } : { ...raw, address } });
     }
   }
   const deletedAt = new Map();
@@ -588,7 +595,7 @@ export function mergeAddressBooks(entrySides = [], tombstoneSides = []) {
     for (const raw of Array.isArray(side) ? side : []) {
       const address = normalizeAddressBookAddress(raw?.address);
       if (!address) continue;
-      const at = parseTime(raw?.deletedAt);
+      const at = Math.min(parseTime(raw?.deletedAt), now);
       deletedAt.set(address, Math.max(deletedAt.get(address) ?? -Infinity, at));
     }
   }

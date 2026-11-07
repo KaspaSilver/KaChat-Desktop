@@ -31,7 +31,7 @@ import { confirmDialog, promptDialog, PROMPT_EXTRA, alertDialog, chooseDialog, u
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 import { askKaPostTerms, kaPostTermsAccepted, roomHiddenSenders, roomMessageReportBody, sendContentReport } from "./kapost-moderation.js";
 import { SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
-import { settleLeftoverRoomRows } from "./leftover-sends.js";
+import { settleLeftoverRoomRows, markRoomRowUnconfirmed, settleRoomCopy, ROOM_UNCONFIRMED } from "./leftover-sends.js";
 import { accountGuard } from "./account-guard.js";
 
 // Public chain data caches are global but per network: a testnet room is not the mainnet room.
@@ -903,7 +903,13 @@ function mergeMessages(channel, rows) {
     return hit ? String(hit.senderAddress || "") : null;
   };
   for (const row of ordered) {
-    if (!row?.txId || seen.has(row.txId) || applied.has(row.txId)) continue;
+    if (!row?.txId) continue;
+    if (seen.has(row.txId)) {
+      // A send left "Not confirmed" whose copy came back did go out (iOS 33095ac).
+      if (settleRoomCopy(existing, row.txId, row.blockTime)) added += 1;
+      continue;
+    }
+    if (applied.has(row.txId)) continue;
     seen.add(row.txId);
     const blockTime = Number(row.blockTime) || Date.now();
     // Reactions ride the same wire as normal messages but never become message
@@ -933,7 +939,7 @@ function mergeMessages(channel, rows) {
     // rewrite then finds no pending row and is a no-op).
     if ((row.senderAddress || "") === deps.engine.address) {
       const pending = existing.find((m) =>
-        m.status === "pending"
+        (m.status === "pending" || (m.status === ROOM_UNCONFIRMED && String(m.txId).startsWith("pending-")))
         && m.senderAddress === deps.engine.address
         && m.content === (row.content ?? ""));
       if (pending) {
@@ -1137,9 +1143,11 @@ async function sendBroadcastText(channel, text, { showBubble = true, feeKas = nu
     return txid;
   } catch (error) {
     if (showBubble && error?.code === SEND_OUTCOME_UNKNOWN) {
-      // It may have landed, so no Retry, which would post and pay twice (iOS e5a9b11). It stays
-      // pending until its chain copy replaces it (mergeMessages), or the next run settles it -
-      // saved, so a reload still has it to settle.
+      // It may have landed, so no Retry, which would post and pay twice: "Not confirmed" with the
+      // transaction's id until its chain copy turns it sent (mergeMessages; iOS 33095ac
+      // markMessageUnconfirmed). Saved, so a reload still has it to settle.
+      pendingSendsThisRun.delete(pendingId);
+      messageCache[channel] = markRoomRowUnconfirmed(messageCache[channel], pendingId, error.txid);
       saveCache();
     } else if (showBubble) {
       messageCache[channel] = (messageCache[channel] || []).map((m) =>
@@ -1366,6 +1374,11 @@ function buildMessageElement(m) {
     badge.className = "broadcast-failed";
     badge.textContent = "failed";
     head.append(badge);
+  } else if (m.status === ROOM_UNCONFIRMED) {
+    const badge = document.createElement("span");
+    badge.className = "broadcast-pending";
+    badge.textContent = "not confirmed";
+    head.append(badge);
   }
   el.append(head);
 
@@ -1509,7 +1522,8 @@ function buildMessageElement(m) {
   time.textContent = messageTimeLineText(Number(m.blockTime) || Date.now());
   timeLine.append(time);
   if (mine && deps.createDeliveryStatusIcon) {
-    const status = m.status === "pending" ? "pending" : m.status === "failed" ? "failed" : "confirmed";
+    // "Not confirmed": the same label as a 1:1 send whose outcome is unknown, with no Retry (iOS 33095ac).
+    const status = m.status === "pending" ? "pending" : m.status === "failed" ? "failed" : m.status === ROOM_UNCONFIRMED ? ROOM_UNCONFIRMED : "confirmed";
     const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status }, { onRetry: () => retryBroadcastMessage(m) });
     if (icon) {
       icon.classList.add("broadcast-delivery-icon");
@@ -1700,7 +1714,7 @@ function renderBroadcastReplyBanner() {
 function openBroadcastMessageMenu(m, x, y) {
   if (!deps.openMsgContextMenu) return;
   const mine = m.senderAddress === deps.engine.address;
-  const pending = Boolean(m.status); // pending/failed rows have no on-chain txid yet
+  const pending = Boolean(m.status); // pending/failed/not confirmed rows aren't known on chain yet
   const myAddress = deps.engine.address || "";
   const perReactor = reactionsFor(activeChannel)[m.txId] || {};
   const myEntry = perReactor[myAddress];
