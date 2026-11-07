@@ -321,6 +321,56 @@ async function main() {
     r.eq(calls.filter((c) => c.method === "GET").length, 2, "rows/search refused: one GET per tx");
   }
 
+  // --- Our own post is remembered under the address that signed it, even when another account
+  // became active while it was on its way (an in-place account create / import).
+  {
+    const key = new kaspa.PrivateKey("5a".padEnd(62, "0") + "4d");
+    const coin = { address: ALICE, outpoint: { transactionId: fakeTxid(), index: 0 }, amount: 500_000_000n, scriptPublicKey: kaspa.payToAddressScript(ALICE), blockDaaScore: 10n, isCoinbase: false };
+    const verifier = new BroadcastSenderVerifier({ fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) }) });
+    const engine = { kaspa, privateKey: key, address: ALICE, log() {}, broadcastSenderVerifier: verifier, async connect() {} };
+    const rpc = {
+      async getUtxosByAddresses() { engine.address = MALLORY; return { entries: [coin] }; },
+      async submitTransaction({ transaction }) { return { transactionId: transaction.id }; },
+      async getMempoolEntry() { return { mempoolEntry: {} }; },
+    };
+    engine.rpc = rpc;
+    engine.withRpc = async (op) => op(rpc);
+    const { sendBroadcastMessage } = await import("../engine/broadcasts.js");
+    const txid = await sendBroadcastMessage({ engine, channel: "general", content: "mine" });
+    r.eq(verifier.verdictFor(txid)?.senderAddress, ALICE, "own post: remembered under the signing address, not the account active after");
+  }
+
+  // --- A room closed while the live scan was starting leaves no block stream behind: the node
+  // would otherwise send every block to an app watching no room.
+  for (const closeAt of ["connect", "subscribe"]) {
+    const engine = new KaspaEngine({ log: () => {} });
+    engine.kaspa = kaspa;
+    let subscribed = 0;
+    let listeners = 0;
+    let releaseConnect = () => {};
+    let releaseSubscribe = () => {};
+    const connectGate = new Promise((resolve) => { releaseConnect = resolve; });
+    const subscribeGate = new Promise((resolve) => { releaseSubscribe = resolve; });
+    const rpc = {
+      url: "wss://node.test",
+      addEventListener() { listeners += 1; },
+      removeEventListener() { listeners -= 1; },
+      async subscribeBlockAdded() { if (closeAt === "subscribe") await subscribeGate; subscribed += 1; },
+      async unsubscribeBlockAdded() { subscribed = Math.max(0, subscribed - 1); },
+    };
+    engine.connect = async () => { if (closeAt === "connect") await connectGate; return rpc; };
+    engine.setBroadcastScanChannels(["my-room"]);
+    await flush();
+    engine.setBroadcastScanChannels([]);
+    await flush();
+    releaseConnect();
+    releaseSubscribe();
+    for (let i = 0; i < 5; i += 1) await flush();
+    r.eq(subscribed, 0, `room closed during ${closeAt}: no block-added subscription left`);
+    r.eq(listeners, 0, `room closed during ${closeAt}: no listener left`);
+    r.eq(engine.broadcastScanSnapshot().active, false, `room closed during ${closeAt}: scan inactive`);
+  }
+
   for (const f of r.failures) console.log(`FAIL ${f}`);
   console.log(`broadcast sender: ${r.pass} checks passed, ${r.fail} failed`);
   process.exit(r.fail ? 1 : 0);

@@ -1588,16 +1588,19 @@ export class KachatNamesActions {
           cancelTxId: null, stage: Stage.committing, createdAt: now, updatedAt: now, lastError: null, salt: hex(salt),
           maxPrice: cap.toString(), feeTier: tier,
         };
-        this._upsert(record);
+        // Filed with the wallet that started the claim, even if another was switched to during
+        // the awaits above or the submit below (its salt is the only way to register or cancel).
+        this._upsertFor(walletAddress, record);
         const txId = await this.service.signAndSubmit(plan, { privateKey: s.privateKey, env });
         record = { ...record, commitTxId: txId, commitSentAt: nowMs(), stage: Stage.waiting, updatedAt: nowMs() };
-        this._upsert(record);
+        this._upsertFor(walletAddress, record);
       });
     } catch (error) {
       // The node may still have taken it: keep the record (and the salt) until the driver sees
       // the commit on chain or gives up on it.
       if (record) {
-        this._upsert({ ...(this._find(record.id) ?? record), lastError: errorMessage(error), updatedAt: nowMs() });
+        const latest = walletAddress === this._pendingWallet ? (this._find(record.id) ?? record) : record;
+        this._upsertFor(walletAddress, { ...latest, lastError: errorMessage(error), updatedAt: nowMs() });
         this._startDriver();
       }
       throw error;
@@ -2015,10 +2018,52 @@ export class KachatNamesActions {
   _find(id) { return this._pending.find((x) => x.id === id) ?? null; }
 
   _set(p, change) {
-    const q = { ...(this._find(p.id) ?? p) };
+    const current = this._find(p.id);
+    // Not in the loaded wallet's list: a step of another wallet's claim that was still running
+    // when the wallet switched (the driver, a cancel). Upserting it would file that claim - salt
+    // and all - in this wallet's list, where it then reads as this wallet's "Registered" name. Its
+    // own stored list takes the change instead; one found nowhere (dismissed) stays gone.
+    if (!current) { this._setStored(p.id, change); return; }
+    const q = { ...current };
     change(q);
     q.updatedAt = nowMs();
     this._upsert(q);
+  }
+
+  /** `_set` for a record of a wallet that isn't loaded now, in its stored list. */
+  _setStored(id, change) {
+    const all = this._readAll();
+    for (const [wallet, list] of Object.entries(all)) {
+      if (wallet === this._pendingWallet || !Array.isArray(list)) continue;
+      const i = list.findIndex((x) => x && x.id === id);
+      if (i < 0) continue;
+      const q = { ...list[i] };
+      change(q);
+      q.updatedAt = nowMs();
+      list[i] = q;
+      this._writeAll(all);
+      return;
+    }
+  }
+
+  /** `_upsert` for `wallet` (a lowercased address): the loaded list when it is that wallet's, else
+   *  straight into that wallet's stored list - a claim started before a wallet switch stays with
+   *  the wallet that started (and paid for) it. */
+  _upsertFor(wallet, p) {
+    if (!wallet || wallet === this._pendingWallet) { this._upsert(p); return; }
+    const all = this._readAll();
+    const list = Array.isArray(all[wallet]) ? all[wallet] : [];
+    const i = list.findIndex((x) => x && x.id === p.id);
+    if (i >= 0) list[i] = p;
+    else list.push(p);
+    all[wallet] = list;
+    this._writeAll(all);
+  }
+
+  _writeAll(all) {
+    try { this.storage.set(registrationsStorageKey, JSON.stringify(all)); } catch (e) {
+      this.engine?.log?.("[KachatNames] could not save the registrations:", errorMessage(e));
+    }
   }
 
   _readAll() {

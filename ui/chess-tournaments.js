@@ -78,6 +78,9 @@ const sentMoves = new Map();
  *  voided or that failed to send goes again after T.CLAIM_RETRY_MS while the game is still
  *  undecided on chain (iOS 8d5f925). */
 const claimedGames = new Map();
+/** Games whose claim is being sent right now: a second Claim win tap (or the tick) sends nothing
+ *  more until it is done. */
+const claimsInFlight = new Set();
 let queuedPublicRoomId = null;
 /** A bot challenge link that came while this player was seated or playing online: it waits
  *  until that is over and Chess's home is showing (iOS 8d5f925 ChessHomeView.takeChallenge). */
@@ -453,7 +456,9 @@ async function send(message) {
       saveCache();
       reduceArena();
       lastError = "";
-      return true;
+      // Sent, but another account came on meanwhile: nothing that follows a send (a waiting room
+      // to open, a queue, leaving the board) is for that one.
+      return me() === sender;
     } catch (error) {
       attempt += 1;
       // A switched account: nothing more goes out for the old one.
@@ -745,9 +750,10 @@ function claimWin(t, game) {
 }
 function postClaim(t, game, { force = false } = {}) {
   const key = keyOf(t.id, game.id);
-  if (!T.claimMayPost(claimedGames.get(key), now, force)) return;
+  if (claimsInFlight.has(key) || !T.claimMayPost(claimedGames.get(key), now, force)) return;
   claimedGames.set(key, now);
-  send(T.messages.claim(t.id, game.id)).catch(() => {});
+  claimsInFlight.add(key);
+  send(T.messages.claim(t.id, game.id)).catch(() => {}).finally(() => claimsInFlight.delete(key));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1867,6 +1873,9 @@ export function showChessTournaments() {
   if (!deps || active) { if (active) render(); return; }
   active = true;
   now = Date.now();
+  // Our moves still unseen were not looked for while Chess was off (no poll, no scan): they are
+  // timed from now, so the indexer gets its chance before the first tick drops them.
+  for (const sent of sentMoves.values()) sent.sentAt = Math.max(sent.sentAt, now);
   historyReady = !hasBroadcastIndexer();
   historyDeadline = Date.now() + HISTORY_WAIT_MS;
   render();

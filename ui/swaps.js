@@ -333,9 +333,10 @@ function renderSwapForm() {
 
 function renderResultCard(result) {
   const payin = String(result.payinAddress || "");
+  const deposit = result.fromCoin || fromCoin();
   return `<div class="profile-card swap-result-card">
-    ${kasIsSendSide ? `<button type="button" class="swap-result-link" data-swap-open-spending>${ICONS.arrowRightCircle}<span>Go to Spending Addresses</span>${ICONS.chevronRight}</button>` : ""}
-    <strong>Send ${esc(fromCoin().displayName)} to this address</strong>
+    ${deposit.ticker === "kas" ? `<button type="button" class="swap-result-link" data-swap-open-spending>${ICONS.arrowRightCircle}<span>Go to Spending Addresses</span>${ICONS.chevronRight}</button>` : ""}
+    <strong>Send ${esc(deposit.displayName)} to this address</strong>
     ${payin ? `<button type="button" class="swap-qr-button" data-swap-copy="${esc(payin)}" aria-label="Copy deposit address"><canvas class="swap-qr" data-swap-qr="${esc(payin)}" width="180" height="180"></canvas></button>` : ""}
     <button type="button" class="swap-mono-button" data-swap-copy="${esc(payin)}">${esc(payin)}</button>
     <small>Status: ${esc(result.status || "new")}</small>
@@ -465,6 +466,10 @@ async function executeSwap() {
   const from = fromCoin();
   const to = toCoin();
   const amountStr = amountText;
+  // The account the swap is for: a switch while it is being created must not pay out to, or file
+  // the swap under, the account switched to.
+  const historyKey = deps.accountScopedKey(HISTORY_KEY);
+  const sameAccount = () => deps.accountScopedKey(HISTORY_KEY) === historyKey;
   createState = { status: "creating", result: null, errorMessage: null };
   render();
   try {
@@ -476,6 +481,7 @@ async function executeSwap() {
         payoutAddress = deps.spendingAddressAt(toAddressOverrideIndex) || "";
       } else {
         const freshIndex = await deps.revealNextSwapAddress();
+        if (!sameAccount()) return;
         payoutAddress = freshIndex != null ? (deps.spendingAddressAt(freshIndex) || "") : "";
       }
     } else {
@@ -488,27 +494,30 @@ async function executeSwap() {
       return;
     }
     const response = await client.create(from, to, amountStr, payoutAddress);
+    if (!sameAccount()) {
+      // Created for the account that was open: it goes into that account's history, and the screen
+      // (already the other account's) is left alone.
+      if (response?.payinAddress) {
+        try {
+          const stored = JSON.parse(localStorage.getItem(historyKey) || "[]");
+          const list = Array.isArray(stored) ? stored : [];
+          list.unshift(swapRecord(response, from, to, amountStr, payoutAddress));
+          localStorage.setItem(historyKey, JSON.stringify(list));
+        } catch { /* storage full or blocked */ }
+      }
+      return;
+    }
     if (!response?.payinAddress) {
       createState = { status: "failed", result: null, errorMessage: "ChangeNOW didn't return a deposit address" };
       deps.showToast?.(createState.errorMessage);
       render();
       return;
     }
-    history.unshift({
-      id: String(response.id),
-      fromTicker: from.ticker, fromNetwork: from.network,
-      toTicker: to.ticker, toNetwork: to.network,
-      fromAmount: amountStr,
-      toAmount: response.toAmount != null ? String(response.toAmount) : "",
-      payinAddress: String(response.payinAddress),
-      payoutAddress,
-      status: response.status || "new",
-      createdAt: Date.now(),
-      kasSendTxId: null,
-      addedToPortfolio: false,
-    });
+    history.unshift(swapRecord(response, from, to, amountStr, payoutAddress));
     saveHistory();
-    createState = { status: "success", result: response, errorMessage: null };
+    // The coin to deposit is this swap's, kept with it: flipping the pair or picking another coin
+    // afterwards must not relabel the deposit address with a coin it can't take.
+    createState = { status: "success", result: { ...response, fromCoin: from }, errorMessage: null };
     amountText = "";
     receiveAmountText = "";
     editedSide = "send";
@@ -517,11 +526,28 @@ async function executeSwap() {
     refreshToAddress();
     deps.showToast?.("Swap started");
   } catch (error) {
+    if (!sameAccount()) return; // the other account's screen has nothing to do with it
     if (noteUnavailable(error)) { createState = { status: "idle", result: null, errorMessage: null }; return; }
     createState = { status: "failed", result: null, errorMessage: swapErrorText(error, "Swap failed") };
     deps.showToast?.(createState.errorMessage);
   }
   render();
+}
+
+function swapRecord(response, from, to, amountStr, payoutAddress) {
+  return {
+    id: String(response.id),
+    fromTicker: from.ticker, fromNetwork: from.network,
+    toTicker: to.ticker, toNetwork: to.network,
+    fromAmount: amountStr,
+    toAmount: response.toAmount != null ? String(response.toAmount) : "",
+    payinAddress: String(response.payinAddress),
+    payoutAddress,
+    status: response.status || "new",
+    createdAt: Date.now(),
+    kasSendTxId: null,
+    addedToPortfolio: false,
+  };
 }
 
 /** Fresh status from ChangeNOW (history updated either way); null when it could not be reached. */

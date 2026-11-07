@@ -8,6 +8,8 @@
 // sendGroupPayload, encryptGroupControl, decryptGroupControl, and the scanGroup*
 // methods (see engine/index.js).
 import * as G from "./group.js";
+import { SEND_OUTCOME_UNKNOWN } from "./transactions.js";
+import { SEND_ACCOUNT_CHANGED } from "./messages.js";
 
 const GROUPS_KEY = "kachat-groups-v1";
 // Per-wallet group deletion tombstones: { [wallet]: { deleted: [entry...], published: [entry...] } }.
@@ -797,14 +799,20 @@ export class GroupManager {
 
   // Encrypt + broadcast one member's gctl_root, retrying to ride out UTXO contention from a
   // just-sent sibling tx (the change output needs a moment to become spendable again).
+  // A send whose outcome is unknown may have landed, so it is never sent again (that would be a
+  // second transaction and fee for the same control), and a retry never goes out once another
+  // account is active (it would be signed and paid for by that account).
   async _sendControlToMember(member, json, { attempts = 4, delayMs = 1800 } = {}) {
+    const wallet = this.walletAddress;
     const encryptedHex = await this.engine.encryptGroupControl(member.address, json);
     const wire = G.buildControlPayload({ recipientXOnlyPubKey: member.xOnlyPubKeyHex, encryptedHex });
     let lastError = null;
     for (let i = 0; i < attempts; i += 1) {
+      if (this.walletAddress !== wallet) throw lastError || new Error(SEND_ACCOUNT_CHANGED);
       try { return await this.engine.sendGroupPayload(wire); }
       catch (error) {
         lastError = error;
+        if (error?.code === SEND_OUTCOME_UNKNOWN) throw error;
         if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }

@@ -9,7 +9,7 @@
 // produces, so signatures verify server-side against the embedded compressed pubkey.
 
 import { getEndpoint } from "./endpoints.js";
-import { enqueueSend, sendPayloadTransaction, sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance } from "./transactions.js";
+import { enqueueSend, sendPayloadTransaction, sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, excludeJustSpentUtxos } from "./transactions.js";
 import { utxoAmountSompi, checkedUtxoAnswer } from "./amounts.js";
 import { NETWORK_ID } from "./utils.js";
 
@@ -644,8 +644,10 @@ async function buildScheduledPostNow({ engine, text, mentionedPubkeys = [], rese
   // already reserved its coin.
   const reservedList = typeof reservedOutpoints === "function" ? reservedOutpoints() : reservedOutpoints;
   const reserved = new Set((reservedList || []).map(String));
-  // Node-supplied amounts are checked before any sort or sum (iOS IOS-020).
-  const usable = sanitizeUtxoEntries(entries)
+  // Node-supplied amounts are checked before any sort or sum (iOS IOS-020). Coins a send just
+  // spent are left out too: the node lists them until that spend is in a block, and a post signed
+  // on one would be refused as a double spend when its time comes (iOS 3942a5b7).
+  const usable = excludeJustSpentUtxos(sanitizeUtxoEntries(entries))
     .filter((e) => !reserved.has(`${e?.outpoint?.transactionId}:${e?.outpoint?.index}`))
     .filter((e) => Number(e.blockDaaScore ?? 1) > 0 && !e.isCoinbase)
     .sort((a, b) => (utxoAmountSompi(a) > utxoAmountSompi(b) ? 1 : -1));

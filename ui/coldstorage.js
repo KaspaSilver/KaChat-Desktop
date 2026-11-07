@@ -1476,6 +1476,10 @@ function scheduleSendPreview() {
     });
     if (send !== flow || !SEND_FORM_STEPS.has(flow.step)) return;
     if (sendAmountSompi() !== amountSompi) return; // superseded by newer input
+    // ...or by a fee change (a speed, a typed fee) while it was out: the build passes this
+    // preview's coins straight through, so a set picked for the old rate would show the old fee
+    // and could fail the build as "insufficient" at the new one.
+    if (sendFeeRateOverride() !== rate || flow.manualUtxoKeys) return;
     flow.preview = preview;
     // Only the review shows the fee; re-rendering another step would take a field's focus.
     if (flow.step === "review") renderSendFlow();

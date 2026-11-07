@@ -722,12 +722,15 @@ export async function sendBroadcastMessage({ engine, channel, content, feeKas = 
   }
   await engine.connect();
   const protocolString = `kchat:1:bcast:${name}:${text}`;
+  // The address that signs and pays: the post's sender, even if another account is active by the
+  // time the node answers.
+  const sender = engine.address;
   const sendResult = await sendPayloadTransaction({
     kaspa: engine.kaspa,
     rpc: engine.rpc,
     withRpc: engine.withRpc.bind(engine),
     privateKey: engine.privateKey,
-    sourceAddress: engine.address,
+    sourceAddress: sender,
     destinationAddress: engine.address, // self-send; the payload IS the message
     amountKas: "0.2",
     feeKas: String(feeKas || "0"),
@@ -739,7 +742,7 @@ export async function sendBroadcastMessage({ engine, channel, content, feeKas = 
   if (!txid) throw new Error("Broadcast transaction returned no txid.");
   // This engine signed it, so its sender is known: when the post comes back from the chain it
   // is accepted without a REST lookup (DSK-045).
-  try { engine.broadcastSenderVerifier?.rememberOwnBroadcast?.(txid, engine.address); } catch { /* verified the slow way */ }
+  try { engine.broadcastSenderVerifier?.rememberOwnBroadcast?.(txid, sender); } catch { /* verified the slow way */ }
   return txid;
 }
 

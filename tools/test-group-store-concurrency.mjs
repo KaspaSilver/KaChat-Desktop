@@ -311,6 +311,32 @@ test("admin rotation: the post-send selfInviteEpoch write does not roll back a c
   assert.deepEqual(stored.members.map((m) => m.address).sort(), [ADMIN.address, SELF.address].sort());
 });
 
+test("a control send whose outcome is unknown is not sent again; a retry stops at an account switch", async () => {
+  reset();
+  const mgr = new GroupManager(engine);
+  const member = { address: OTHER.address, xOnlyPubKeyHex: PUB.get(OTHER.address) };
+  const original = engine.sendGroupPayload;
+  let calls = 0;
+  try {
+    engine.sendGroupPayload = async () => { calls += 1; const e = new Error("may have gone through"); e.code = "SEND_OUTCOME_UNKNOWN"; throw e; };
+    await assert.rejects(mgr._sendControlToMember(member, "{}", { delayMs: 1 }), (e) => e.code === "SEND_OUTCOME_UNKNOWN");
+    assert.equal(calls, 1, "an unknown outcome is never resubmitted as a second transaction");
+
+    calls = 0;
+    engine.sendGroupPayload = async () => { calls += 1; throw new Error("no utxos yet"); };
+    await assert.rejects(mgr._sendControlToMember(member, "{}", { delayMs: 1 }), /no utxos/);
+    assert.equal(calls, 4, "a transient failure is still retried");
+
+    calls = 0;
+    engine.sendGroupPayload = async () => { calls += 1; engine.address = ADMIN.address; throw new Error("no utxos yet"); };
+    await assert.rejects(mgr._sendControlToMember(member, "{}", { delayMs: 1 }), /no utxos/);
+    assert.equal(calls, 1, "no retry goes out from the account active after a switch");
+  } finally {
+    engine.sendGroupPayload = original;
+    engine.address = SELF.address;
+  }
+});
+
 let passed = 0;
 for (const { name, fn } of tests) {
   try { await fn(); passed += 1; console.log(`ok ${passed} - ${name}`); }

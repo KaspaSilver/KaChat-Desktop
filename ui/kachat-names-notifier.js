@@ -219,11 +219,12 @@ export async function checkKachatNamesNews() {
     const quiet = old == null; // the first check only records where things stand
     const next = { names: {}, offersOnMine: new Set(), myOffers: {} };
     const stamp = Date.now();
+    // Collected, and recorded only at the end: the history lookups below await, and news of this
+    // wallet's names must not land in the bell of a wallet switched to meanwhile.
+    const news = [];
     const post = (id, name, title, body) => {
       if (quiet) return;
-      try {
-        deps.record({ id: `kachat-${id}`, source: "kachat", title, body, timestamp: stamp, targetKind: "kachat", targetId: name });
-      } catch { /* the bell's own problem */ }
+      news.push({ id: `kachat-${id}`, source: "kachat", title, body, timestamp: stamp, targetKind: "kachat", targetId: name });
     };
 
     // Your names: renewal open, expired (grace), past grace (no longer yours) - once per paid period.
@@ -309,6 +310,12 @@ export async function checkKachatNamesNews() {
       }
     }
 
+    // Switched away during the lookups: nothing recorded and the snapshot kept, so this wallet's
+    // next check (when it is active again) still finds and tells the news.
+    if (actions.myAddress !== wallet) return;
+    for (const entry of news) {
+      try { deps.record(entry); } catch { /* the bell's own problem */ }
+    }
     writeSnapshot(wallet, next);
   } catch (error) {
     try { deps?.log?.(`.kachat news check failed: ${error?.message || error}`); } catch { /* fine */ }

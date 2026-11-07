@@ -43,6 +43,9 @@ function appBase() {
 function isCacheable(request, url) {
   if (request.method !== "GET") return false;
   if (url.origin !== self.location.origin) return false;
+  // Asked for fresh on purpose (version.json?t=<now>, every 15 minutes and on every resume): each
+  // one is a new URL, so caching them filled the shell cache with copies nothing ever read.
+  if (request.cache === "no-store") return false;
   if (url.pathname.startsWith(`${appBase()}nc-proxy/`) || url.pathname.includes("/nc-proxy/")) return false;
   if (url.pathname === `${appBase()}sw.js`) return false;
   return true;

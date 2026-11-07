@@ -71,6 +71,15 @@ function ensureHost() {
   return host;
 }
 
+/// The dialog about to open takes the host. One still up is replaced by it: that one's caller is
+/// answered as cancelled rather than left awaiting forever (a flow holding a busy flag across its
+/// confirm stayed stuck once another dialog opened over it).
+function takeOver(resolve) {
+  const previous = settle;
+  settle = resolve;
+  previous?.(null);
+}
+
 function finish(result) {
   if (host) host.hidden = true;
   const resolve = settle;
@@ -145,7 +154,7 @@ function present(html, focusSelector, variantClass = "", { alert = false } = {})
 /// `cancelLabel`: the dismiss button's text, where iOS names it ("Keep waiting", "Keep it", "Stay").
 export function confirmDialog({ title, message = "", kicker = null, confirmLabel = "Confirm", cancelLabel = "Cancel", destructive = false } = {}) {
   return new Promise((resolve) => {
-    settle = (value) => resolve(value !== null);
+    takeOver((value) => resolve(value !== null));
     present(`
       ${headerHtml(kicker, title)}
       ${bodyHtml(message)}
@@ -162,7 +171,7 @@ export function confirmDialog({ title, message = "", kicker = null, confirmLabel
 export const PROMPT_EXTRA = Symbol("prompt-extra");
 export function promptDialog({ title, label = "", message = "", kicker = null, initial = "", confirmLabel = "Save", extraLabel = "", maxLength = 120 } = {}) {
   return new Promise((resolve) => {
-    settle = resolve;
+    takeOver(resolve);
     present(`
       ${headerHtml(kicker, title)}
       ${bodyHtml(message)}
@@ -184,7 +193,7 @@ export function promptDialog({ title, label = "", message = "", kicker = null, i
 /// message cannot carry, such as who reacted to a message.
 export function infoSheet({ title, html = "", kicker = null, confirmLabel = "Done" } = {}) {
   return new Promise((resolve) => {
-    settle = () => resolve(true);
+    takeOver(() => resolve(true));
     present(`
       ${headerHtml(kicker, title)}
       <div class="app-dialog-sheet-body">${html}</div>
@@ -197,7 +206,7 @@ export function infoSheet({ title, html = "", kicker = null, confirmLabel = "Don
 /// A message with one button: resolves once dismissed.
 export function alertDialog({ title, message = "", kicker = null, confirmLabel = "OK" } = {}) {
   return new Promise((resolve) => {
-    settle = () => resolve(true);
+    takeOver(() => resolve(true));
     present(`
       ${headerHtml(kicker, title)}
       ${bodyHtml(message)}
@@ -238,7 +247,7 @@ export const ACTION_TILE_ICONS = {
 export function chooseDialog({ title, message = "", messageHtml = "", kicker = null, options = [], layout = "rows", footer = "" } = {}) {
   const tiles = layout === "tiles";
   return new Promise((resolve) => {
-    settle = resolve;
+    takeOver(resolve);
     const list = (options || []).filter(Boolean);
     present(`
       ${headerHtml(kicker, title)}

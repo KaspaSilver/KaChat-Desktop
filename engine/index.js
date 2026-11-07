@@ -325,6 +325,8 @@ export class KaspaEngine {
         this.setBroadcastScanState({ status: "error", lastError: error?.message || String(error) });
         return null;
       }
+      // Every room closed while the node was being reached: nothing to start.
+      if (this.blockScanChannels.size === 0) return null;
       if (typeof rpc?.subscribeBlockAdded !== "function" || typeof rpc?.addEventListener !== "function") {
         this.setBroadcastScanState({
           status: "unsupported",
@@ -360,6 +362,15 @@ export class KaspaEngine {
         this.blockScanHandler = handler;
         this.blockScanReconnectHandler = reconnectHandler;
         await rpc.subscribeBlockAdded();
+        // Every room closed while the subscription was on its way: the stop that ran meanwhile may
+        // have found nothing to undo yet, or unsubscribed before this subscribe landed. Undone
+        // here, or the node would stream every block to an app watching no room.
+        if (this.blockScanChannels.size === 0) {
+          const stillAttached = this.blockScanRpc === rpc;
+          await this.detachBroadcastBlockScan();
+          if (!stillAttached) { try { await rpc.unsubscribeBlockAdded(); } catch { /* node already gone */ } }
+          return null;
+        }
         this.setBroadcastScanState({ status: "scanning", endpoint: rpc.url || "", lastError: "" });
         this.log(`Live broadcast scan on for ${this.blockScanChannels.size} room(s) via ${rpc.url || "the connected node"}`);
         return rpc;
@@ -2083,7 +2094,10 @@ export class KaspaEngine {
     return clearPendingKnsCommit();
   }
 
+  // Registering a domain and editing its profile pay KAS like any send, so they are confirmed
+  // first too (owner, 2026-10-23: every transaction); transferKnsDomain already was.
   async inscribeKnsDomain(label, { onStatus = () => {} } = {}) {
+    await this.confirmSpend({ confirm: { title: "Confirm Registration", message: `Confirm registering ${String(label || "").trim().toLowerCase()}.kas. Registration pays the domain's price and network fees.` } });
     this.requireWallet();
     await this.connect();
     return knsInscribeDomain({ engine: this, label, onStatus, log: this.log });
@@ -2139,13 +2153,25 @@ export class KaspaEngine {
     return knsResumeTransfer({ engine: this, assetId, signer, onStatus, log: this.log });
   }
 
-  async submitKnsProfileField(assetId, key, value, { onStatus = () => {} } = {}) {
+  /** One confirmation for a batch of profile writes (each field is its own commit/reveal pair,
+   *  about 3 KAS), so a multi-field save asks once; the writes then pass `confirmed: true`. */
+  async confirmKnsProfileUpdate(fieldCount = 1) {
+    const count = Math.max(1, Number(fieldCount) || 1);
+    await this.confirmSpend({ confirm: {
+      title: "Confirm Profile Update",
+      message: `Confirm updating ${count === 1 ? "1 profile field" : `${count} profile fields`} on this domain. Each field costs about 3 KAS plus network fees.`,
+    } });
+  }
+
+  async submitKnsProfileField(assetId, key, value, { onStatus = () => {}, confirmed = false } = {}) {
+    if (!confirmed) await this.confirmKnsProfileUpdate(1);
     this.requireWallet();
     await this.connect();
     return knsSubmitProfileField({ engine: this, assetId, key, value, onStatus, log: this.log });
   }
 
-  async submitKnsProfileFields(assetId, fields, { onStatus = () => {} } = {}) {
+  async submitKnsProfileFields(assetId, fields, { onStatus = () => {}, confirmed = false } = {}) {
+    if (!confirmed) await this.confirmKnsProfileUpdate(Object.keys(fields || {}).length);
     this.requireWallet();
     await this.connect();
     return knsSubmitProfileFields({ engine: this, assetId, fields, onStatus, log: this.log });

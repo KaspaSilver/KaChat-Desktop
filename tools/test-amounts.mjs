@@ -370,6 +370,23 @@ test("the app's Max coin check uses the send's rules: largest 80, just-spent lef
   assert.deepEqual(maxSendOutpointKeys([]), []);
   clearJustSpentOutpoints();
 });
+test("a scheduled KaPost is never signed on a coin a send just spent", async () => {
+  clearJustSpentOutpoints();
+  const { buildScheduledPost } = await import("../engine/kaposts.js");
+  const spent = coin(1n * KAS);   // the smallest coin, which the build would otherwise pick
+  const free = coin(5n * KAS);
+  const rpc = node([spent, free]);
+  const engine = {
+    kaspa, privateKey: key, privateKeyHex: key.toString(), address: me, log() {},
+    async connect() {}, async withRpc(op) { return op(rpc); },
+  };
+  const before = await buildScheduledPost({ engine, text: "later" });
+  assert.deepEqual(before.spentOutpoints, [`${spent.outpoint.transactionId}:0`], "no hold: the smallest coin that carries it");
+  noteSpentOutpoints([`${spent.outpoint.transactionId}:0`]);
+  const after = await buildScheduledPost({ engine, text: "later" });
+  assert.deepEqual(after.spentOutpoints, [`${free.outpoint.transactionId}:0`], "the just-spent coin is left out");
+  clearJustSpentOutpoints();
+});
 
 for (const [name, fn] of tests) {
   try { await fn(); pass++; }

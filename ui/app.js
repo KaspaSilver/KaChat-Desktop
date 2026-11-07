@@ -505,6 +505,9 @@ function loadHandshakeSyncState(walletAddress = "") {
     return {
       walletAddress: wallet || String(parsed?.walletAddress || ""),
       cursor: parserVersion >= 3 ? Number(parsed?.cursor || 0) : 0,
+      // The outgoing-handshake scan's own cursor (syncOutgoingHandshakeEvidence): it was saved but
+      // never read back, so every launch and account switch re-read every handshake from genesis.
+      outCursor: parserVersion >= 3 ? Number(parsed?.outCursor || 0) : 0,
       parserVersion: 3,
       processedTxids: parserVersion >= 3 && Array.isArray(parsed?.processedTxids) ? [...new Set(parsed.processedTxids.map(String))].slice(-HANDSHAKE_PROCESSED_TXIDS_MAX) : [],
       declinedTxids: parserVersion >= 3 && Array.isArray(parsed?.declinedTxids) ? [...new Set(parsed.declinedTxids.map(String))] : [],
@@ -1902,7 +1905,10 @@ function setPhotoPreviewZoom(zoom, originEvent = null) {
 }
 function openPhotoPreview(dataUrl, name = "") {
   if (!photoPreviewOverlay || !photoPreviewImage) return;
-  photoPreviewName = String(name || "").trim() || "photo.jpg";
+  // The name can come from the sender: Share saves the file under it only as a plain name with an
+  // image ending, so a "photo" can't land in Downloads as invoice.html (saveAudioEnvelope's rule).
+  const offered = String(name || "").trim();
+  photoPreviewName = /^[\w][\w .-]{0,79}\.(jpe?g|png|gif|webp|heic|heif|avif|bmp)$/i.test(offered) ? offered : "photo.jpg";
   photoPreviewImage.src = dataUrl;
   const title = photoPreviewOverlay.querySelector("[data-photo-preview-title]");
   if (title) title.textContent = String(name || "").trim() || "Photo";
@@ -3163,8 +3169,11 @@ async function decodeWaveform(src) {
     const bytes = await response.arrayBuffer();
     const Ctx = window.AudioContext || window.webkitAudioContext;
     const ctx = new Ctx();
-    const buffer = await ctx.decodeAudioData(bytes);
-    try { await ctx.close(); } catch {}
+    // Closed whether or not the audio decodes: a voice note this browser can't decode left its
+    // context running, one more on every render of the thread, until the browser refused new ones.
+    let buffer;
+    try { buffer = await ctx.decodeAudioData(bytes); }
+    finally { try { await ctx.close(); } catch {} }
     const data = buffer.getChannelData(0);
     const step = Math.max(1, Math.floor(data.length / VOICE_WAVEFORM_BARS));
     const samples = [];
@@ -4694,7 +4703,11 @@ function restorePersistedTestingWallet() {
 
   try {
     const wallet = engine.importPrivateKey(privateKeyHex);
-    persistTestingWallet();
+    // The key came out of storage and opened: a re-save that fails now (a full storage, a vault
+    // locked from another tab, IOS-016's filing check refusing) must not reach the catch below,
+    // which deletes the stored record and the pre-v2 key - possibly the only copy of an account.
+    try { persistTestingWallet(); }
+    catch (saveError) { appendEngineLog(`Restored account could not be saved again (stored copy left as it was): ${saveError.message}`); }
     markSessionActive();
     appendEngineLog(`Restored persistent testing wallet: ${wallet.address}`);
     // Already scoped and rendered from local storage before the SDK loaded (preScopeWalletData);
@@ -5339,6 +5352,9 @@ function normalizeConversation(conversationEntry) {
     archived: Boolean(conversationEntry?.archived),
     hiddenMessageKeys: Array.isArray(conversationEntry?.hiddenMessageKeys) ? [...new Set(conversationEntry.hiddenMessageKeys.map(String))] : [],
     reactionsByTxId: (conversationEntry?.reactionsByTxId && typeof conversationEntry.reactionsByTxId === "object") ? conversationEntry.reactionsByTxId : {},
+    // The composer draft is saved with the conversation (iOS setDraft keeps it across launches):
+    // dropped here, every reload threw away what was typed.
+    ...(typeof conversationEntry?.draft === "string" && conversationEntry.draft.trim() ? { draft: conversationEntry.draft } : {}),
     sync: {
       lastSyncAt: Number(conversationEntry?.sync?.lastSyncAt || 0),
       lastFound: Number(conversationEntry?.sync?.lastFound || 0),
@@ -6626,9 +6642,14 @@ async function connectAndRefresh({ quiet = false } = {}) {
     setService(networkIndicator, networkStatus, "busy", "Connected · fetching balance…");
     setArchitectureBadge(networkBadge, "busy", "Syncing");
     if (!quiet) setStatus("Fetching wallet balance…");
+    const account = accountGuard(() => engine.address);
     const balance = await engine.balance();
+    // Read for the account that was open when it started: after an in-place switch (create /
+    // import while signed in) or a log out it is not this account's balance to show or remember.
+    if (!account.still()) return;
     refreshSubscriptionAddresses({ restart: false });
     await engine.startWalletSubscription({ force: false });
+    if (!account.still()) return;
     currentBalanceKas = balance.totalKas ?? balance.kas ?? "--"; rememberLastBalance();
     updateWalletUi();
     updateServiceSummary();
@@ -6646,9 +6667,13 @@ async function connectAndRefresh({ quiet = false } = {}) {
 async function refreshBalanceOnly({ quiet = true } = {}) {
   if (!engine.address || balanceRefreshInFlight) return false;
   balanceRefreshInFlight = true;
+  const account = accountGuard(() => engine.address);
   try {
     await engine.connect();
     const balance = await engine.balance();
+    // Another account opened (or none) while this ran: its figure would show, and be remembered
+    // as the last balance, under the account now open.
+    if (!account.still()) return false;
     currentBalanceKas = balance.totalKas ?? balance.kas ?? "--"; rememberLastBalance();
     updateWalletUi();
     updateServiceSummary();
@@ -9294,7 +9319,7 @@ async function runAddressActivityCheck() {
     // (iOS ColdStorageDetailView listens to .ownAddressActivity and .ownAddressUtxoActivity).
     if (balanceMoved) { try { refreshColdStorageOnActivity(); } catch { /* not started */ } }
     if (balanceMoved) scheduleWalletRefresh();
-    if (increases.length) await attributeAndNotifyAddressActivity(increases);
+    if (increases.length) await attributeAndNotifyAddressActivity(increases, walletAtStart);
   } finally {
     addressActivityRunning = false;
   }
@@ -9326,15 +9351,21 @@ function pushShowsReceive() {
   try { return webPushStatus()?.state === "on" && document.visibilityState !== "visible"; } catch { return false; }
 }
 
-async function attributeAndNotifyAddressActivity(increases) {
+async function attributeAndNotifyAddressActivity(increases, wallet = engine.address) {
   const own = ownInputAddressSet();
   const handled = loadAddrActivityHandled();
   const handledSet = new Set(handled);
   const outputAddress = makeOutputAddressLookup();
+  // The floors, the handled list and the bell are scoped to the account open NOW: once another
+  // account (or none) is open, nothing more of this run is written or announced - it would land
+  // in that account's bell and replace its handled list with this one's. The floor each address
+  // saves before its receives are announced keeps them from being announced again.
+  const switched = () => engine.address !== wallet;
   for (const { address, delta, kind } of increases) {
     let attributed = false;
     let recentTxs = [];
     try { recentTxs = await fetchRecentFullTransactionsFor(address, 10); } catch {}
+    if (switched()) return;
     const isChatting = kind === "chatting";
     // Only receives newer than what an earlier catch-up already looked at (or than when the address
     // started being tracked); the chatting address counts plain transfers only (iOS 56b75c8).
@@ -9361,6 +9392,7 @@ async function attributeAndNotifyAddressActivity(increases) {
       // An input that can't be placed at all counts as someone else's - missing real funds is worse
       // than a rare stray ping (KaPay 42470af).
       const isSelfSend = (await spendsOwnFunds(tx, own, { outputAddress })) === true;
+      if (switched()) return;
       if (handledSet.has(txid)) continue;
       handledSet.add(txid);
       handled.push(txid);
@@ -12832,17 +12864,26 @@ async function setPrimaryDomain(domain) {
   settingPrimaryAssetId = assetId;
   setPrimaryError = "";
   renderDomainDetail(domain);
+  const owner = engine.address;
+  // The write takes a while: what is drawn again is the detail on screen NOW, in the same account
+  // - Back (or another domain) must not have this one pop up over the list.
+  const shownDetail = () => (engine.address === owner && domainDetailTarget && !document.querySelector("[data-domain-detail]")?.hidden ? domainDetailTarget : null);
   try {
     await engine.setKnsPrimaryDomain(assetId);
+    settingPrimaryAssetId = null;
+    if (engine.address !== owner) return;
     ownKnsPrimaryDomain = domain.fullName;
     showCopyToast(`Primary domain set to ${domain.fullName}.`);
-    settingPrimaryAssetId = null;
-    renderDomainDetail(domain);
+    const shown = shownDetail();
+    if (shown) renderDomainDetail(shown);
     await refreshOwnKnsProfileUntilResolved({ attempts: 3, delayMs: 3000 });
   } catch (error) {
     settingPrimaryAssetId = null;
-    setPrimaryError = error?.message || "Setting the primary domain failed.";
-    renderDomainDetail(domain);
+    const shown = shownDetail();
+    if (!shown) return;
+    // The error belongs under this domain's row only.
+    if (String(shown.inscriptionId || "").trim() === assetId) setPrimaryError = error?.message || "Setting the primary domain failed.";
+    renderDomainDetail(shown);
   }
 }
 
@@ -12960,7 +13001,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 270;
+const APP_BUILD = 271;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -14652,8 +14693,14 @@ function manageAddressTxDirection(tx, address) {
   return null;
 }
 
+// The newest load per list: one list shows every spending address's history in turn, and a slow
+// answer for the address left behind must not land under the one opened since.
+const manageTxLoadTokens = new WeakMap();
 async function loadManageAddressTransactions(address, listEl = manageAddressTransactionsList) {
   if (!listEl) return;
+  const token = (manageTxLoadTokens.get(listEl) || 0) + 1;
+  manageTxLoadTokens.set(listEl, token);
+  const current = () => manageTxLoadTokens.get(listEl) === token;
   if (!String(address || "").trim()) { // empty address would 404 as /addresses//…
     listEl.innerHTML = '<div class="manage-address-empty">No transactions yet.</div>';
     return;
@@ -14663,9 +14710,11 @@ async function loadManageAddressTransactions(address, listEl = manageAddressTran
     // The newest 200, as iOS reads every address's history (pageSize 200, maxTransactions 200).
     const url = `${getEndpoint("kaspaApi")}/addresses/${encodeURIComponent(address)}/full-transactions?limit=200&offset=0&resolve_previous_outpoints=light`;
     const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+    if (!current()) return;
     if (!response.ok) throw new Error(`Kaspa API returned ${response.status}`);
     // block rewards the chain never accepted paid nothing: not history (iOS d194a38)
     const fetched = await response.json();
+    if (!current()) return;
     const transactions = Array.isArray(fetched) ? fetched.filter(transactionBelongsInHistory) : fetched;
     if (!Array.isArray(transactions) || !transactions.length) {
       listEl.innerHTML = '<div class="manage-address-empty">No transactions yet.</div>';
@@ -14730,6 +14779,7 @@ async function loadManageAddressTransactions(address, listEl = manageAddressTran
       listEl.appendChild(row);
     }
   } catch {
+    if (!current()) return;
     // A failed fetch is not an empty history (iOS): say so, with a way to ask again.
     listEl.innerHTML = '<div class="manage-address-empty utxo-load-failed"><span>Could not load transactions.</span><button type="button" class="cold-inline-link" data-manage-tx-retry>Try Again</button></div>';
     listEl.querySelector("[data-manage-tx-retry]")?.addEventListener("click", () => loadManageAddressTransactions(address, listEl));
@@ -16656,6 +16706,10 @@ async function knsWizardSubmitDetails() {
   if (!toSubmit.length) { setKnsWizardStep("finished"); return; }
   try { engine.validateKnsProfileFields(Object.fromEntries(toSubmit)); }
   catch (error) { d.error = error.message; renderKnsWizard(); return; }
+  // One confirmation for every field, as every send asks first; cancelled, nothing is written.
+  try { await engine.confirmKnsProfileUpdate(toSubmit.length); }
+  catch (error) { if (error?.code !== "SEND_CANCELLED") { d.error = error?.message || "Could not confirm."; renderKnsWizard(); } return; }
+  if (knsWizard !== w) return;
   d.submitting = true;
   d.error = "";
   renderKnsWizard();
@@ -16664,7 +16718,7 @@ async function knsWizardSubmitDetails() {
     d.progress = `Inscribing ${KNS_WIZARD_FIELD_NAMES[key] || key}...`;
     renderKnsWizard();
     try {
-      await engine.submitKnsProfileField(w.assetId, key, value);
+      await engine.submitKnsProfileField(w.assetId, key, value, { confirmed: true });
       if (knsWizard !== w) return;
       d.statuses[key] = "done";
       w.wroteSomething = true;
@@ -16872,6 +16926,9 @@ document.querySelector("[data-kns-remove-banner]")?.addEventListener("click", ()
 // "Updating X (n/m)..." until the save finishes, then a red banner with Retry if anything failed.
 let knsSaveBannerEl = null;
 let failedKnsUpdates = {};
+// The domain and account those failed writes were for: Retry writes them there or nowhere, never
+// to whichever domain the editor (or a switched-to account) has open by then.
+let failedKnsUpdatesTarget = null;
 function showKnsSaveBanner(text) {
   if (!knsSaveBannerEl) {
     knsSaveBannerEl = document.createElement("div");
@@ -16900,11 +16957,24 @@ document.addEventListener("click", (event) => {
 async function runKnsProfileWrites(assetId, fields) {
   const keys = Object.keys(fields);
   const results = [];
+  // Failures kept from another domain or account are not this run's to retry.
+  const owner = engine.address || "";
+  if (failedKnsUpdatesTarget?.assetId !== assetId || failedKnsUpdatesTarget?.owner !== owner) failedKnsUpdates = {};
+  failedKnsUpdatesTarget = { assetId, owner };
+  // One confirmation for the whole save, as every send asks first. Cancelled: nothing written,
+  // and nothing marked failed (there is nothing to retry).
+  if (keys.length) {
+    try { await engine.confirmKnsProfileUpdate(keys.length); }
+    catch (error) {
+      if (error?.code === "SEND_CANCELLED") { hideKnsSaveBanner(); return Object.assign([], { cancelled: true }); }
+      throw error;
+    }
+  }
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[i];
     showKnsSaveBanner(`Updating ${KNS_FIELD_LABELS[key] || key} (${i + 1}/${keys.length})...`);
     try {
-      await engine.submitKnsProfileField(assetId, key, fields[key]);
+      await engine.submitKnsProfileField(assetId, key, fields[key], { confirmed: true });
       results.push({ key, ok: true });
       delete failedKnsUpdates[key];
     } catch (error) {
@@ -16917,8 +16987,18 @@ async function runKnsProfileWrites(assetId, fields) {
 
 async function retryFailedKnsUpdates() {
   const fields = { ...failedKnsUpdates };
-  if (!Object.keys(fields).length || !knsEditAssetId()) return;
-  const results = await runKnsProfileWrites(knsEditAssetId(), fields);
+  const target = failedKnsUpdatesTarget;
+  if (!Object.keys(fields).length || !target?.assetId) return;
+  if (target.owner !== (engine.address || "")) {
+    // Another account is open now: its key must not write the old account's profile anywhere.
+    failedKnsUpdates = {};
+    failedKnsUpdatesTarget = null;
+    hideKnsSaveBanner();
+    showCopyToast("Those profile updates were for another account, so they were not retried.");
+    return;
+  }
+  const results = await runKnsProfileWrites(target.assetId, fields);
+  if (results.cancelled) { showKnsFailedBanner(); return; } // the failures stay for the next Retry
   engine.clearKnsCache(engine.address);
   await refreshOwnKnsProfile();
   const failed = results.filter((r) => !r.ok);
@@ -16987,6 +17067,7 @@ document.querySelector("[data-kns-editor-save]")?.addEventListener("click", asyn
     const ordered = {};
     for (const key of KNS_PROFILE_FIELD_EDIT_ORDER) if (key in fields) ordered[key] = fields[key];
     const results = await runKnsProfileWrites(assetId, ordered);
+    if (results.cancelled) return; // nothing written; the editor keeps what was typed
     const okCount = results.filter((r) => r.ok).length;
     let primaryFailure = "";
     if (okCount > 0 && !hadPrimary) {
@@ -18791,6 +18872,7 @@ function openConversation(conversationId) {
   if (conversationId !== activeConversationId) {
     cancelReply();
     try { clearPendingPhoto(); } catch { /* composer section not evaluated yet */ }
+    closeComposerEmojiPopover();
   }
 
   // The detail pane may still hold a Settings/Profile scroll offset. Reset it
@@ -19940,7 +20022,9 @@ const KAPOSTS_NOTIFY_TOGGLES = [
 const KAPOSTS_COOLDOWN_ON_FOOTER = "Posts, comments, likes, reposts, votes, edits and deletes wait 5 seconds, with an Undo, before they go on chain.";
 const KAPOSTS_COOLDOWN_OFF_FOOTER = "Posts, comments, likes, reposts, votes, edits and deletes go on chain at once, with no Undo.";
 function openKaPostsSettings() {
-  document.querySelector("[data-kaposts-settings-modal]")?.remove();
+  // An earlier one closes with its own close(), so its Escape listener goes with it.
+  const earlier = document.querySelector("[data-kaposts-settings-modal]");
+  if (earlier) { if (typeof earlier.kapostsSettingsClose === "function") earlier.kapostsSettingsClose(); else earlier.remove(); }
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
   backdrop.setAttribute("data-kaposts-settings-modal", "");
@@ -20005,6 +20089,7 @@ function openKaPostsSettings() {
     if (!notifyPage.hidden) showPage(false); else close();
   };
   const close = () => { window.removeEventListener("keydown", onKey, true); backdrop.remove(); };
+  backdrop.kapostsSettingsClose = close;
   window.addEventListener("keydown", onKey, true);
   backdrop.addEventListener("click", (event) => {
     if (event.target === backdrop || event.target.closest("[data-kaposts-settings-close]")) { close(); return; }
@@ -20168,6 +20253,10 @@ async function sendInstantTip(address, name, amountKasNumber, tip = null, fiatTe
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
+    // Stored before the verification below (up to 14 s), as sendKasPayment does: a tab closed
+    // meanwhile otherwise leaves a txid-less bubble the next run marks Failed.
+    applyMessagePatch(liveMessage, { txid, network: NETWORK });
+    persistState();
     const verifiedTxid = await verifyKasPaymentBroadcast(submittedTxids, destinationAddress, amountKas);
     applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.CONFIRMED, txid: verifiedTxid || txid, confirmations: verifiedTxid ? 1 : 0, network: NETWORK, note: "Kaspa node accepted and broadcast the payment transaction." });
     await refreshBalanceOnly({ quiet: true }).catch(() => {});
@@ -20764,6 +20853,10 @@ async function sendTipNow(tipSompi) {
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
+    // Stored before the verification below (up to 14 s), as sendKasPayment does: a tab closed
+    // meanwhile otherwise leaves a txid-less bubble the next run marks Failed.
+    applyMessagePatch(liveMessage, { txid, network: NETWORK });
+    persistState();
     const verifiedTxid = await verifyKasPaymentBroadcast(submittedTxids, destinationAddress, amountKas);
     applyMessagePatch(liveMessage, {
       status: MESSAGE_STATUSES.CONFIRMED,
@@ -21903,10 +21996,14 @@ function closeChatsForAccountSwitch() {
   // belong to the old account's chat; Send must not carry them into the new account.
   step(() => clearPendingPhoto());
   step(() => exitChatAudioMode());
+  step(() => closeComposerEmojiPopover());
   // The old account's notification handlers point at its chats: a later tap goes by its route.
   step(() => pendingNotificationClicks.clear());
   step(() => { if (activeGroupId) closeGroupChat({ keepDraft: false }); });
   step(() => { if (chatSelectionModeActive) setChatSelectionMode(false); });
+  // An open board is the old account's game: a move or the clock's timeout-resign from it would
+  // go to the new account's chat of the same id.
+  step(() => closeChess());
 }
 
 function setChatSelectionMode(active) {
@@ -24480,6 +24577,12 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       throw error;
     }
     const txid = submittedTxids.at(-1) || submittedTxids[0];
+    // The node has it: the txid is stored now, not only after the verification below (up to 14 s).
+    // A tab closed meanwhile otherwise left a txid-less bubble the next run marks Failed as a
+    // leftover send (ui/leftover-sends.js) - a payment that went out, invited to be paid again.
+    // With its txid, refreshPendingPaymentStatuses settles it as sent.
+    applyMessagePatch(liveMessage, { txid, network: NETWORK });
+    persistState();
     try { onSubmitted?.(txid); } catch { /* the sheet's confirmation must not fail the payment */ }
     // From a spending address: right after the node accepted it, the chatting address names the
     // payment in the chat (iOS 927322b). The last txid is the one paying the contact (any earlier
@@ -25949,6 +26052,9 @@ function handleChatAudioSend() {
 async function sendChatVoicePreview() {
   const entry = voicePreviews.get(voiceRecordingPanel);
   if (!entry || !activeConversationId) return;
+  // The chat it was recorded in: a Nextcloud upload that fails falls back to the chain seconds
+  // later, by when another chat (or account) may be open - it must not go there.
+  const conversationId = activeConversationId;
   const { blob, mimeType } = entry;
   // On chain a note is capped at 31 KB (iOS maxAudioBytes); the recording stays to be discarded.
   const voiceTooLargeForChain = "This voice message is too large to send on chain. Please record a shorter one.";
@@ -25964,7 +26070,6 @@ async function sendChatVoicePreview() {
   const viaNextcloud = voiceViaNextcloud && isNextcloudConnected();
   voiceViaNextcloud = false;
   if (viaNextcloud) {
-    const conversationId = activeConversationId;
     setStatus("Uploading voice note to Nextcloud…");
     try {
       const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.${voiceFileName(mimeType).split(".").pop()}`, mimeType);
@@ -25993,7 +26098,7 @@ async function sendChatVoicePreview() {
     mimeType,
     content: dataUrl,
   });
-  queueConversationMessage(activeConversationId, envelope);
+  queueConversationMessage(conversationId, envelope);
 }
 
 voiceRecordingPanel?.addEventListener("click", (event) => {
@@ -32363,12 +32468,17 @@ function openGroupChat(groupId) {
   const mgr = getGroupManager();
   const g = mgr && mgr.getGroup(groupId);
   if (!g) return;
-  if (groupId !== activeGroupId) releaseTypingFocus();
+  // Re-opening the group already open (a photo control arriving in a sync, a notification tap, the
+  // header refresh after a Group Info action) repaints it but keeps what is being composed there.
+  const switching = groupId !== activeGroupId;
+  if (switching) releaseTypingFocus();
   // A group and a public room share the detail pane: opening the group closes the room.
   if (publicRoomOpen) { try { closeBroadcastRoom(); } catch { /* rooms not started */ } }
   markGroupOpened(groupId);
-  groupFeeOverrideKas = null;
-  hideGroupFeePill();
+  if (switching) {
+    groupFeeOverrideKas = null;
+    hideGroupFeePill();
+  }
   setGroupSendError(null);
   if (groupSelectionMode) { groupSelectionMode = false; selectedGroupMessageKeys.clear(); updateGroupSelectionUi(); }
   // Take over the detail pane: clear any open 1:1 and hide its empty state. Setting
@@ -32393,13 +32503,13 @@ function openGroupChat(groupId) {
   document.body.classList.add("conversation-open");
   // Fresh composer state per group open - except the text, which is the group's draft (iOS
   // 360e5d2): what was typed comes back when the group reopens.
-  try {
+  if (switching) try {
     if (groupVoiceRecorder || groupVoiceEncoding || groupVoiceStartToken) cancelGroupVoice(); // a recording belongs to its group
     cancelGroupReply(); groupDraftMentions.clear(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto();
     if (groupComposerInput) { groupComposerInput.value = readDraft(`group:${groupId}`); autoGrowGroupComposer(); }
   } catch { /* composer wiring not ready during boot */ }
   // As in a 1:1: no keyboard on open on a phone, only a tap on the field raises it.
-  if (!isTouchDevice()) window.setTimeout(() => groupComposerInput?.focus(), 0);
+  if (switching && !isTouchDevice()) window.setTimeout(() => groupComposerInput?.focus(), 0);
   renderGroupList();
 }
 // `keepDraft: false` (an account switch): the drafts store is the NEW account's by then, so the old
@@ -32762,7 +32872,10 @@ function messageMenuKind(rawText, bodyText) {
 function saveAudioEnvelope(audio) {
   const anchor = document.createElement("a");
   anchor.href = audio.content;
-  anchor.download = audio.name || voiceFileName(audio.mimeType);
+  // The name comes from the sender: kept only as a plain name with an audio ending, so a "voice
+  // note" can't land in Downloads as page.html or an app.
+  const name = String(audio.name || "");
+  anchor.download = /^[\w][\w .-]{0,79}\.(webm|ogg|oga|opus|m4a|mp4|aac|mp3|wav)$/i.test(name) ? name : voiceFileName(audio.mimeType);
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
@@ -34776,10 +34889,12 @@ async function retryGroupMessage(message) {
 
 // Optimistic group send: the bubble appears instantly (pending), then flips to a delivered
 // checkmark or a failed+retry state — so a slow/failed broadcast never leaves the feed blank.
-async function sendGroupWire(text, { feeKas = null, errorPrefix = "" } = {}) {
+// `groupId`: the group it was made in, for a send that only starts after an await (a voice note's
+// upload) - by then another group may be open. Defaults to the open group.
+async function sendGroupWire(text, { feeKas = null, errorPrefix = "", groupId = null } = {}) {
   const mgr = getGroupManager();
-  if (!mgr || !activeGroupId) return false;
-  const gid = activeGroupId;
+  const gid = groupId || activeGroupId;
+  if (!mgr || !gid || !mgr.getGroup(gid)) return false;
   setGroupSendError(null);
   const localId = nowId();
   appendGroupMessage(gid, {
@@ -34900,11 +35015,13 @@ groupComposerInput?.addEventListener("paste", async (event) => {
   event.preventDefault();
   if (!canAcceptGroupImageAttachment()) return;
   groupPhotoViaNextcloud = false;
+  const gid = activeGroupId;
   try {
     const attachment = await compressImageBlob(file);
     attachment.originalBlob = file;
     attachment.originalName = file.name || "photo.jpg";
-    if (canAcceptGroupImageAttachment()) setGroupPendingPhoto(attachment, file.name || "photo.jpg");
+    // Pasted in one group, compressed after the switch to another: it isn't staged there.
+    if (activeGroupId === gid && canAcceptGroupImageAttachment()) setGroupPendingPhoto(attachment, file.name || "photo.jpg");
   } catch {
     setGroupSendError("Couldn't load that photo. Please try a PNG, JPEG, or HEIF image.");
   }
@@ -35108,6 +35225,8 @@ async function handleGroupMediaFile(input) {
   const file = input?.files?.[0];
   if (input) { input.value = ""; input.accept = "image/*"; }
   if (!file || !activeGroupId) { groupPhotoViaNextcloud = false; return; }
+  // The group it was picked in: one opened while the file loads doesn't get it.
+  const gid = activeGroupId;
   if (String(file.type || "").startsWith("video/")) {
     const via = groupPhotoViaNextcloud && isNextcloudConnected();
     groupPhotoViaNextcloud = false;
@@ -35115,7 +35234,7 @@ async function handleGroupMediaFile(input) {
     // Waits in the composer, uploading, like a photo (iOS 7abc06e8).
     if (!canAcceptGroupImageAttachment()) return;
     const thumbnail = await videoThumbnailDataUrl(file);
-    if (!canAcceptGroupImageAttachment()) return;
+    if (activeGroupId !== gid || !canAcceptGroupImageAttachment()) return;
     const { filename, contentType } = nextcloudVideoUploadName(file);
     setGroupPendingPhoto({ dataUrl: thumbnail || VIDEO_PLACEHOLDER_THUMB, bytes: 0, isVideo: true }, filename);
     groupPhotoViaNextcloud = true; // what goes is the link (the fee estimate prices that)
@@ -35129,7 +35248,7 @@ async function handleGroupMediaFile(input) {
     attachment.originalBlob = file;
     attachment.originalName = file.name || "photo.jpg";
     const via = groupPhotoViaNextcloud;
-    if (!canAcceptGroupImageAttachment()) { groupPhotoViaNextcloud = false; return; }
+    if (activeGroupId !== gid || !canAcceptGroupImageAttachment()) { groupPhotoViaNextcloud = false; return; }
     setGroupPendingPhoto(attachment, file.name || "photo.jpg");
     groupPhotoViaNextcloud = via;
     setStatus(`Photo ready · ${(attachment.bytes / 1024).toFixed(1)} KB · press Send`);
@@ -35246,17 +35365,22 @@ async function finishGroupVoice(send) {
   renderGroupVoiceRow();
   if (!send || cancelledMeanwhile || !chunks.length || !activeGroupId || activeGroupId !== gid) { groupVoiceViaNextcloud = false; scheduleGroupFeeEstimate(); return; }
   const blob = new Blob(chunks, { type: groupVoiceMime || "audio/webm" });
-  await sendGroupVoiceBlob(blob, durationSec);
+  await sendGroupVoiceBlob(blob, durationSec, gid);
   scheduleGroupFeeEstimate();
 }
-async function sendGroupVoiceBlob(blob, durationSec) {
+// `groupId`: the group it was recorded in. The upload (or its fallback) takes seconds, and the
+// note still goes there - never to whichever group, or account, is open by then.
+async function sendGroupVoiceBlob(blob, durationSec, groupId = activeGroupId) {
+  const owner = engine.address || "";
+  const mime = groupVoiceMime;
+  const stillOwner = () => (engine.address || "") === owner;
   // "Record via Nextcloud" (chosen in the "+" sheet): the server carries it, the group gets the link.
   const viaNextcloud = groupVoiceViaNextcloud && isNextcloudConnected();
   groupVoiceViaNextcloud = false;
   if (viaNextcloud) {
     try {
-      const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.${voiceFileName(groupVoiceMime).split(".").pop()}`, groupVoiceMime || "audio/webm");
-      await sendGroupWire(url, { errorPrefix: "Failed to send voice message: " });
+      const url = await uploadNextcloudMedia(blob, `voice_${Date.now()}.${voiceFileName(mime).split(".").pop()}`, mime || "audio/webm");
+      if (stillOwner()) await sendGroupWire(url, { errorPrefix: "Failed to send voice message: ", groupId });
       return;
     } catch (error) {
       appendEngineLog(`Nextcloud voice upload failed, sending on-chain: ${userFacingError(error)}`);
@@ -35264,8 +35388,8 @@ async function sendGroupVoiceBlob(blob, durationSec) {
     }
   }
   const dataUrl = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || "")); r.readAsDataURL(blob); });
-  if (!dataUrl.startsWith("data:")) return;
-  await sendGroupWire(JSON.stringify({ type: "file", name: voiceFileName(groupVoiceMime), size: blob.size, mimeType: groupVoiceMime || "audio/webm", content: dataUrl, duration: durationSec }), { errorPrefix: "Failed to send voice message: " });
+  if (!dataUrl.startsWith("data:") || !stillOwner()) return;
+  await sendGroupWire(JSON.stringify({ type: "file", name: voiceFileName(mime), size: blob.size, mimeType: mime || "audio/webm", content: dataUrl, duration: durationSec }), { errorPrefix: "Failed to send voice message: ", groupId });
 }
 groupVoicePanel?.addEventListener("click", (event) => {
   if (event.target.closest("[data-group-voice-cancel]")) cancelGroupVoice();

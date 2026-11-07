@@ -32,6 +32,7 @@ import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } 
 import { askKaPostTerms, kaPostTermsAccepted, roomHiddenSenders, roomMessageReportBody, sendContentReport } from "./kapost-moderation.js";
 import { SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
 import { settleLeftoverRoomRows } from "./leftover-sends.js";
+import { accountGuard } from "./account-guard.js";
 
 // Public chain data caches are global but per network: a testnet room is not the mainnet room.
 const NET_SUFFIX = IS_TESTNET ? "-testnet" : "";
@@ -1074,8 +1075,22 @@ function stopPolling() {
 // ---------------------------------------------------------------------------
 
 let sendQueue = Promise.resolve();
+// A queued send whose account is no longer the active one (see enqueueBroadcastSend).
+const ROOM_SEND_ACCOUNT_CHANGED = "ROOM_SEND_ACCOUNT_CHANGED";
 function enqueueBroadcastSend(task) {
-  const run = sendQueue.then(task, task);
+  // The account that pressed Send, captured now. The task signs with whatever key deps.engine
+  // holds when its turn in the queue comes, so a message, reaction or edit still waiting behind
+  // another send when the account switched would go out as the NEW account: it is dropped.
+  const owner = accountGuard(() => deps?.engine?.address);
+  const guarded = () => {
+    if (!owner.still()) {
+      const error = new Error("The account changed before this could be sent.");
+      error.code = ROOM_SEND_ACCOUNT_CHANGED;
+      throw error;
+    }
+    return task();
+  };
+  const run = sendQueue.then(guarded, guarded);
   sendQueue = run.then(() => {}, () => {});
   return run;
 }
@@ -2466,7 +2481,10 @@ async function sendBroadcastReaction(targetTxId, emoji) {
   // One delivery status per message: yours is the only reaction here that has one (iOS
   // localReaction). A removal that fails is offered again the same way.
   const statusKey = targetTxId;
+  // Retry runs this again later, from the red mark: only for the account that reacted.
+  const owner = accountGuard(() => deps?.engine?.address);
   const attempt = async () => {
+    if (!owner.still()) return;
     if (statusKey) setBroadcastReactionStatus(statusKey, "pending");
     try {
       const txid = await enqueueBroadcastSend(() => sendBroadcastMessage({ engine: deps.engine, channel, content: payload }));
@@ -2480,6 +2498,11 @@ async function sendBroadcastReaction(targetTxId, emoji) {
       if (action === "remove") { broadcastReactionStatus.delete(statusKey); renderRoom(); }
       else setBroadcastReactionStatus(statusKey, "sent");
     } catch (error) {
+      if (error?.code === ROOM_SEND_ACCOUNT_CHANGED) {
+        // Never sent; the status marks are the previous account's (cleared with it).
+        deps.appendEngineLog?.("Broadcast reaction dropped: the account changed before it went out");
+        return;
+      }
       if (error?.code === SEND_OUTCOME_UNKNOWN) {
         // It may have landed: left as it is, with no red mark and no Retry that could send it
         // twice (iOS e5a9b11). Its chain copy, if it lands, is applied like any other.
@@ -2799,6 +2822,8 @@ export function resetBroadcastsForAccount() {
   appliedRowsByChannel.clear();
   // Leftover pending rows are checked again for this account (iOS e5a9b11 setCurrentWallet).
   settledPendingRooms.clear();
+  // Reaction marks and their Retry are the previous account's reactions.
+  broadcastReactionStatus.clear();
   activeChannel = null;
   loadState();
   syncScanWanted();

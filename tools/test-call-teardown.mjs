@@ -19,7 +19,9 @@ const element = () => new Proxy({
 globalThis.document = { createElement: () => element(), body: element() };
 const intervals = new Set();
 globalThis.window = {
-  setTimeout: (fn, ms) => setTimeout(fn, Math.min(ms, 5)),
+  // Short waits run at once; the ring / join / offer timeouts (10 s and up) keep their length, so
+  // a call can be driven to "connected" before it rings out.
+  setTimeout: (fn, ms) => setTimeout(fn, ms >= 10_000 ? ms : Math.min(ms, 5)),
   clearTimeout: (id) => clearTimeout(id),
   setInterval: (fn, ms) => { const id = setInterval(fn, ms); intervals.add(id); return id; },
   clearInterval: (id) => { intervals.delete(id); clearInterval(id); },
@@ -35,14 +37,28 @@ class FakeAudioContext {
 }
 window.AudioContext = FakeAudioContext;
 let peerConnections = 0;
-globalThis.RTCPeerConnection = class { constructor() { peerConnections += 1; } close() {} addTrack() {} };
+const pcs = [];
+globalThis.RTCPeerConnection = class {
+  constructor() { peerConnections += 1; pcs.push(this); this.connectionState = "new"; this.remoteDescription = null; }
+  close() { this.closed = true; }
+  addTrack() { if (this.closed) throw new Error("closed"); }
+  async createOffer() { return { type: "offer", sdp: "v=0" }; }
+  async setLocalDescription() {}
+};
 globalThis.MediaStream = class { getTracks() { return []; } addTrack() {} };
 const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
 let media = null;
 const stoppedTracks = [];
 const fakeStream = () => {
-  const track = { kind: "audio", enabled: true, stop() { stoppedTracks.push(this); } };
-  return { getTracks: () => [track], getAudioTracks: () => [track], getVideoTracks: () => [] };
+  const tracks = [{ kind: "audio", enabled: true, stop() { stoppedTracks.push(this); } }];
+  return {
+    getTracks: () => [...tracks], getAudioTracks: () => tracks.filter((t) => t.kind === "audio"),
+    getVideoTracks: () => tracks.filter((t) => t.kind === "video"), addTrack: (t) => { tracks.push(t); },
+  };
+};
+const fakeCamera = () => {
+  const track = { kind: "video", enabled: true, stop() { stoppedTracks.push(this); } };
+  return { getTracks: () => [track], getVideoTracks: () => [track], getAudioTracks: () => [] };
 };
 Object.defineProperty(globalThis, "navigator", {
   value: { mediaDevices: { getUserMedia: () => media.promise } },
@@ -53,22 +69,24 @@ const { NextcloudTalkClient } = await import("../ui/talk.js");
 const Calls = await import("../ui/calls.js");
 
 // --- Talk stub ----------------------------------------------------------------------------------
-const talk = { deleted: [], left: 0, joinedCalls: 0 };
+const talk = { deleted: [], left: 0, joinedCalls: 0, events: [], signals: [] };
 Object.assign(NextcloudTalkClient.prototype, {
   async createPublicConversation() { return "room1"; },
   async signalingSettings() { return { mode: "internal", iceServers: [] }; },
-  async joinConversation() { return "s-me"; },
+  async joinConversation() { talk.current = this; return "s-me"; },
   async setGuestDisplayName() {},
   async joinCall() { talk.joinedCalls += 1; },
   async leaveCall() {},
   async leaveConversation() { talk.left += 1; },
   async deleteConversation(token) { talk.deleted.push(token); },
-  async pullSignaling() { await new Promise((r) => setTimeout(r, 50)); return []; },
+  // Events go to the live call's client only (an ended call's loop may still be mid-poll).
+  async pullSignaling() { await new Promise((r) => setTimeout(r, talk.events.length ? 1 : 20)); return talk.current === this ? talk.events.splice(0) : []; },
   cancelPull() {},
-  async sendSignaling() {},
+  async sendSignaling(token, sessionId, messages) { for (const m of messages) talk.signals.push(m.type); },
 });
 
 const sent = [];
+const toasts = [];
 let sendGate = null;
 Calls.initCalls({
   accountScopedKey: (key) => key,
@@ -77,8 +95,8 @@ Calls.initCalls({
   talkCallsAvailable: async () => true,
   displayNameFor: () => "Peer",
   ownDisplayName: () => "Me",
-  showToast: () => {},
-  appendEngineLog: () => {},
+  showToast: (text) => { toasts.push(String(text)); },
+  appendEngineLog: (text) => { toasts.push(String(text)); },
   sendEnvelope: async (address, text) => { sent.push(JSON.parse(text)); if (sendGate) await sendGate.promise; },
 });
 
@@ -88,7 +106,7 @@ const settle = () => new Promise((r) => setTimeout(r, 30));
 async function reset() {
   await settle();
   sent.length = 0; stoppedTracks.length = 0; talk.deleted.length = 0;
-  talk.left = 0; talk.joinedCalls = 0; audioContexts = 0; peerConnections = 0; sendGate = null;
+  talk.left = 0; talk.joinedCalls = 0; talk.events.length = 0; audioContexts = 0; peerConnections = 0; pcs.length = 0; sendGate = null;
 }
 
 let pass = 0;
@@ -145,6 +163,48 @@ test("an uninterrupted call still rings out with one invite", async () => {
   await settle();
   assert.deepEqual(sent.map((m) => m.type), ["call_invite", "call_end"]);
   assert.equal(intervals.size, 0, "the ringback interval is cleared");
+});
+
+test("the call ends while the browser asks for the camera (switch to video): the camera is stopped", async () => {
+  await reset();
+  media = deferred();
+  media.resolve(fakeStream());
+  await Calls.startCall(PEER, false);
+  // The peer joins (its session id sorts lower, so this side offers) and the media connects.
+  talk.events.push({ kind: "usersInRoom", users: [{ sessionId: "s-a", inCall: 7 }] });
+  for (let i = 0; i < 10 && talk.events.length; i += 1) await settle();
+  await settle();
+  pcs[0].connectionState = "connected";
+  pcs[0].onconnectionstatechange();
+  let cameraAsked = 0;
+  media = deferred(); // the camera prompt stays up
+  const prompt = media.promise;
+  media = { promise: { then: (...args) => { cameraAsked += 1; return prompt.then(...args); } }, resolve: media.resolve };
+  await Calls.toggleCamera(); // asks the other side first
+  talk.events.push({ kind: "message", data: { from: "s-a", type: "kachat_video_accept" } });
+  for (let i = 0; i < 10 && !cameraAsked; i += 1) await settle();
+  assert.deepEqual(talk.signals, ["offer", "kachat_video_request"], "offered, then asked for video");
+  assert.equal(cameraAsked, 1, "the camera was asked for");
+  await Calls.hangUp();
+  const camera = fakeCamera();
+  media.resolve(camera); // the browser answers after the hang-up
+  await settle();
+  assert.ok(stoppedTracks.includes(camera.getTracks()[0]), "the late camera track is stopped");
+  assert.equal(Calls.hasActiveCall(), false);
+});
+
+test("an account switch ends the call without a call_end signed by the new account", async () => {
+  await reset();
+  media = deferred();
+  media.resolve(fakeStream());
+  await Calls.startCall(PEER, false);
+  assert.deepEqual(sent.map((m) => m.type), ["call_invite"]);
+  Calls.resetCallsForAccount();
+  await settle();
+  assert.deepEqual(sent.map((m) => m.type), ["call_invite"], "no call_end after the switch");
+  assert.ok(stoppedTracks.length >= 1, "the microphone is released");
+  assert.ok(talk.deleted.includes("room1"), "the room is still cleaned up");
+  assert.equal(intervals.size, 0, "no ringback left");
 });
 
 for (const [name, fn] of tests) {

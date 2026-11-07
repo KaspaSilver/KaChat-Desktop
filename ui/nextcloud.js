@@ -423,8 +423,10 @@ async function discoverExistingBackupFolder() {
 async function adoptExistingBackupFolder() {
   if (!nc || nc.backupFolderScanned === BACKUP_FOLDER_SCAN_VERSION) return;
   if (nc.backupFolder) { nc.backupFolderScanned = BACKUP_FOLDER_SCAN_VERSION; saveState(); return; }
+  const account = nc;
   const found = await discoverExistingBackupFolder();
-  if (!nc) return;
+  // Another account's connection by now: what this scan found is on the previous one's server.
+  if (!nc || nc !== account) return;
   nc.backupFolderScanned = BACKUP_FOLDER_SCAN_VERSION;
   // Chosen meanwhile in the picker: that choice stands.
   if (found && !nc.backupFolder) {
@@ -926,7 +928,9 @@ async function performBackup() {
   let serverIsBehind = replaceUnreadable || addressBookHasBackupData();
   if (serverCopy != null) serverIsBehind = mergeSharedContactsFile(serverCopy).serverIsBehind;
   if (!serverIsBehind) {
-    rememberBackupETag(await fetchBackupETag().catch(() => null));
+    const etag = await fetchBackupETag().catch(() => null);
+    // The ETag is this account's file's: never filed on the account switched to meanwhile.
+    if (stillCurrent()) rememberBackupETag(etag);
     return;
   }
   const payload = await deps.sealBackupPayload(sharedContactsFileJson());
@@ -939,8 +943,8 @@ async function performBackup() {
   }
   // Feedback-loop guard: remember our own write's ETag so the watcher never downloads it back.
   // If both captures failed the stored ETag is cleared, and the watcher merges our own upload once,
-  // which changes nothing.
-  rememberBackupETag(newETag);
+  // which changes nothing. Only on the account that wrote it, not one switched to meanwhile.
+  if (stillCurrent()) rememberBackupETag(newETag);
   // Verify (§4.6): the server must hold the whole file. A short one (an upload cut off on the
   // way) would read as damaged on the next sync; say so plainly instead of looping. Only our own
   // write counts: another device may have replaced the file in between.
@@ -1105,10 +1109,11 @@ async function performAutomaticSync({ bypassFloor = false } = {}) {
   }
   syncInFlight = true;
   syncDirty = false;
+  const account = nc;
   try {
     await runBackup();
     lastAutoSyncAt = Date.now();
-    if (nc) { nc.lastAutoBackup = lastAutoSyncAt; saveState(); }
+    if (nc && nc === account) { nc.lastAutoBackup = lastAutoSyncAt; saveState(); }
     refreshBackupStatusLine();
   } catch (error) {
     syncDirty = true;
@@ -1759,10 +1764,11 @@ function wireSettings() {
       setBackupResult("");
       syncInFlight = true;
       syncDirty = false;
+      const account = nc;
       try {
         await runBackup();
         lastAutoSyncAt = Date.now();
-        nc.lastAutoBackup = lastAutoSyncAt;
+        if (nc && nc === account) nc.lastAutoBackup = lastAutoSyncAt;
         saveState();
         // iOS backUpNow: "Contacts backed up." under the rows, not a toast.
         setBackupResult("Contacts backed up.");

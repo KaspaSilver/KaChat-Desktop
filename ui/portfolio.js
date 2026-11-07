@@ -2529,21 +2529,31 @@ async function runAddressImport(addressRaw) {
   syncImportModal();
 
   try {
+    // The portfolio the import started in, which is also where its rows and fees land.
+    const targetPortfolioId = activePortfolio().id;
+    // The account it started in: the fetch takes a while, and an account switch meanwhile reloads
+    // `state` with the other account's portfolios, which must not get this address's history.
+    const accountKey = deps.accountScopedKey(PORTFOLIO_KEY);
+    const sheet = addressImport;
+
+    setImportProgress("Fetching transactions…");
+    const historyResult = await fetchTransactionsResumable(address, setImportProgress);
+    if (deps.accountScopedKey(PORTFOLIO_KEY) !== accountKey) {
+      if (addressImport === sheet) finishAddressImport("Import stopped: the account changed. Nothing was imported.");
+      return;
+    }
+
     // Re-importing the same address only adds transactions not already present anywhere in
-    // this account's ledgers (deduped by on-chain tx id, matching iOS's whole-wallet dedup).
+    // this account's ledgers (deduped by on-chain tx id, matching iOS's whole-wallet dedup). Read
+    // after the fetch, so rows another import of this address saved meanwhile count too.
     const existingTxIds = new Set();
     for (const p of state.portfolios) {
       for (const tx of p.transactions || []) {
         if (tx.sourceAddress === address && tx.sourceTxId) existingTxIds.add(tx.sourceTxId);
       }
     }
-    // Fees are deduped per portfolio by txid (iOS existingFeeTxIds): the portfolio the import
-    // started in, which is also where its rows and fees land.
-    const targetPortfolioId = activePortfolio().id;
+    // Fees are deduped per portfolio by txid (iOS existingFeeTxIds).
     const existingFeeTxIds = new Set(fees.filter((f) => f.portfolioId === targetPortfolioId).map((f) => f.txId));
-
-    setImportProgress("Fetching transactions…");
-    const historyResult = await fetchTransactionsResumable(address, setImportProgress);
 
     const candidates = [];
     const feeCandidates = [];

@@ -183,6 +183,20 @@ await test("dialogs: no focus jump into a text field on a touch screen", async (
   coarsePointer = false;
 });
 
+await test("dialogs: a dialog opened over another answers the first one as cancelled (it never hangs)", async () => {
+  const opener = body.appendChild(new El("button"));
+  opener.focus();
+  let firstDone = false;
+  const first = dialogs.confirmDialog({ title: "Send it?" }).then((value) => { firstDone = true; return value; });
+  const second = dialogs.chooseDialog({ title: "Pick", options: [{ id: "a", title: "A" }] });
+  await flush();
+  assert.equal(firstDone, true, "the replaced confirm settled");
+  assert.equal(await first, false, "as a cancel, never as a yes");
+  dispatch(dialogHost().querySelector("[data-app-dialog-choice]"), "click");
+  assert.equal(await second, "a", "the dialog on screen still answers for itself");
+  assert.equal(document.activeElement, opener, "the first opener gets the focus back");
+});
+
 // --- qr-scan -----------------------------------------------------------------------------------
 const pending = [];
 const streams = [];

@@ -62,26 +62,28 @@ const currentBot = () => chessBot(selectedLevel) || CHESS_BOTS[0];
 // Record (ChessBotProgress)
 // ---------------------------------------------------------------------------------------------
 
-function accountKey(key) {
+/** `address`: whose data (a game's own account, which may no longer be the one on); the account
+ *  on now when left out. */
+function accountKey(key, address = deps().engine?.address) {
   const d = deps();
-  if (typeof d.accountScopedKey === "function") return d.accountScopedKey(key);
-  const address = String(d.engine?.address || "").trim();
-  return address ? `${ACCOUNT_DATA_PREFIX}:${address}:${key}` : key;
+  const clean = String(address || "").trim();
+  if (typeof d.accountScopedKey === "function") return d.accountScopedKey(key, clean);
+  return clean ? `${ACCOUNT_DATA_PREFIX}:${clean}:${key}` : key;
 }
-function recordsKey() { return accountKey(RECORDS_KEY); }
-function loadRecords() {
-  try { return parseBotRecords(localStorage.getItem(recordsKey())); } catch { return {}; }
+function recordsKey(address) { return accountKey(RECORDS_KEY, address); }
+function loadRecords(address) {
+  try { return parseBotRecords(localStorage.getItem(recordsKey(address))); } catch { return {}; }
 }
-function saveResult(level, kind) {
-  const next = addBotResult(loadRecords(), level, kind);
-  try { localStorage.setItem(recordsKey(), JSON.stringify(next)); } catch { /* storage blocked: this session only */ }
+function saveResult(level, kind, address) {
+  const next = addBotResult(loadRecords(address), level, kind);
+  try { localStorage.setItem(recordsKey(address), JSON.stringify(next)); } catch { /* storage blocked: this session only */ }
 }
-function loadStampedWins() {
-  try { return parseStampedWins(localStorage.getItem(accountKey(STAMPED_WINS_KEY))); } catch { return {}; }
+function loadStampedWins(address) {
+  try { return parseStampedWins(localStorage.getItem(accountKey(STAMPED_WINS_KEY, address))); } catch { return {}; }
 }
-function saveStampedWin(level, moves) {
-  const next = addStampedWin(loadStampedWins(), level, moves, Date.now());
-  try { localStorage.setItem(accountKey(STAMPED_WINS_KEY), JSON.stringify(next)); } catch { /* storage blocked: the indexer will have it */ }
+function saveStampedWin(level, moves, address) {
+  const next = addStampedWin(loadStampedWins(address), level, moves, Date.now());
+  try { localStorage.setItem(accountKey(STAMPED_WINS_KEY, address), JSON.stringify(next)); } catch { /* storage blocked: the indexer will have it */ }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -540,8 +542,10 @@ function newGame() {
     bot, playerColor,
     send: (content) => sendContent(content, address),
     think,
-    record: (result) => saveResult(bot.level, result.kind),
-    recordStampedWin: (moves) => saveStampedWin(bot.level, moves),
+    // Into the record of the account the game was played under: a stamp still going out after
+    // Play again and an account switch is not the new account's win.
+    record: (result) => saveResult(bot.level, result.kind, address),
+    recordStampedWin: (moves) => saveStampedWin(bot.level, moves, address),
     onChange: () => onGameChange(g),
     log: (line) => deps().appendEngineLog?.(line),
   });

@@ -209,7 +209,9 @@ export function initCalls(dependencies) {
 }
 
 export function resetCallsForAccount() {
-  if (session) finish("cancelled").catch(() => {});
+  // The switch has already happened: a call_end now would be signed by the new account, to the
+  // old one's contact. The call ends here without it; the other side's ring/peer timeout ends it.
+  if (session) finish("cancelled", { announce: false }).catch(() => {});
   loadHandled();
 }
 
@@ -649,6 +651,12 @@ async function switchToVideo(call) {
   if (call.video) return true;
   try {
     const camera = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+    // The call ended while the browser asked for the camera: finish() never saw this stream, so
+    // nothing else would ever stop it (the camera stayed on after the call).
+    if (callCancelled(call) || !call.pc) {
+      for (const track of camera.getTracks?.() || []) { try { track.stop(); } catch { /* fine */ } }
+      return false;
+    }
     const track = camera.getVideoTracks()[0];
     if (!track) return false;
     call.localStream?.addTrack(track);
@@ -949,7 +957,7 @@ function sendPeer(call, type, payload) {
 // Teardown
 // ---------------------------------------------------------------------------------------------
 
-async function finish(reason) {
+async function finish(reason, { announce = true } = {}) {
   const call = session;
   if (!call || call.phase === "ended") return;
   stopTone();
@@ -968,7 +976,7 @@ async function finish(reason) {
   renderOverlay();
   // The caller is the only side that ever puts a call on chain: one opening message and one
   // closing message with how it went and, if it connected, for how long.
-  if (call.isOutgoing && call.openingMessageSent) {
+  if (announce && call.isOutgoing && call.openingMessageSent) {
     try { await deps.sendEnvelope(call.address, encodeEnd({ callId: call.id, reason, durationSeconds })); }
     catch (error) { deps.appendEngineLog?.(`[Call] Sending call_end failed: ${error?.message || error}`); }
   }
