@@ -317,6 +317,19 @@ async function main() {
     r.eq([...ctx.outputs].length, 1, "compound: one output");
     r.eq(scriptOf([...ctx.outputs][0].scriptPublicKey), hex(p2shScript(src.redeemScript)), "compound: consolidates into the address itself");
     r.check(Q.verifyKip22Spend(ctx, src.redeemScript), "compound: signatures verify offline");
+
+    // Past 80 coins each chunk pays its own floor at the speed picked (KaPost 071e901).
+    const chunkFees = async (feeMultiplier) => {
+      const rpc4 = stubRpc();
+      rpc4.utxos.set(src.address, Array.from({ length: 85 }, () => coin(src.address, KAS)));
+      await sweepAllToSelf({ kaspa, rpc: rpc4, privateKey: src.privateKey, sourceAddress: src.address, redeemScript: src.redeemScript, feeMultiplier });
+      return rpc4.submitted.map((t) => BigInt([...t.inputs].length) * KAS - BigInt([...t.outputs][0].value));
+    };
+    const normal = await chunkFees(1);
+    const fast = await chunkFees(2);
+    r.eq(normal.length, 2, "compound: 85 coins go in two chunks");
+    r.eq(fast[0], normal[0] * 2n, "compound: Fast doubles the first chunk's floor");
+    r.eq(fast[1], normal[1] * 2n, "compound: Fast doubles the second chunk's floor");
   }
 
   // MARK: Refusals (nothing is submitted)

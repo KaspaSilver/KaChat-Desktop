@@ -13120,7 +13120,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 272;
+const APP_BUILD = 273;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -14567,11 +14567,13 @@ const sendKaspaController = makeSendController({
   sendFn: ({ destination, amountKas, feeKas, selectedOutpoints }) => {
     const outpoints = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : null;
     if (sendKaspaCompound) {
-      // The displayed policy fee is what the compound pays, same as a Max send.
+      // The displayed policy fee is what the compound pays, same as a Max send. Past 80 coins each
+      // chunk pays its own floor at the speed picked (KaPost 071e901); a custom fee keeps the floor.
       const totalFeeKas = trimKas8(sendKaspaTotalFeeKas());
+      const feeMultiplier = sendKaspaCustomFeeKas != null ? 1 : (SEND_FEE_MULTIPLIERS[sendKaspaFeeTier] || 1);
       return sendKaspaSourceIndex == null
-        ? engine.compoundUtxos({ totalFeeKas })
-        : engine.compoundSpending({ ...spendingSignerArgs(spendingSendAccount()), index: sendKaspaSourceIndex, totalFeeKas });
+        ? engine.compoundUtxos({ totalFeeKas, feeMultiplier })
+        : engine.compoundSpending({ ...spendingSignerArgs(spendingSendAccount()), index: sendKaspaSourceIndex, totalFeeKas, feeMultiplier });
     }
     if (sendKaspaMaxMode) return sendKaspaPinnedMax(destination, selectedOutpoints);
     // A payment request to someone's chatting address goes as a chat payment, its memo inside,
@@ -19930,11 +19932,16 @@ async function openChatWithAddress({ address, name, paymentMode = false } = {}) 
 // address by default, or Choose an Address, with that address's balance), the big amount with the
 // KAS / currency switch and Max, the fee card (speed, custom fee, Coin Control), the small-amount
 // question, and slide-to-send. The send itself: a payment to their chatting address with the payment
-// bubble in the 1:1 conversation. A tip of a post (iOS a6bd60a) carries a signed kchat:1:tip:
-// payload naming it and always comes from the chatting address (From locked); one without a post is
-// a plain payment, no payload, from the From address. The contact is created only when a tip is
-// actually sent.
+// bubble in the 1:1 conversation. A tip of a post (iOS a6bd60a) from the chatting address carries a
+// signed kchat:1:tip: payload naming it, so it counts on the post (KAPOSTS_INDEXER.md 5.11). The
+// sheet opens on From, on KaPost Settings > Tips From's address (KaPost 071e901): from another
+// address a tip is private, a plain payment with the chat notice that names no post and isn't
+// counted. The contact is created only when a tip is actually sent.
 const TIP_FEE_MULTIPLIERS = { normal: 1n, fast: 2n, priority: 5n };
+// What From means for a post's tip (KaPost 071e901), on the From step and on Tips From.
+const TIP_COUNTED_NOTE = "From your Chatting Address the tip counts on the post, and you're listed as a tipper.";
+const TIP_PRIVATE_NOTE = "From another address the tip is private: the author gets it, and sees it in your chat, but it doesn't count on the post or name you as a tipper.";
+const TIPS_FROM_NOTE = "Tips from your Chatting Address count on the post, and you're listed as a tipper. From another address a tip is private: the author gets it, and sees it in your chat, but it doesn't count on the post or name you.";
 const tipModal = document.querySelector("[data-tip-modal]");
 mountSendPieces(tipModal, {
   from: sendFromSectionHtml({ prefix: "tip" }),
@@ -19983,16 +19990,16 @@ const tipFromCtl = sendFromControls(tipModal, "tip", {
   // Choose an Address lists your addresses on the From step (KaPosts-iPhone da3e953).
   onChoose: () => {
     const tip = tipState;
-    if (!tip || tip.sending || tip.tip) return; // a tip that names a post is the chatting address's
+    if (!tip || tip.sending) return;
     tipChoosingFrom = true;
     showTipAddressList();
     tipRenderAvailable();
   },
 });
 // --- Tips in steps (KaPosts-iPhone da3e953 KaPostTipSheet) ---------------------------------------
-// From (when it can change: a tip that names a post is the chatting address's), the amount on the
-// keypad with the To and From chips, then the swipe-up Review: the amount, To / From / Total, the
-// encrypted memo, the fee (its Edit opens the fee editor) and Coin Control.
+// From (KaPost 071e901: always first, a post's tip too), the amount on the keypad with the To and
+// From chips, then the swipe-up Review: the amount, To / From / Total, the encrypted memo, the fee
+// (its Edit opens the fee editor) and Coin Control.
 const tipSteps = createStepFlow(tipModal?.querySelector(".tip-sheet"), { title: "Tip", onCancel: () => closeTipModal() });
 tipSteps.setOrder(["from", "amount", "review", "fee"]);
 let tipChoosingFrom = false;
@@ -20028,6 +20035,7 @@ tipFromBody.innerHTML = `<div class="ss-chips" data-tip-from-chips></div>${stepQ
 const tipFromSection = tipModal?.querySelector("[data-tip-from]");
 if (tipFromSection) tipFromBody.append(tipFromSection);
 tipFromBody.insertAdjacentHTML("beforeend", `
+  <p class="ss-note" data-tip-from-privacy hidden></p>
   <p class="ss-note" data-tip-from-note hidden>Pick which of your addresses the Kaspa leaves from.</p>
   <div class="sk-source-list ss-address-list" data-tip-from-list role="listbox" aria-label="Your addresses" hidden></div>`);
 let tipFromList = null;
@@ -20049,6 +20057,12 @@ function paintTipFromStep() {
   if (chips) chips.innerHTML = tipToChipHtml();
   const card = tipFromSection.querySelector(".sk-from-card");
   if (card) card.hidden = tipChoosingFrom;
+  // A post's tip counts on it only from the chatting address (KaPost 071e901).
+  const privacy = tipFromBody.querySelector("[data-tip-from-privacy]");
+  if (privacy) {
+    privacy.hidden = !tipState.tip;
+    privacy.textContent = tipChoosingFrom ? TIP_PRIVATE_NOTE : TIP_COUNTED_NOTE;
+  }
   const note = tipFromBody.querySelector("[data-tip-from-note]");
   const list = tipFromBody.querySelector("[data-tip-from-list]");
   if (note) note.hidden = !tipChoosingFrom;
@@ -20060,7 +20074,7 @@ function paintTipFromStep() {
 const tipAmountBody = tipSteps.addStep("amount", {
   className: "ss-amount-step",
   continueTitle: "Review",
-  back: () => (tipState?.tip ? null : "from"),
+  back: () => "from",
   canContinue: () => tipAmountSompi() > 0n && !tipExceedsBalance() && !tipMaxTimer,
   onContinue: () => goTipStep("review"),
   onShow: () => paintTipAmountStep(),
@@ -20172,6 +20186,26 @@ function setKaPostsCooldownEnabled(on) {
     if (on) localStorage.removeItem(KAPOSTS_COOLDOWN_KEY); else localStorage.setItem(KAPOSTS_COOLDOWN_KEY, "0");
   } catch { /* fine */ }
 }
+// KaPost Settings > Tips From (KaPost 071e901 kaPostsDefaultTipSourceIndex): the spending address
+// (its index) tips leave from, the instant tip and the tip sheet's first choice; null = the chatting
+// address, the only one whose tips count on the post. Kept per account, since an index names one
+// account's address. A slot this account can't derive right now is the chatting address.
+function kaPostsTipSourceIndex() {
+  const index = accountShellPrefs.kaPostsTipSources?.[engine.address || ""];
+  return Number.isInteger(index) && deriveSpendingAddressAt(index) ? index : null;
+}
+function setKaPostsTipSourceIndex(index) {
+  const address = engine.address || "";
+  if (!address) return;
+  const sources = { ...(accountShellPrefs.kaPostsTipSources || {}) };
+  if (Number.isInteger(index)) sources[address] = index; else delete sources[address];
+  accountShellPrefs.kaPostsTipSources = sources;
+  try { persistAccountShellPreferences(); } catch { /* storage full: kept for this session */ }
+}
+function kaPostsTipSourceTitle() {
+  const index = kaPostsTipSourceIndex();
+  return index == null ? "Chatting Address" : spendingSourceLabel(index);
+}
 /** A currency amount as the app writes it ("$1.50"), in `currency` rather than the app's own. */
 function fiatAmountText(value, currency = selectedCurrency) {
   const v = Number(value);
@@ -20235,6 +20269,9 @@ function openKaPostsSettings() {
         </div>
         <p class="settings-group-footer" data-kaposts-tip-footer ${current ? "" : "hidden"}></p>
         <div class="settings-list-card">
+          <button class="settings-list-row" type="button" data-kaposts-open-tips-from><span class="settings-row-copy"><strong>Tips From</strong></span><span class="settings-row-value" data-kaposts-tips-from-title>${escapeHtml(kaPostsTipSourceTitle())}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+        </div>
+        <div class="settings-list-card">
           <button class="settings-list-row" type="button" data-kaposts-open-notifications>${bell}<span class="settings-row-copy"><strong>Notifications</strong></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
         </div>
       </div>
@@ -20250,25 +20287,49 @@ function openKaPostsSettings() {
           </div>
         </div>
       </div>
+      <div data-kaposts-settings-page="tips-from" hidden>
+        <div class="modal-header kaposts-settings-subheader">
+          <button class="create-chat-nav-button" type="button" data-kaposts-settings-back aria-label="Back">‹ Back</button>
+          <h2>Tips From</h2>
+          <button class="modal-close" type="button" data-kaposts-settings-close aria-label="Close">×</button>
+        </div>
+        <p class="settings-group-footer">${escapeHtml(TIPS_FROM_NOTE)}</p>
+        <div class="sk-source-list ss-address-list" data-kaposts-tips-from-list role="listbox" aria-label="Your addresses"></div>
+      </div>
     </section>`;
   document.body.append(backdrop);
-  const mainPage = backdrop.querySelector('[data-kaposts-settings-page="main"]');
-  const notifyPage = backdrop.querySelector('[data-kaposts-settings-page="notifications"]');
-  const showPage = (notifications) => { mainPage.hidden = notifications; notifyPage.hidden = !notifications; };
+  const pages = [...backdrop.querySelectorAll("[data-kaposts-settings-page]")];
+  const pageShown = (name) => !backdrop.querySelector(`[data-kaposts-settings-page="${name}"]`).hidden;
+  let tipsFromList = null;
+  const showPage = (name) => {
+    for (const page of pages) page.hidden = page.getAttribute("data-kaposts-settings-page") !== name;
+    if (name !== "tips-from") return;
+    // Tips From (KaPost 071e901 TipSourcePage): the chatting address or a spending address.
+    tipsFromList = mountOwnAddressListFor(backdrop.querySelector("[data-kaposts-tips-from-list]"), {
+      selectedAddress: kaPostsTipSourceIndex() == null ? engine.address : deriveSpendingAddressAt(kaPostsTipSourceIndex()),
+      onPick: (picked) => {
+        const index = picked.kind === "spending" && Number.isInteger(picked.index) ? picked.index : null;
+        setKaPostsTipSourceIndex(index);
+        tipsFromList?.setSelected(picked.address || null);
+        backdrop.querySelector("[data-kaposts-tips-from-title]").textContent = kaPostsTipSourceTitle();
+      },
+    });
+  };
   const onKey = (event) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
     event.stopPropagation();
-    // Back from the KaPost page first, as the navigation stack would.
-    if (!notifyPage.hidden) showPage(false); else close();
+    // Back from a sub-page first, as the navigation stack would.
+    if (!pageShown("main")) showPage("main"); else close();
   };
   const close = () => { window.removeEventListener("keydown", onKey, true); backdrop.remove(); };
   backdrop.kapostsSettingsClose = close;
   window.addEventListener("keydown", onKey, true);
   backdrop.addEventListener("click", (event) => {
     if (event.target === backdrop || event.target.closest("[data-kaposts-settings-close]")) { close(); return; }
-    if (event.target.closest("[data-kaposts-settings-back]")) { showPage(false); return; }
-    if (event.target.closest("[data-kaposts-open-notifications]")) showPage(true);
+    if (event.target.closest("[data-kaposts-settings-back]")) { showPage("main"); return; }
+    if (event.target.closest("[data-kaposts-open-notifications]")) { showPage("notifications"); return; }
+    if (event.target.closest("[data-kaposts-open-tips-from]")) showPage("tips-from");
   });
   const cooldownToggle = backdrop.querySelector("[data-kaposts-cooldown]");
   cooldownToggle.addEventListener("change", () => {
@@ -20378,11 +20439,17 @@ const instantTipsInFlight = new Set();
 // With `tip` ({ postId, authorPubkey }) it names the post (iOS a6bd60a sendDefaultTip(tip:)).
 // `fiatText`: the currency amount the KAS was worked out from, for a tip set in a currency (iOS
 // 4c0d5a8), which the toast names beside the KAS.
-async function sendInstantTip(address, name, amountKasNumber, tip = null, fiatText = null) {
+// `sourceIndex`: Tips From's spending address (KaPost 071e901), else null for the chatting address.
+// From a spending address the tip is private: a plain payment with the chat notice, no post named
+// (the caller passes no `tip`) and nothing counted.
+async function sendInstantTip(address, name, amountKasNumber, tip = null, fiatText = null, sourceIndex = null) {
   const clean = String(address || "").trim();
   if (!clean || !isValidKaspaAddressString(clean) || clean === engine.address) throw new Error("No one to tip.");
   const amountKas = trimKas8(Number(amountKasNumber));
   if (!(Number(amountKas) > 0)) throw new Error("No default tip set.");
+  // The account the tip starts on signs and takes the change, even after a switch (iOS ca09dd0).
+  const sourceAccount = sourceIndex != null ? captureActiveSpendingAccount() : null;
+  if (sourceIndex != null && !sourceAccount) throw new Error("This account has no 12 or 24 words, so spending sends aren't available.");
   await ensureRuntimes({ quiet: true });
   const displayName = String(name || "").trim();
   let contact = state.contacts.find((entry) => entry.address === clean) || null;
@@ -20420,10 +20487,22 @@ async function sendInstantTip(address, name, amountKasNumber, tip = null, fiatTe
   try {
     // A tip that names the post carries its signed kchat:1:tip: payload (iOS a6bd60a); without a
     // post it stays the plain payment it always was.
-    const payload = tip ? await kaPostTipPayloadBytes(tip, contact.address, kasTextToSompi(amountKas)) : null;
-    const result = payload
-      ? await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true })
-      : await engine.send(destinationAddress, amountKas, "0");
+    // From a spending address: a plain transfer, its change on a never-used address (iOS 6333dd3).
+    const payload = tip && sourceIndex == null ? await kaPostTipPayloadBytes(tip, contact.address, kasTextToSompi(amountKas)) : null;
+    const fresh = sourceIndex != null ? await freshSpendingChangeAddress(sourceIndex, sourceAccount) : null;
+    const result = sourceIndex != null
+      ? await engine.sendFromSpending({
+          ...spendingSignerArgs(sourceAccount),
+          index: sourceIndex,
+          destinationAddress,
+          amountKas,
+          feeKas: "0",
+          changeAddress: fresh?.address || null,
+        }).catch(keepChangeVisibleIfOutcomeUnknown(fresh, sourceAccount.owner))
+      : payload
+        ? await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true })
+        : await engine.send(destinationAddress, amountKas, "0");
+    if (fresh) runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(fresh, sourceAccount.owner));
     const submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
     const txid = submittedTxids.at(-1) || submittedTxids[0] || null;
     if (!txid) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
@@ -20433,6 +20512,8 @@ async function sendInstantTip(address, name, amountKasNumber, tip = null, fiatTe
     persistState();
     const verifiedTxid = await verifyKasPaymentBroadcast(submittedTxids, destinationAddress, amountKas);
     applyMessagePatch(liveMessage, { status: MESSAGE_STATUSES.CONFIRMED, txid: verifiedTxid || txid, confirmations: verifiedTxid ? 1 : 0, network: NETWORK, note: "Kaspa node accepted and broadcast the payment transaction." });
+    // The chatting address tells the chat about a spending address's payment (iOS 927322b).
+    if (sourceIndex != null) sendSpendingPaymentNotice(conversationEntry, contact, { txId: txid, amountSompi: kasTextToSompi(amountKas) });
     await refreshBalanceOnly({ quiet: true }).catch(() => {});
     conversationEntry.updatedAt = Date.now();
     persistState();
@@ -20440,7 +20521,7 @@ async function sendInstantTip(address, name, amountKasNumber, tip = null, fiatTe
     const finalTxid = verifiedTxid || txid;
     // iOS sendDefaultTip: "Tipped 1.5 KAS to <name>" with View on the explorer.
     const amountText = fiatText ? `${amountKas} ${KAS_UNIT} (${fiatText})` : `${amountKas} ${KAS_UNIT}`;
-    showKaPostsActionToast(`Tipped ${amountText} to ${displayName || shortAddress(clean)}`, finalTxid);
+    showKaPostsActionToast(`Tipped ${amountText} to ${displayName || shortAddress(clean)}${sourceIndex != null ? " privately" : ""}`, finalTxid);
     appendEngineLog(`Instant tip sent: ${explorerTxUrl(finalTxid)}`);
     return finalTxid;
   } catch (error) {
@@ -20817,8 +20898,9 @@ function commitTipCustomFee() {
   if (activeTipMax()) scheduleTipMaxRefill(0); // Max follows the fee at once (DSK-043)
 }
 
-// `tip` ({ postId, authorPubkey }): the post being tipped. Then the tip names the post and is paid
-// from the chatting address only, so From offers no choice (iOS a6bd60a SendFromSection isLocked).
+// `tip` ({ postId, authorPubkey }): the post being tipped. From the chatting address the tip names
+// the post (iOS a6bd60a); from another it goes privately (KaPost 071e901). The sheet starts on Tips
+// From's address, on the From step.
 async function openTipModal({ address, name, tip = null, onTipped = null, error = "" } = {}) {
   const clean = String(address || "").trim();
   if (!clean || !isValidKaspaAddressString(clean)) { showCopyToast("This poster has no valid Kaspa address."); return; }
@@ -20842,11 +20924,15 @@ async function openTipModal({ address, name, tip = null, onTipped = null, error 
   tipMaxToken += 1;
   if (tipMaxTimer) window.clearTimeout(tipMaxTimer);
   tipMaxTimer = null;
+  // KaPost Settings > Tips From picks where the sheet starts (KaPost 071e901 SendSource.defaultTip).
+  const fundingIndex = kaPostsTipSourceIndex();
   tipState = {
     onTipped, // the post counts the tip once it has gone out (iOS 0f241ce)
     max: null, // an exact Max, pinned (tipSetMax)
-    // From (iOS 6333dd3): null = the chatting address, the default; else a spending address.
-    contact, conversationEntry, address: clean, displayName, fundingIndex: null, fundingAddress: null, sourceLabel: null,
+    // From (iOS 6333dd3): null = the chatting address; else a spending address.
+    contact, conversationEntry, address: clean, displayName, fundingIndex,
+    fundingAddress: fundingIndex == null ? null : deriveSpendingAddressAt(fundingIndex),
+    sourceLabel: fundingIndex == null ? null : spendingSourceLabel(fundingIndex),
     availableSompi: null, availableFailed: false,
     // the fee card: base (Normal) fee in sompi, speed, custom extra; coin control (null = automatic)
     baseFeeSompi: null, estimating: false, tier: "normal", customExtraFeeSompi: null, manualUtxos: null,
@@ -20856,7 +20942,6 @@ async function openTipModal({ address, name, tip = null, onTipped = null, error 
   };
   // (not `state`: that is the app's contacts and conversations, read above)
   const sheet = tipState;
-  tipFromCtl.setLocked(Boolean(sheet.tip));
 
   const shownName = (contact?.name || displayName).trim() || shortAddress(clean);
   sheet.shownName = shownName;
@@ -20871,7 +20956,7 @@ async function openTipModal({ address, name, tip = null, onTipped = null, error 
   const customFeeEl = tipQ("[data-tip-kas-fee-custom]");
   if (customFeeEl) customFeeEl.value = "";
   tipFeeCtl.setEditing(false);
-  tipChoosingFrom = false;
+  tipChoosingFrom = sheet.fundingIndex != null;
   tipSlider.busy = false;
   tipSwipe.reset();
   tipSwipe.setKasUnit(KAS_UNIT);
@@ -20879,8 +20964,8 @@ async function openTipModal({ address, name, tip = null, onTipped = null, error 
   tipRenderAvailable();
   tipRefreshUnitUi();
   tipModal.hidden = false;
-  // A tip that names a post comes from the chatting address: no From step.
-  goTipStep(sheet.tip ? "amount" : "from", { instant: true });
+  // From first, a post's tip too (KaPost 071e901): the address decides whether it counts.
+  goTipStep("from", { instant: true });
   fetchKasPrice(selectedCurrency).then((price) => {
     if (tipState !== sheet) return;
     sheet.price = price;
@@ -21073,7 +21158,8 @@ async function sendTipNow(tipSompi) {
     // a chat payment from one does (iOS sendPayment(sourceSpendingIndex:), 927322b).
     if (tip.fundingAddress) sendSpendingPaymentNotice(conversationEntry, contact, { txId: txid, amountSompi: requestedSompi, memo });
     await refreshBalanceOnly({ quiet: true }).catch(() => {});
-    try { tip.onTipped?.(); } catch { /* the feed moved on */ }
+    // A private tip (another address) doesn't count on the post (KaPost 071e901).
+    if (!tip.fundingAddress) { try { tip.onTipped?.(); } catch { /* the feed moved on */ } }
     conversationEntry.updatedAt = Date.now();
     persistState();
     if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -31108,8 +31194,12 @@ queueMicrotask(async () => {
           if (!sompi) {
             failure = `Tip didn't send: there is no recent KAS price to turn ${fiatText} into KAS.`;
           } else {
-            await sendInstantTip(address, name, sompi / 1e8, tip, fiatText);
-            try { onTipped?.(); } catch { /* the feed moved on */ }
+            // Tips From (KaPost 071e901): another address than the chatting one tips privately,
+            // so the payment names no post and nothing is counted.
+            const sourceIndex = kaPostsTipSourceIndex();
+            const countsOnPost = sourceIndex == null;
+            await sendInstantTip(address, name, sompi / 1e8, countsOnPost ? tip : null, fiatText, sourceIndex);
+            if (countsOnPost) { try { onTipped?.(); } catch { /* the feed moved on */ } }
           }
         } catch (error) {
           if (error?.code === "SEND_CANCELLED") return; // cancelled at Face ID / the password

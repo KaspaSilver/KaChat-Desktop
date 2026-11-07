@@ -405,12 +405,14 @@ export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, source
 // matching iOS's Compound UTXOs. A plain self-send that leaves a tiny change output gets rejected
 // by Kaspa's KIP-9 storage-mass rule, so the transaction is assembled by hand with exactly one
 // output of (total - fee); more than 80 coins are compounded in chunks of 80.
-export async function sweepAllToSelf({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, totalFeeSompi = null, redeemScript = null, log = () => {} }) {
-  return enqueueSend(sourceAddress, () => sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, redeemScript, log }));
+// `feeMultiplier`: the speed picked (Fast 2, Priority 5), which a chunked compound applies to each
+// chunk's own floor, so it is priced on its own coins (KaPost 071e901 maxConsolidatableChunk).
+export async function sweepAllToSelf({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, totalFeeSompi = null, feeMultiplier = 1, redeemScript = null, log = () => {} }) {
+  return enqueueSend(sourceAddress, () => sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, feeMultiplier, redeemScript, log }));
 }
 // One all-schnorr-input transaction tops out near the standard mass ceiling around ~85 inputs.
 const MAX_INPUTS_PER_SWEEP = 80;
-async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, redeemScript, log }) {
+async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, feeMultiplier = 1, redeemScript, log }) {
   let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Compound UTXO fetch" });
   if (!entries || entries.length === 0) throw new Error("No UTXOs to compound.");
   requireSigningScriptFor(entries, redeemScript);
@@ -431,8 +433,9 @@ async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddres
     const draft = kaspa.createTransaction(chunk, [{ address: sourceAddress, amount: total - (total / 20n) }], 0n);
     const floorFeeSompi = floorFeeSompiFor(kaspa, draft) ?? 0n;
     // The displayed policy fee is what the whole compound pays when it fits one transaction;
-    // a chunked compound pays each chunk's own network floor.
-    let fee = chunks.length === 1 && totalFeeSompi != null ? BigInt(totalFeeSompi) : floorFeeSompi;
+    // a chunked compound pays each chunk's own network floor at the speed picked.
+    const multiplier = BigInt(Math.max(1, Math.trunc(Number(feeMultiplier) || 1)));
+    let fee = chunks.length === 1 && totalFeeSompi != null ? BigInt(totalFeeSompi) : floorFeeSompi * multiplier;
     if (fee < floorFeeSompi) fee = floorFeeSompi;
     const amount = total - fee;
     if (amount <= 0n) throw new Error("Balance too low to compound after network fees.");
