@@ -12,6 +12,10 @@ import { getEndpoint } from "./endpoints.js";
 import { enqueueSend, sendPayloadTransaction, sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, excludeJustSpentUtxos } from "./transactions.js";
 import { utxoAmountSompi, checkedUtxoAnswer } from "./amounts.js";
 import { NETWORK_ID } from "./utils.js";
+import { fromIndexerOrChain, isIndexerDown, shouldSkipIndexer } from "./indexer-health.js";
+import {
+  chainPayloadIsSigned, followedKaPostsFromChain, kaPostPageKey, kaPostsOfPubkey, kapostLiveFeed, loadKaPostPage, saveKaPostPage,
+} from "./kaposts-chain-fallback.js";
 
 // U+2060 WORD JOINER — the KaChat exclusivity marker. Invisible everywhere, survives base64
 // round-trips, and comes back in postContent so feeds can filter on it (the read API never
@@ -209,15 +213,13 @@ function kapostBaseUrl() {
   return String(getEndpoint("kapostIndexer") || "").replace(/\/+$/, "");
 }
 
-async function kapostGet(path, query = {}) {
-  // Testnet has no KaPost indexer yet: blank means none, never the mainnet one.
-  if (!kapostBaseUrl()) throw new Error("KaPost isn't available on Testnet yet.");
-  const url = new URL(`${kapostBaseUrl()}/${path}`);
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== null && value !== undefined && value !== "") url.searchParams.set(key, String(value));
-  }
+// With the indexer confirmed down and nothing saved it's still asked, briefly: any answer ends the outage.
+const OUTAGE_ASK_TIMEOUT_MS = 6000;
+
+/** One request. The body is handed to `onAnswer` only when the indexer really gave one. */
+async function kapostFetch(url, timeoutMs, onAnswer) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       headers: { Accept: "application/json" },
@@ -231,10 +233,90 @@ async function kapostGet(path, query = {}) {
       const detail = json?.error ? `: ${json.error}` : "";
       throw new Error(`KaPost indexer request failed (${response.status})${detail}.`);
     }
+    // A proxy's page in the indexer's place, once that has confirmed an outage: not an empty feed.
+    if (json === null && isIndexerDown(url.href)) throw new Error("KaPost indexer sent an unreadable answer.");
+    if (json && typeof json === "object") onAnswer?.(text);
     return json;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** A read of the indexer. `savedFor` (an account) keeps a first page, for that account only, and
+ *  answers with it while the indexer is confirmed down (or this device is offline); any other
+ *  failure throws as it always did, so the caller asks again. Marked `savedPage` when it's that. */
+async function kapostGet(path, query = {}, { savedFor = null } = {}) {
+  // Testnet has no KaPost indexer yet: blank means none, never the mainnet one.
+  const base = kapostBaseUrl();
+  if (!base) throw new Error("KaPost isn't available on Testnet yet.");
+  const url = new URL(`${base}/${path}`);
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== null && value !== undefined && value !== "") url.searchParams.set(key, String(value));
+  }
+  // A later page's cursor is only good with the indexer.
+  const pageKey = savedFor && !query.before ? kaPostPageKey(base, path, query) : null;
+  const saved = () => (pageKey ? loadKaPostPage(savedFor, pageKey) : null);
+  const ask = (timeoutMs) => kapostFetch(url, timeoutMs, (body) => { if (pageKey) saveKaPostPage(savedFor, pageKey, body); });
+  let failure = null;
+  return fromIndexerOrChain(base, async () => {
+    try { return await ask(FETCH_TIMEOUT_MS); }
+    catch (error) {
+      failure = error;
+      const offlineCopy = globalThis.navigator?.onLine === false ? saved() : null;
+      if (offlineCopy) return offlineCopy;
+      throw error;
+    }
+  }, async () => {
+    const page = saved();
+    if (page) return page;
+    if (failure) throw failure;
+    return ask(OUTAGE_ASK_TIMEOUT_MS);
+  }, { probe: () => probeKaPostIndexer(base) });
+}
+
+/** Whether the indexer answers: a placeholder key, since the answer isn't read for anyone. The fetch
+ *  wrapper in engine/endpoints.js reports the outcome, and any answer of its own ends the outage. */
+function probeKaPostIndexer(base) {
+  return fetch(`${base}/get-posts-watching?requesterPubkey=${KAPOST_PLACEHOLDER_REQUESTER}&limit=1`, {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+    signal: AbortSignal.timeout?.(FETCH_TIMEOUT_MS),
+  });
+}
+
+/** True while the indexer is confirmed down; once a minute this also looks for its return. */
+export function kaPostIndexerIsDown() {
+  const base = kapostBaseUrl();
+  return Boolean(base) && shouldSkipIndexer(base, { probe: () => probeKaPostIndexer(base) });
+}
+
+const firstPageOf = (json, posts) => ({
+  posts,
+  pagination: json?.savedPage ? null : json?.pagination || null,
+  outage: Boolean(json?.savedPage),
+});
+
+/** The indexer's copy wins a tie: it has the counts and the viewer's own votes. */
+function mergedNewestFirst(saved, chain) {
+  const known = new Set(saved.map((post) => post.id));
+  return [...saved, ...chain.filter((post) => !known.has(post.id))].sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
+}
+
+/** A first page while the indexer is down: what the read saved (or nothing), with what `chain` adds.
+ *  No cursor, since one is only good with the indexer. Any other time, just the read. */
+async function withChain(before, read, chain) {
+  const isDown = () => isIndexerDown(kapostBaseUrl());
+  let page;
+  try {
+    page = await read();
+  } catch (error) {
+    if (before || !isDown()) throw error;
+    const rows = await chain();
+    if (!rows.length) throw error;
+    return { posts: mergedNewestFirst([], rows), pagination: null, outage: true };
+  }
+  if (before || !isDown()) return page;
+  return { posts: mergedNewestFirst(page.posts, await chain()), pagination: null, outage: true };
 }
 
 /**
@@ -265,19 +347,24 @@ function filterKaChatPosts(posts) {
 
 /** Global feed (K "watching" = all posts). */
 export async function fetchGlobalFeed({ engine, limit = 50, before = null } = {}) {
-  const json = await kapostGet("get-posts-watching", {
-    requesterPubkey: requesterPubkeyFor(engine), limit, before,
-  });
-  return { posts: filterKaChatPosts(json?.posts), pagination: json?.pagination || null };
+  const requesterPubkey = requesterPubkeyFor(engine);
+  const savedFor = engine.address;
+  // Down, what's new since it went away: nothing lists every post but the indexer.
+  return withChain(before, async () => {
+    const json = await kapostGet("get-posts-watching", { requesterPubkey, limit, before }, { savedFor });
+    return firstPageOf(json, filterKaChatPosts(json?.posts));
+  }, () => kapostLiveFeed.posts().filter((post) => !post.parentPostId));
 }
 
-/** Content from accounts the requester follows — top-level content only (replies live in threads). */
-export async function fetchFollowingFeed({ engine, limit = 50, before = null } = {}) {
-  const json = await kapostGet("get-contents-following", {
-    requesterPubkey: requesterPubkeyFor(engine), limit, before,
-  });
-  const posts = filterKaChatPosts(json?.posts).filter((post) => (post?.contentType || "post") !== "reply");
-  return { posts, pagination: json?.pagination || null };
+/** Content from accounts the requester follows — top-level content only (replies live in threads).
+ *  `followingAddresses`: who to read from the chain while the indexer is down. */
+export async function fetchFollowingFeed({ engine, limit = 50, before = null, followingAddresses = [] } = {}) {
+  const requesterPubkey = requesterPubkeyFor(engine);
+  const savedFor = engine.address;
+  return withChain(before, async () => {
+    const json = await kapostGet("get-contents-following", { requesterPubkey, limit, before }, { savedFor });
+    return firstPageOf(json, filterKaChatPosts(json?.posts).filter((post) => (post?.contentType || "post") !== "reply"));
+  }, async () => (await followedKaPostsFromChain(engine, followingAddresses)).filter((post) => !post.parentPostId));
 }
 
 /** One user's posts; includeReplies also returns their replies (parentPostId set). */
@@ -285,28 +372,31 @@ export async function fetchUserPosts({ engine, pubkey, limit = 50, before = null
   // Note: the deployed indexer has no includeReplies param on get-posts (silently dropped;
   // its SQL is hard-filtered to content_type post/quote) — replies come from
   // fetchUserReplies' get-replies?user= instead.
-  const json = await kapostGet("get-posts", {
-    user: pubkey,
-    requesterPubkey: requesterPubkeyFor(engine),
-    limit,
-    before,
-  });
-  return { posts: filterKaChatPosts(json?.posts), pagination: json?.pagination || null };
+  const requesterPubkey = requesterPubkeyFor(engine);
+  const savedFor = engine.address;
+  return withChain(before, async () => {
+    const json = await kapostGet("get-posts", { user: pubkey, requesterPubkey, limit, before }, { savedFor });
+    return firstPageOf(json, filterKaChatPosts(json?.posts));
+  }, async () => ((await kaPostsOfPubkey(engine, pubkey)) || []).filter((post) => !post.parentPostId));
 }
 
 /** All replies MADE BY a user — get-replies' user= mode (post= gives replies TO a post). */
 export async function fetchUserReplies({ engine, pubkey, limit = 50, before = null } = {}) {
-  const json = await kapostGet("get-replies", {
-    user: pubkey, requesterPubkey: requesterPubkeyFor(engine), limit, before,
-  });
-  return { posts: filterKaChatPosts(json?.replies), pagination: json?.pagination || null };
+  const requesterPubkey = requesterPubkeyFor(engine);
+  const savedFor = engine.address;
+  return withChain(before, async () => {
+    const json = await kapostGet("get-replies", { user: pubkey, requesterPubkey, limit, before }, { savedFor });
+    return firstPageOf(json, filterKaChatPosts(json?.replies));
+  }, async () => ((await kaPostsOfPubkey(engine, pubkey)) || []).filter((post) => post.parentPostId));
 }
 
 export async function fetchReplies({ engine, postId, limit = 100, before = null } = {}) {
-  const json = await kapostGet("get-replies", {
-    post: postId, requesterPubkey: requesterPubkeyFor(engine), limit, before,
-  });
-  return { posts: filterKaChatPosts(json?.replies), pagination: json?.pagination || null };
+  const requesterPubkey = requesterPubkeyFor(engine);
+  const savedFor = engine.address;
+  return withChain(before, async () => {
+    const json = await kapostGet("get-replies", { post: postId, requesterPubkey, limit, before }, { savedFor });
+    return firstPageOf(json, filterKaChatPosts(json?.replies));
+  }, () => kapostLiveFeed.posts().filter((post) => post.parentPostId === postId));
 }
 
 /// One post by id, any age, any author (`get-post?id=`).
@@ -319,7 +409,8 @@ export async function fetchReplies({ engine, postId, limit = 100, before = null 
 /// because they are another client's content, but a parent IS the context the reader asked for,
 /// and a hole in a thread is worse than a Kasia-origin post inside it.
 export async function fetchPost({ engine, id, requesterPubkey = null } = {}) {
-  const json = await kapostGet("get-post", { id, requesterPubkey: requesterPubkey || requesterPubkeyFor(engine) });
+  // A link card's lookup (a placeholder key) isn't this account's reading: not saved.
+  const json = await kapostGet("get-post", { id, requesterPubkey: requesterPubkey || requesterPubkeyFor(engine) }, { savedFor: requesterPubkey ? null : engine.address });
   return json?.post || null;
 }
 
@@ -328,7 +419,7 @@ export async function fetchPost({ engine, id, requesterPubkey = null } = {}) {
 /// Preferred over walking parentPostId upward one fetch at a time: the chain renders above the
 /// post already on screen, so a round trip per level is a visible stall on a deep thread.
 export async function fetchThread({ engine, id } = {}) {
-  const json = await kapostGet("get-thread", { id, requesterPubkey: requesterPubkeyFor(engine) });
+  const json = await kapostGet("get-thread", { id, requesterPubkey: requesterPubkeyFor(engine) }, { savedFor: engine.address });
   return {
     ancestors: Array.isArray(json?.ancestors) ? json.ancestors : [],
     post: json?.post || null,
@@ -339,10 +430,11 @@ export async function fetchThread({ engine, id } = {}) {
 export async function fetchKaPostNotifications({ engine, limit = 100, before = null } = {}) {
   const json = await kapostGet("get-notifications", {
     requesterPubkey: requesterPubkeyFor(engine), limit, before,
-  });
+  }, { savedFor: engine.address });
   return {
     notifications: Array.isArray(json?.notifications) ? json.notifications : [],
-    pagination: json?.pagination || null,
+    pagination: json?.savedPage ? null : json?.pagination || null,
+    outage: Boolean(json?.savedPage),
   };
 }
 
@@ -423,7 +515,7 @@ export async function fetchPostTippers({ postId, limit = 50, before = null } = {
 export async function fetchKaPostUserDetails({ engine, pubkey } = {}) {
   return kapostGet("get-user-details", {
     user: pubkey, requesterPubkey: requesterPubkeyFor(engine),
-  });
+  }, { savedFor: engine.address });
 }
 
 // ---------------------------------------------------------------------------
@@ -795,6 +887,8 @@ export async function fetchChainPost(txId) {
     const payload = hexToUtf8(tx?.payload);
     const parsed = payload ? parseChainPayload(payload) : null;
     if (!parsed) return null;
+    // With the indexer down nothing else has checked it: a payload can name anyone as its author.
+    if (isIndexerDown(kapostBaseUrl()) && !chainPayloadIsSigned(payload)) return null;
     return { txId: id, ...parsed, blockTimeMillis: Number(tx?.block_time) || null };
   } catch { return null; }
   finally { clearTimeout(timer); }

@@ -55,7 +55,7 @@ const dataModule = (source) => `data:text/javascript,${encodeURIComponent(source
 const STUBS = {
   "../engine/broadcasts.js": dataModule(`
     const s = globalThis.__chessStub;
-    export const hasBroadcastIndexer = () => false;
+    export const parseBroadcastPayload = () => null; export const restBroadcastSenderShape = () => ({}); export const judgeBroadcastSender = () => ({}); export const BROADCAST_SENDER = {}; export const hasBroadcastIndexer = () => false;
     export const fetchBroadcastHistory = async () => ({ messages: [], hasMore: false });
     export const broadcastPayloadBytes = () => 200;
     export function sendBroadcastMessage(args) {

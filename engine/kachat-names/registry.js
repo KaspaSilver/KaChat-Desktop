@@ -207,6 +207,13 @@ export class KachatNamesRegistry {
     this.lastWalk = null;
     /** the verified manifest once loaded */
     this.manifest = null;
+    // iOS 4f8e14bb: failover to the chain copy, and back
+    this._indexerFailuresInARow = 0;
+    this._lastIndexerFailureAt = -Infinity;
+    this._indexerRetryNotBefore = 0;
+    this._failoverBackoffMs = 60_000;
+    this._standbyWalkedAt = 0;
+    this._walking = null;
     this._cacheNetwork = null;
     /** the network `prepare` last ran for */
     this._preparedNetwork = null;
@@ -285,6 +292,8 @@ export class KachatNamesRegistry {
     this.chainState = null;
     this._cacheNetwork = null;
     this._preparedNetwork = null;
+    this._noteIndexerGaveData();
+    this._standbyWalkedAt = 0;
     this._ownProfiles = new Map();
     this._profilesUnavailableUntil = 0;
     this._profileMisses = new Map();
@@ -317,9 +326,79 @@ export class KachatNamesRegistry {
    *  710b78f chunks at the same). */
   static get identityBatchMax() { return 200; }
 
+  /** A failed indexer request: down-like (no answer, 429, 5xx), not an answer it gave. */
+  _indexerIsDown(error) {
+    if (error?.name === "AbortError") return true;
+    if (error instanceof TypeError) return !(globalThis.navigator?.onLine === false); // fetch's network failure
+    const code = /^the names indexer answered (\d+)$/.exec(String(error?.message ?? ""))?.[1];
+    return code != null && (code === "0" || code === "429" || Number(code) >= 500);
+  }
+
+  /** Counts a failed request; true from the third in a row within two minutes, so one timeout never
+   *  moves the registry off a working indexer. Failures within five seconds count once: a dropped
+   *  connection fails everything in flight at the same moment (iOS 4f8e14bb). */
+  _indexerOutageConfirmed() {
+    const now = Number(this._nowMs());
+    const sinceLast = now - this._lastIndexerFailureAt;
+    if (sinceLast > 120_000) this._indexerFailuresInARow = 0;
+    if (this._indexerFailuresInARow === 0 || sinceLast >= 5_000) {
+      this._lastIndexerFailureAt = now;
+      this._indexerFailuresInARow += 1;
+    }
+    return this._indexerFailuresInARow >= 3;
+  }
+
+  _noteIndexerGaveData() {
+    this._indexerFailuresInARow = 0;
+    this._indexerRetryNotBefore = 0;
+    this._failoverBackoffMs = 60_000;
+  }
+
+  /** The indexer stopped answering: read the chain from now on. The next refresh goes back to it
+   *  when it recovers, on a growing wait (60 s to 10 minutes). */
+  _failOverToChain(m, error) {
+    if (this.source?.kind !== "indexer") return;
+    this.deps.log("[KachatNames] the indexer didn't answer: reading the registry from the chain", error?.message ?? error);
+    this.source = { kind: "chain" };
+    this._indexerRetryNotBefore = Number(this._nowMs()) + this._failoverBackoffMs;
+    this._failoverBackoffMs = Math.min(this._failoverBackoffMs * 2, 600_000);
+    Promise.resolve().then(() => this.refresh({ announce: false })).catch(() => {});
+  }
+
+  /** While the indexer answers, the chain copy is still kept up to date now and then, so the moment
+   *  it stops the names are already here. Nothing reads this copy until then. The first walk, the
+   *  whole registry from its genesis, waits for a connection that isn't metered (iOS 4f8e14bb). */
+  _walkStandbyCopyIfDue(m) {
+    const connection = globalThis.navigator?.connection;
+    const expensive = connection?.saveData === true || ["slow-2g", "2g", "3g"].includes(connection?.effectiveType);
+    const run = async () => {
+      const key = `kachat_names_standby_walked_${m.network}`;
+      const now = Number(this._nowMs());
+      const stored = Number(await this._storageGet(key)) || 0;
+      const last = this._standbyWalkedAt || stored;
+      if ((last && now - last < (expensive ? 7_200_000 : 1_800_000)) || (!last && expensive)) return;
+      if (this._walking) return;
+      this._standbyWalkedAt = now;
+      await this._storageSet(key, String(now));
+      if (this.chainState == null || this._cacheNetwork !== m.network) {
+        this.chainState = (await this._loadCache(m)) ?? RegistryState.atGenesis(m);
+        this._cacheNetwork = m.network;
+      }
+      await this._walkShared(m);
+    };
+    run().catch((error) => this.deps.log("[KachatNames] standby walk of the registry failed:", error?.message ?? error));
+  }
+
+  /** The walk under way: a refresh and the standby walk share it rather than racing. */
+  _walkShared(m) {
+    if (!this._walking) this._walking = this._walk(m).finally(() => { this._walking = null; });
+    return this._walking;
+  }
+
   async _chooseSource(m) {
     const base = this.indexerBase();
     if (!base) return { kind: "chain" };
+    if (this.source?.kind === "chain" && Number(this._nowMs()) < this._indexerRetryNotBefore) return { kind: "chain" };
     try {
       const status = IndexerAPI.status(await this._get(base, "/names/status"));
       // registry v4: the indexer is matched on the registry id alone (no price covenant)
@@ -332,7 +411,11 @@ export class KachatNamesRegistry {
         if (virtual != null && virtual > BigInt(status.indexedDaa) + KachatNamesRegistry.maxIndexerLagDaa) return { kind: "chain" };
       }
       return { kind: "indexer", base };
-    } catch { /* no indexer: walk the chain */ }
+    } catch (error) {
+      // One missed status check doesn't take a working indexer out of use, and a browser with no
+      // connection says nothing about it (iOS 4f8e14bb). No indexer yet at all: walk the chain.
+      if (this.source?.kind === "indexer" && !(this._indexerIsDown(error) && this._indexerOutageConfirmed())) return { kind: "indexer", base };
+    }
     return { kind: "chain" };
   }
 
@@ -375,9 +458,10 @@ export class KachatNamesRegistry {
         const m = await this.prepare({ forceSourceCheck: true });
         let walkedChanges = false;
         if (this.source.kind === "chain") {
-          const report = await this._walk(m);
+          const report = await this._walkShared(m);
           walkedChanges = (report?.applied?.length ?? 0) > 0 || !!report?.fromGenesis;
         }
+        else if (this.deps.standbyWalk !== false) this._walkStandbyCopyIfDue(m);
         this.lastError = null;
         this.registryUpgrading = false;
         const now = Number(this._nowMs());
@@ -1192,12 +1276,25 @@ export class KachatNamesRegistry {
   }
 
   async _get(base, path) {
-    const res = await this._fetch(base + path, 25_000);
-    if (res.status !== 200) {
-      if (res.status === 404) throw new Failure("not found");
-      throw new Failure(`the names indexer answered ${res.status}`);
+    try {
+      const res = await this._fetch(base + path, 25_000);
+      if (res.status !== 200) {
+        if (res.status === 404) throw new Failure("not found");
+        throw new Failure(`the names indexer answered ${res.status}`);
+      }
+      const answer = JSON.parse(await res.text());
+      this._noteIndexerGaveData();
+      return answer;
+    } catch (error) {
+      // A single failure is thrown for the caller's own retry; a run of them moves the registry to
+      // the chain copy. A 404 and the like are answers.
+      if (this._indexerIsDown(error)) {
+        if (path !== "/names/status" && this.source?.kind === "indexer" && this._indexerOutageConfirmed() && this.manifest) this._failOverToChain(this.manifest, error);
+      } else if (error instanceof Failure) {
+        this._indexerFailuresInARow = 0;
+      }
+      throw error;
     }
-    return JSON.parse(await res.text());
   }
 
   // MARK: - Cache

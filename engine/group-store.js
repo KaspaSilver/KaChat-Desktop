@@ -10,6 +10,7 @@
 import * as G from "./group.js";
 import { SEND_OUTCOME_UNKNOWN } from "./transactions.js";
 import { SEND_ACCOUNT_CHANGED } from "./messages.js";
+import { groupPayloadFromHex, proofWithRetries, PROOF_RETRY_DELAYS_MS } from "./outage-scan.js";
 
 const GROUPS_KEY = "kachat-groups-v1";
 // Per-wallet group deletion tombstones: { [wallet]: { deleted: [entry...], published: [entry...] } }.
@@ -116,6 +117,11 @@ export class GroupManager {
     this._syncInFlight = null;
     this._refreshing = 0;
     this._refreshTail = Promise.resolve();
+    // Bumped by rewindGroupCursors: a read in flight must not write its older position back.
+    this._cursorRewinds = 0;
+    this._sinceRewind = null;
+    this._outageState = null;
+    this._streamingFor = null;
   }
 
   // --- serialising writers (DSK-053) ---
@@ -335,11 +341,15 @@ export class GroupManager {
     const indexer = String(this.engine.groupIndexerUrl?.() || "");
     const stored = this.groupControlCursor(wallet);
     let cursor = stored && String(stored.indexer || "") === indexer && stored.cursor ? String(stored.cursor) : null;
+    // Newest block time read up to `cursor`: all a rewind has to go on, the cursor being opaque.
+    let at = cursor ? Number(stored.at) || 0 : 0;
+    const rewinds = this._cursorRewinds;
     for (let pagesLeft = CONTROL_PAGE_BUDGET; pagesLeft > 0; pagesLeft -= 1) {
       if (this.walletAddress !== wallet) return; // switched mid-walk: the cursor is not this wallet's
       const page = await this.engine.scanGroupControlByRecipientPage(cursor, CONTROL_PAGE_LIMIT);
       if (this.walletAddress !== wallet) return;
       for (const row of page?.rows || []) {
+        at = Math.max(at, Number(row.blockTime) || 0);
         // One row that throws must not pin the cursor in front of it forever.
         try {
           const ev = await this.applyControl(row.payloadString, row.sender, row.blockTime);
@@ -353,7 +363,8 @@ export class GroupManager {
       const advanced = next != null && next !== cursor;
       if (advanced) cursor = next;
       const atEnd = Number(page?.rawCount ?? page?.rows?.length ?? 0) < CONTROL_PAGE_LIMIT || !advanced;
-      if (cursor) this._saveGroupControlCursor(wallet, { cursor, indexer, caughtUp: atEnd });
+      if (rewinds !== this._cursorRewinds) return; // rewound under this walk: the rewind stands
+      if (cursor) this._saveGroupControlCursor(wallet, { cursor, indexer, caughtUp: atEnd, ...(at ? { at } : {}) });
       if (atEnd) return;
     }
     // Budget spent mid-stream: the walk up to `cursor` was contiguous, so the next pass resumes
@@ -648,6 +659,7 @@ export class GroupManager {
       msgCounter: existing && Number(existing.currentEpoch || 0) === incomingEpoch ? (existing.msgCounter || 0) : 0,
       members: members.length ? members : (existing?.members || []),
       cursors: existing?.cursors || {},
+      cursorTimes: existing?.cursorTimes || {},
       photoHex: g.photo ? String(g.photo) : (existing?.photoHex || null),
       updatedAt: existing?.updatedAt || 0,
     };
@@ -1268,6 +1280,7 @@ export class GroupManager {
       // once from the start so that history is actually asked for. Idempotent: the app dedupes on
       // msg_id and txid.
       cursors: isNewEpoch ? {} : (existing?.cursors || {}),
+      cursorTimes: isNewEpoch ? {} : (existing?.cursorTimes || {}),
       // device_id is preserved across updates; counter resets only when the epoch advances.
       deviceIdHex: existing?.deviceIdHex || G.bytesToHex(G.generateDeviceId()),
       msgCounter: isNewEpoch ? 0 : (existing?.msgCounter || 0),
@@ -1370,6 +1383,10 @@ export class GroupManager {
   async _syncGroupsPass(wallet = this.walletAddress) {
     const events = [];
     const switched = () => this.walletAddress !== wallet;
+    if (this._sinceRewind != null) {
+      this.sinceBlockTime = Math.min(this.sinceBlockTime, this._sinceRewind);
+      this._sinceRewind = null;
+    }
     // 0. Backfill recovery invites: publish a self-addressed root (with the group seed) for any
     // admin group that lacks one for its current epoch — i.e. every group created before this
     // feature existed. One-time per group per epoch; after it lands on chain, a seedless import
@@ -1420,6 +1437,17 @@ export class GroupManager {
     if (switched()) return { controls: [], messages: [] };
     try { await this._publishGroupAnswers(); } catch { /* retried next pass */ }
     if (switched()) return { controls: [], messages: [] };
+
+    // The indexer is down: what's missed is read from the block stream and members' REST history
+    // instead, and none of its cursors move, so it serves this window again when it's back.
+    this._refreshBlockStream(wallet);
+    if (this.engine.shouldSkipGroupIndexer?.()) {
+      await this._catchUpGroupsFromChain(wallet);
+      if (switched()) return { controls: [], messages: [] };
+      const fromChain = [];
+      this._drainChainResults(wallet, events, fromChain);
+      return { controls: events, messages: this._takeMemberStatuses(fromChain, events) };
+    }
 
     // 1. Discover invites / rotations addressed to us, from the persisted cursor (DSK-041). The
     // by-sender read per known admin (iOS catchUpGroupControl) is not used here: by-recipient
@@ -1517,27 +1545,31 @@ export class GroupManager {
         // Decoded with, and cursors written into, the account the pass started for only.
         if (switched()) return;
         const newest = {};
+        const newestTimes = {};
         results.forEach((rows, i) => {
           if (!rows) return;
           for (const row of rows) {
             const parsed = G.parseGroupMessagePayload(row.payloadString);
             const decoded = this.processMessage(parsed);
             if (decoded) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
-            if (row.cursor) newest[scans[i]] = row.cursor;
+            if (row.cursor) { newest[scans[i]] = row.cursor; newestTimes[scans[i]] = Number(row.blockTime) || 0; }
           }
         });
         if (!Object.keys(newest).length) return;
         this._mutate(record.groupId, (fresh) => {
           const cursors = { ...(fresh.cursors || {}) };
+          const cursorTimes = { ...(fresh.cursorTimes || {}) };
           let changed = false;
           for (const [blindedHex, cursor] of Object.entries(newest)) {
             if ((cursors[blindedHex] || null) !== (startCursors[blindedHex] || null)) continue;
             if (cursors[blindedHex] === cursor) continue;
             cursors[blindedHex] = cursor;
+            cursorTimes[blindedHex] = newestTimes[blindedHex];
             changed = true;
           }
           if (!changed) return false;
           fresh.cursors = cursors;
+          fresh.cursorTimes = cursorTimes;
           return true;
         });
       });
@@ -1546,6 +1578,14 @@ export class GroupManager {
     // A minute back: a computer clock running ahead must not skip the newest rows.
     if (switched()) return { controls: [], messages: [] };
     if (fullScan && !this.sinceBlockTime) this.sinceBlockTime = Date.now() - 60_000;
+    // The indexer went down during this pass: what it didn't serve comes from the chain.
+    if (this.engine.isGroupIndexerDown?.()) {
+      const state = this._outageFor(wallet);
+      for (const message of messages) if (message.txId) state.handled.add(message.txId);
+      await this._catchUpGroupsFromChain(wallet);
+      if (switched()) return { controls: [], messages: [] };
+    }
+    this._drainChainResults(wallet, events, messages);
     return { controls: events, messages: this._takeMemberStatuses(messages, events) };
   }
 }
@@ -1612,19 +1652,226 @@ GroupManager.prototype._forceRefreshPass = async function _forceRefreshPass(grou
   // counter, epoch, roots, roster, photo - stays exactly as the fresh read has it.
   await this._withGroupLock(() => {
     const cursors = {};
+    const cursorTimes = {};
     results.forEach((rows, i) => {
       if (!rows) return;
       for (const row of rows) {
         const parsed = G.parseGroupMessagePayload(row.payloadString);
         const decoded = this.processMessage(parsed, rejections);
         if (decoded && decoded.groupId === groupId) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
-        if (row.cursor) cursors[scans[i]] = row.cursor;
+        if (row.cursor) { cursors[scans[i]] = row.cursor; cursorTimes[scans[i]] = Number(row.blockTime) || 0; }
       }
     });
-    this._mutate(groupId, (fresh) => { fresh.cursors = cursors; });
+    this._mutate(groupId, (fresh) => { fresh.cursors = cursors; fresh.cursorTimes = cursorTimes; });
   });
   rejections.epochRootsArchived = Math.max(0, archivedCount() - archivedBefore);
   return { controls: events, messages: this._takeMemberStatuses(messages, events), rejections };
+};
+
+// --- indexer outage (iOS 4f8e14bb) ---------------------------------------------------------------
+// While the indexer is down, groups come from the node's block stream and from each admin's and
+// member's own REST history (every gcomm and gctl is a transaction from its author to themselves).
+// Rows come out as the same `{ ...decoded, txId, blockTime }` and control events syncGroups always
+// returned, on the next pass. A gcomm proves its own sender (signature + roster, processMessage);
+// a gctl's sender is a claim until its input's signature proves it. A txid counts once across both
+// sources, and only once it has been dealt with: a row that couldn't be proven or read yet comes
+// round again, from the next pass or from the indexer when it's back.
+const CHAIN_LOOKBACK_MS = 3 * 24 * 60 * 60 * 1000;
+const SINCE_REWIND_MS = 10_000;
+const HANDLED_LIMIT = 20_000;
+
+GroupManager.prototype._outageFor = function _outageFor(wallet) {
+  if (this._outageState?.wallet !== wallet) {
+    // Another account's in-flight results die with its state object.
+    this._outageState = { wallet, handled: new Set(), claimed: new Set(), lanes: new Map(), controls: [], messages: [] };
+  }
+  return this._outageState;
+};
+
+GroupManager.prototype._claimTx = function _claimTx(state, txId) {
+  if (!txId || state.handled.has(txId) || state.claimed.has(txId)) return false;
+  state.claimed.add(txId);
+  return true;
+};
+
+GroupManager.prototype._releaseTx = function _releaseTx(state, txId, handled) {
+  state.claimed.delete(txId);
+  if (!handled) return;
+  if (state.handled.size >= HANDLED_LIMIT) state.handled.clear();
+  state.handled.add(txId);
+};
+
+GroupManager.prototype._drainChainResults = function _drainChainResults(wallet, events, messages) {
+  const state = this._outageState;
+  if (state?.wallet !== wallet) return;
+  events.push(...state.controls.splice(0));
+  messages.push(...state.messages.splice(0));
+};
+
+/** The block stream runs while the indexer is down; the engine ends it on an account change. */
+GroupManager.prototype._refreshBlockStream = function _refreshBlockStream(wallet) {
+  if (typeof this.engine.startGroupBlockScan !== "function") return;
+  if (this.engine.isGroupIndexerDown?.()) {
+    this.engine.startGroupBlockScan({ wallet, onRows: (rows) => this._ingestBlockRows(wallet, rows) });
+    this._streamingFor = wallet;
+  } else if (this._streamingFor) {
+    this._streamingFor = null;
+    this.engine.stopGroupBlockScan?.();
+  }
+};
+
+GroupManager.prototype._ingestBlockRows = function _ingestBlockRows(wallet, rows) {
+  if (this.walletAddress !== wallet) return;
+  const state = this._outageFor(wallet);
+  const delays = this.engine.outageProofRetryDelaysMs ?? PROOF_RETRY_DELAYS_MS;
+  for (const row of rows) {
+    const work = row.kind === "control"
+      ? this._ingestChainControl(state, row, { delays })
+      : this._ingestChainMessage(state, row);
+    work.catch((error) => this.engine.log?.(`Group row from the block stream skipped: ${error?.message || error}`));
+  }
+};
+
+GroupManager.prototype._ingestChainMessage = async function _ingestChainMessage(state, row) {
+  if (!this._claimTx(state, row.txId)) return;
+  let decoded = null;
+  try {
+    // In the lock like every other decode: the keys it reads are the ones the record holds now.
+    await this._withGroupLock(() => {
+      if (this.walletAddress !== state.wallet) return;
+      decoded = this.processMessage(G.parseGroupMessagePayload(row.payloadString));
+    });
+  } finally { this._releaseTx(state, row.txId, Boolean(decoded)); }
+  if (decoded && this.walletAddress === state.wallet) state.messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
+};
+
+/** Addressed to this wallet, or addressed to no one and readable by it. Decided before anything is
+ *  asked of the REST API: most control traffic in a block is for someone else. */
+GroupManager.prototype._controlIsMine = async function _controlIsMine(payloadString) {
+  const parsed = G.parseControlPayload(payloadString);
+  if (!parsed) return false;
+  if (parsed.recipientXOnlyPubKey && G.bytesToHex(parsed.recipientXOnlyPubKey) !== this.selfPubHex()) return false;
+  try { await this.engine.decryptGroupControl(parsed.encryptedHex); return true; }
+  catch { return false; }
+};
+
+/** "applied" (or forged, or not ours: dealt with either way), "unknown" (can't be proven yet) or
+ *  "skipped" (already claimed elsewhere). */
+GroupManager.prototype._ingestChainControl = async function _ingestChainControl(state, row, { raw = null, delays = [] } = {}) {
+  if (!this._claimTx(state, row.txId)) return "skipped";
+  const current = () => this.walletAddress === state.wallet;
+  let outcome = "applied";
+  try {
+    if (!row.sender) { outcome = "unknown"; return outcome; } // no claim to check: the lane has it
+    if (!(await this._controlIsMine(row.payloadString))) return outcome;
+    if (!current()) { outcome = "skipped"; return outcome; }
+    const proof = await proofWithRetries(
+      () => this.engine.provenChainSender({ txId: row.txId, expected: row.sender, raw }),
+      { delays, wanted: current },
+    );
+    if (!current()) { outcome = "skipped"; return outcome; }
+    if (proof === "unknown") { outcome = "unknown"; return outcome; }
+    if (proof !== "proven") {
+      this.engine.log?.(`Dropped a group control message with a forged sender: ${row.txId}`);
+      return outcome;
+    }
+    const event = await this.applyControl(row.payloadString, row.sender, row.blockTime);
+    if (!current()) { outcome = "skipped"; return outcome; }
+    if (event) state.controls.push({ ...event, blockTime: row.blockTime ?? null });
+    return outcome;
+  } finally { this._releaseTx(state, row.txId, outcome === "applied"); }
+};
+
+/** Each admin's and member's own history, admins first: their controls hold the keys the messages
+ *  need. Each address has its own cursor at the newest row seen, in memory only, so a pass asks only
+ *  for what's new. Invites to groups this wallet doesn't hold yet aren't here: the stream has those. */
+GroupManager.prototype._catchUpGroupsFromChain = async function _catchUpGroupsFromChain(wallet) {
+  if (typeof this.engine.groupChainTransactions !== "function") return;
+  const switched = () => this.walletAddress !== wallet;
+  const state = this._outageFor(wallet);
+  const nowMs = Date.now();
+  const since = Math.max(this.sinceBlockTime > SINCE_REWIND_MS ? this.sinceBlockTime - SINCE_REWIND_MS : 0, nowMs - CHAIN_LOOKBACK_MS);
+  const records = this.listGroups();
+  const admins = new Set(records.map((record) => record.adminAddress).filter(Boolean));
+  const members = new Set(records.flatMap((record) => (record.members || []).map((member) => member.address)).filter(Boolean));
+  for (const admin of admins) members.delete(admin);
+  for (const address of [...admins, ...members]) {
+    if (switched()) return;
+    const key = String(address).toLowerCase();
+    const from = Math.max(since, state.lanes.get(key) || 0);
+    let history;
+    try { history = await this.engine.groupChainTransactions(address, from); }
+    catch { continue; } // the next pass asks again from the same place
+    if (switched()) return;
+    let newestSeen = from;
+    for (const tx of history) {
+      const found = tx.senders?.has(key) ? groupPayloadFromHex(tx.payloadHex) : null;
+      if (found) {
+        const row = { txId: tx.txId, sender: address, blockTime: tx.blockTime, cursor: null, payloadString: found.payloadString };
+        if (found.kind === "control") {
+          const outcome = await this._ingestChainControl(state, row, { raw: tx.raw });
+          if (switched()) return;
+          // Not listed yet, or the REST API is struggling: this address stops here so the next
+          // pass starts from this row. Order matters for control.
+          if (outcome === "unknown") break;
+        } else {
+          await this._ingestChainMessage(state, row);
+          if (switched()) return;
+        }
+      }
+      // Capped at now: one row claiming a far-future time would freeze the cursor.
+      newestSeen = Math.max(newestSeen, Math.min(tx.blockTime, nowMs));
+    }
+    state.lanes.set(key, newestSeen);
+  }
+};
+
+/** After an outage: the indexer serves everything after `toBlockTimeMs` (ms) again. The time cursor
+ *  moves back. Stream cursors are the indexer's opaque tokens, which can't be set to a time, so one
+ *  whose newest row is past that time (or not known) is dropped and that stream is re-read from its
+ *  start: idempotent, the same re-walk a key rotation does. A stream that stopped before the time
+ *  keeps its cursor. Group deletion floors are tombstones with no time in them: a deleted group has
+ *  no record here to rewind, and a re-served root for it is refused by _applyRoot as always. */
+GroupManager.prototype.rewindGroupCursors = async function rewindGroupCursors(toBlockTimeMs, wallet = this.walletAddress) {
+  const summary = { lanes: 0, control: false, since: false };
+  const to = Math.floor(Number(toBlockTimeMs));
+  if (!Number.isFinite(to) || to < 0 || !wallet || wallet !== this.walletAddress) return summary;
+  this._cursorRewinds += 1;
+  if (this.sinceBlockTime > to) {
+    this.sinceBlockTime = to;
+    summary.since = true;
+  }
+  // A pass running now writes the time it started from back when it finishes.
+  if (this._syncInFlight) this._sinceRewind = to;
+  const stored = this.groupControlCursor(wallet);
+  if (stored && !(Number(stored.at) > 0 && Number(stored.at) <= to)) {
+    this.resetGroupControlCursor(wallet);
+    summary.control = true;
+  }
+  await this._withGroupLock(() => {
+    if (this.walletAddress !== wallet) return;
+    for (const record of this.listGroups()) {
+      if (this.isGroupTombstoned(record.groupId, record.adminSigningPub)) continue;
+      this._mutate(record.groupId, (fresh) => {
+        const cursors = { ...(fresh.cursors || {}) };
+        const times = { ...(fresh.cursorTimes || {}) };
+        let dropped = 0;
+        for (const lane of Object.keys(cursors)) {
+          const at = Number(times[lane]) || 0;
+          if (at > 0 && at <= to) continue;
+          delete cursors[lane];
+          delete times[lane];
+          dropped += 1;
+        }
+        if (!dropped) return false;
+        summary.lanes += dropped;
+        fresh.cursors = cursors;
+        fresh.cursorTimes = times;
+        return true;
+      });
+    }
+  });
+  return summary;
 };
 
 export function createGroupManager(engine) {

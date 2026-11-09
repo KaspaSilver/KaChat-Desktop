@@ -8,11 +8,13 @@
 
 import * as T from "../engine/chess-tournament.js";
 import * as Chess from "../engine/chess.js";
-import { fetchBroadcastHistory, hasBroadcastIndexer, sendBroadcastMessage, broadcastPayloadBytes } from "../engine/broadcasts.js";
+import { fetchBroadcastHistory, hasBroadcastIndexer, sendBroadcastMessage, broadcastPayloadBytes, parseBroadcastPayload, restBroadcastSenderShape, judgeBroadcastSender, BROADCAST_SENDER } from "../engine/broadcasts.js";
 import { confirmDialog, promptDialog, chooseDialog } from "./dialogs.js";
 import { setServiceScanWanted } from "./broadcasts.js";
 import { KAS_UNIT } from "../engine/network.js";
 import { getEndpoint } from "../engine/endpoints.js";
+import { isIndexerDown, onIndexerAvailabilityChange } from "../engine/indexer-health.js";
+import { chainHistory } from "../engine/chain-history.js";
 import {
   initChessBots, openChessBots, renderChessBots, afterChessBotsRender, chessBotsClick, chessBotsMayLeave,
   resetChessBotsForAccount, openChessBotBoards, openChessBotChallengeScreen, ICON_CPU,
@@ -91,6 +93,19 @@ let autoRejoinsLeft = 0;
 const MAX_AUTO_REJOINS = 2;
 const MAX_ROOM_NUMBER = 1_000_000_000;
 const MAX_ROOM_GAP = 1_000;
+const ROOMS_UNCONFIRMED_MESSAGE = "The chess server is unreachable, so open rooms can't be confirmed. Try again when it's back.";
+const FLAG_UNCONFIRMED_MESSAGE = "The chess server is unreachable and the network hasn't confirmed this yet. Try again in a moment.";
+const CHAIN_READ_INTERVAL_MS = 10_000;
+const RECENT_ANSWER_MS = 15_000;
+/** How much of a margin past the flag a chain read needs before it can confirm the flag. */
+const CHAIN_FLAG_MARGIN_MS = 5_000;
+// When the newest indexer answer for the arena was asked for (wall ms).
+let arenaIndexerAnsweredAt = 0;
+// While the indexer is down, when each of this player's games last had its players read from the
+// REST API (wall ms).
+const chainReadAt = new Map();
+let nextChainReadAt = 0;
+const arenaServerDown = () => hasBroadcastIndexer() && isIndexerDown(getEndpoint("broadcastIndexer"));
 const ROOM_FILLED_MESSAGE = "That room filled first. Tap Join to try the next one.";
 /** A bot challenge link that came while this player was busy online (isBusyOnline): it waits
  *  until that is over and Chess's home is showing (iOS 4922804 ChessHomeView.takeChallenge). */
@@ -241,6 +256,7 @@ function backfill(opts = {}) {
 async function backfillNow({ full = false } = {}) {
   await verifyCachedArenaRows();
   if (!hasBroadcastIndexer()) { historyReady = true; return; }
+  const askedAt = Date.now();
   try {
     let before = null;
     const cutoff = Date.now() - ARENA_RETENTION_MS;
@@ -256,6 +272,8 @@ async function backfillNow({ full = false } = {}) {
       before = oldest;
     }
     backfilled = true;
+    // Rows up to the moment it was asked are in, once any paging due has finished (iOS da59726).
+    arenaIndexerAnsweredAt = askedAt;
     if (!historyReady) { historyReady = true; render(); }
   } catch (error) {
     // The indexer may not track the arena yet (CHESS_TOURNAMENTS.md §6): the lobby then shows
@@ -523,12 +541,78 @@ async function send(message) {
  *  indexer holds this second is what every other device is choosing from - then the room. A
  *  seat that ran out is still in the player list until the next join drops it, so "already
  *  in" means seated NOW (iOS b552d7d). */
+/** Whether the rooms here are the indexer's as of just now. One failed request isn't an outage: it's
+ *  tried again, and an answer from the last few seconds stands (iOS da59726). */
+async function arenaViewIsConfirmed() {
+  if (!hasBroadcastIndexer()) return true;
+  const askedAt = Date.now();
+  await backfill({ full: !backfilled });
+  if (arenaIndexerAnsweredAt >= askedAt) return true;
+  if (!arenaServerDown()) {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const retriedAt = Date.now();
+    await backfill({ full: !backfilled });
+    if (arenaIndexerAnsweredAt >= retriedAt) return true;
+  }
+  return Date.now() - arenaIndexerAnsweredAt < RECENT_ANSWER_MS;
+}
+
+/** Whether the chain has been read since this flag: the moves here can be behind (just opened, or
+ *  the indexer down), and a clock judged from those says nothing (iOS da59726). */
+function flagIsConfirmed(t, game, flag) {
+  if (!hasBroadcastIndexer()) return true;
+  if (arenaIndexerAnsweredAt >= flag + 1_500) return true;
+  return (chainReadAt.get(keyOf(t.id, game.id)) || 0) >= flag + CHAIN_FLAG_MARGIN_MS;
+}
+
+/** One player's arena rows for a tournament from the Kaspa REST API, the sender verified as for
+ *  indexer rows (DSK-045). True when REST answered. */
+async function readArenaFromChain(tournamentId, player, since) {
+  let transactions;
+  try { transactions = await chainHistory.chainTransactions(player, since); } catch { return false; }
+  const accepted = [];
+  for (const tx of transactions) {
+    let text = "";
+    try { text = new TextDecoder().decode(Uint8Array.from(tx.payloadHex.match(/../g) || [], (pair) => parseInt(pair, 16))); } catch { continue; }
+    const parsed = parseBroadcastPayload(text);
+    if (parsed?.channel !== T.ARENA_CHANNEL || T.decodeMessage(parsed.content)?.t !== tournamentId) continue;
+    const shape = restBroadcastSenderShape(tx.raw);
+    const judged = judgeBroadcastSender(shape.inputAddress, shape.outputAddress);
+    if (judged.verdict !== BROADCAST_SENDER.VERIFIED) continue;
+    accepted.push({ txId: tx.txId, senderAddress: judged.senderAddress, content: parsed.content, blockTime: tx.blockTime });
+  }
+  if (accepted.length) mergeRows(accepted);
+  return true;
+}
+
+/** The indexer is down: this player's flagged games from the two players' addresses. It fills in
+ *  what the block stream missed, and is what lets a timeout claim go out (iOS da59726). */
+async function readMyGamesFromChainIfDue() {
+  const my = me();
+  if (!my || !arenaServerDown() || Date.now() < nextChainReadAt) return;
+  nextChainReadAt = Date.now() + CHAIN_READ_INTERVAL_MS;
+  for (const t of Object.values(tournaments)) {
+    if (T.tournamentStatus(t) !== "live") continue;
+    for (const game of Object.values(t.games)) {
+      const mine = T.colorOf(game, my);
+      const flag = T.flagAt(game);
+      if (!mine || flag == null || !T.autoClaimDue(flag, Date.now())) continue;
+      const askedAt = Date.now();
+      const answered = await readArenaFromChain(t.id, T.addressOf(game, Chess.opposite(mine)), game.startedAt);
+      await readArenaFromChain(t.id, my, game.startedAt);
+      if (me() !== my) return; // switched meanwhile: nothing more is this account's
+      if (answered) chainReadAt.set(keyOf(t.id, game.id), askedAt);
+    }
+  }
+}
+
 async function joinPublicRoom(duel, { automatic = false } = {}) {
   const my = me();
   if (!my) return false;
   if (!historyReady) { deps.showToast?.("Still loading the rooms - try again in a moment."); return false; }
   if (!automatic) autoRejoinsLeft = MAX_AUTO_REJOINS;
-  await backfill();
+  // Picks a room from the shared view, as of just now: never from what this device last saw.
+  if (!(await arenaViewIsConfirmed())) { deps.showToast?.(ROOMS_UNCONFIRMED_MESSAGE); return false; }
   // The account may have changed while the rooms loaded (iOS 8d5f925).
   if (me() !== my) return false;
   const id = duel ? currentDuelRoomId() : currentPublicRoomId();
@@ -641,6 +725,7 @@ async function joinTournament(t) {
     deps.showToast?.(T.tournamentStatus(busyIn) === "open" ? `You're already waiting in ${busyIn.name}.` : `You're still playing in ${busyIn.name}.`);
     return false;
   }
+  if (T.isPublicId(t.id) && arenaServerDown()) { deps.showToast?.(ROOMS_UNCONFIRMED_MESSAGE); return false; }
   return send(T.messages.join(t.id));
 }
 
@@ -826,6 +911,7 @@ function claimTimeoutsIfDue() {
       // A second and a half past the flag, so the claim's block time is safely after; and only
       // a recent flag - an old abandoned game is left to the board's Claim win.
       if (!T.autoClaimDue(T.flagAt(game), now)) continue;
+      if (!flagIsConfirmed(t, game, T.flagAt(game))) continue;
       // Our own last move still carries this device's clock: the opponent's clock started at
       // an instant the chain has not confirmed yet - wait for it.
       const last = game.moves.at(-1);
@@ -849,6 +935,7 @@ function canClaimWin(game) {
 function claimWin(t, game) {
   if (!canClaimWin(game)) return;
   if (!T.claimTapAllowed(claimedGames.get(keyOf(t.id, game.id)), Date.now())) return;
+  if (arenaServerDown() && !flagIsConfirmed(t, game, T.flagAt(game) ?? now)) { deps.showToast?.(FLAG_UNCONFIRMED_MESSAGE); return; }
   postClaim(t, game, { force: true });
 }
 function postClaim(t, game, { force = false } = {}) {
@@ -1969,6 +2056,10 @@ function onClick(event) {
 // ---------------------------------------------------------------------------------------------
 
 export function initChessTournaments(dependencies) {
+  // Back from an outage: the arena is paged again, and the indexer has the last word.
+  onIndexerAvailabilityChange(({ down }) => {
+    if (!down && arenaIndexerAnsweredAt > 0) backfill({ full: true }).catch(() => {});
+  });
   deps = dependencies;
   screenEl = document.querySelector("[data-chess-tournaments]");
   if (!screenEl) return;
@@ -2005,6 +2096,7 @@ export function showChessTournaments() {
     if (!historyReady && Date.now() > historyDeadline) { historyReady = true; render(); }
     expirePendingMoves();
     dropUnconfirmedRowsIfDue().catch(() => {});
+    readMyGamesFromChainIfDue().catch(() => {});
     claimTimeoutsIfDue();
     checkMonthRollover();
     if (document.hidden || !screenEl) return;
@@ -2097,6 +2189,8 @@ export function hideChessTournaments() {
 
 export function resetChessTournamentsForAccount() {
   resetChessBotsForAccount();
+  chainReadAt.clear();
+  nextChainReadAt = 0;
   pendingMoveGames.clear();
   pendingMoveSentAt.clear();
   claimedGames.clear();

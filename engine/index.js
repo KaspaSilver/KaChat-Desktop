@@ -7,13 +7,16 @@ import { getBalance, sendKaspa, sendMaxKaspa, estimateMaxSend, sweepAllToSelf, e
 import { kasToSompi, checkedUtxoAnswer } from "./amounts.js";
 import { makeQrPayload, drawKaspaQr } from "./qr.js";
 import { createMessageEnvelope, createEncryptedMessageEnvelope, createEncryptedHandshakeEnvelope, createSelfStashEnvelope, sendMessagePreview, sendMessageOnchain, sendHandshakeOnchain, sendSelfStashOnchain, SELF_STASH_ACCOUNT_CHANGED } from "./messages.js";
-import { buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncSentMessagesFromIndexer, sentPaymentMemoFromPayload, syncIncomingPaymentsFromRest, checkIncomingRestPayment, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
+import { verifyIncomingPayment, buildConversationSyncPlan, syncConversationPreview, syncConversationFromIndexerWithLegacyAliases, syncIncomingHandshakesFromIndexer, syncOutgoingHandshakesFromIndexer, syncSentMessagesFromIndexer, sentPaymentMemoFromPayload, syncIncomingPaymentsFromRest, checkIncomingRestPayment, syncSelfStashFromChain, fetchSavedHandshakeNotes, testKasiaIndexer, probeInboxSupport, fetchInboxMessages, DEFAULT_KASIA_INDEXER_URL } from "./sync.js";
 import { KASIA_PROTOCOL, KASIA_INTEGRATION_STATUS, buildCommMessage, buildEncryptedCommMessage, makeKasiaCommPayload, parseKasiaPayloadHex, decodePayload, inboxTagFor, buildEncryptedPaymentPayload, sealPaymentRecord } from "./kasia-protocol.js";
 import { loadKasiaCipher, isKasiaCipherLoaded, encryptKasiaMessage, encryptKasiaContextualMessage, decryptKasiaMessage, decryptSentKasiaMessage, deriveKasiaAliases } from "./kasia-cipher.js";
 import { requireKaspa, NETWORK_ID } from "./utils.js";
 import { getEndpoint } from "./endpoints.js";
 import { queryGroupMessages, queryGroupMessagesSince, queryGroupControlByRecipient, queryGroupControlByRecipientPage, queryGroupControlBySender } from "./group-indexer.js";
-import { extractBroadcastHitsFromBlock, normalizeBroadcastChannel, BroadcastSenderVerifier, BROADCAST_SENDER } from "./broadcasts.js";
+import { chainHistory } from "./chain-history.js";
+import { shouldSkipIndexer, isIndexerDown } from "./indexer-health.js";
+import { createInboxBlockScan, groupRowsFromBlock, provenTxSender, PROOF_RETRY_DELAYS_MS } from "./outage-scan.js";
+import { blockFromBlockAddedEvent, extractBroadcastHitsFromBlock, normalizeBroadcastChannel, BroadcastSenderVerifier, BROADCAST_SENDER } from "./broadcasts.js";
 import {
   KNS_DEFAULT_MAINNET_URL,
   normalizeDomainName as knsNormalizeDomainName,
@@ -156,6 +159,12 @@ export class KaspaEngine {
     this.blockScanReconnectHandler = null;
     this.blockScanStartPromise = null;
     this.blockScanUnusableLogged = false;
+    // Other readers of the same block stream, for while the indexer is down (see the outage
+    // section below). Public rooms and these share the one node subscription.
+    this.blockScanClients = new Set();
+    this.inboxBlockScan = null;
+    this.groupBlockScan = null;
+    this.outageProofRetryDelaysMs = PROOF_RETRY_DELAYS_MS;
     // Who really sent a public-chat post (audit DSK-045): input 0's address, accepted only when
     // output 0 pays it back. Shared by the block stream and indexer-row verification.
     this.broadcastSenderVerifier = new BroadcastSenderVerifier({ log: (message) => this.log(message) });
@@ -220,7 +229,7 @@ export class KaspaEngine {
     this.blockScanChannels = next;
     this.setBroadcastScanState({ channels: [...next] });
     if (same) return this.broadcastScanSnapshot();
-    if (next.size === 0) {
+    if (!this.blockScanWanted()) {
       queueMicrotask(() => { this.detachBroadcastBlockScan().catch(() => {}); });
     } else if (!this.blockScanHandler || this.blockScanRpc !== this.rpc) {
       queueMicrotask(() => { this.startBroadcastBlockScan().catch(() => {}); });
@@ -248,6 +257,10 @@ export class KaspaEngine {
    *  known yet is looked up (REST, with retries) and delivered later only if it verifies -
    *  it is never shown under output 0's address. */
   handleBlockAddedEvent(event) {
+    if (this.blockScanClients.size) {
+      const block = blockFromBlockAddedEvent(event);
+      if (block) for (const client of [...this.blockScanClients]) { try { client(block); } catch { /* the others still read it */ } }
+    }
     if (this.blockScanChannels.size === 0) return;
     this.blockScanState.lastBlockAt = Date.now();
     const verifier = this.broadcastSenderVerifier;
@@ -312,7 +325,7 @@ export class KaspaEngine {
   }
 
   async startBroadcastBlockScan() {
-    if (this.blockScanChannels.size === 0) return null;
+    if (!this.blockScanWanted()) return null;
     if (!this.kaspa) return null;
     if (this.blockScanStartPromise) return this.blockScanStartPromise;
 
@@ -326,7 +339,7 @@ export class KaspaEngine {
         return null;
       }
       // Every room closed while the node was being reached: nothing to start.
-      if (this.blockScanChannels.size === 0) return null;
+      if (!this.blockScanWanted()) return null;
       if (typeof rpc?.subscribeBlockAdded !== "function" || typeof rpc?.addEventListener !== "function") {
         this.setBroadcastScanState({
           status: "unsupported",
@@ -349,7 +362,7 @@ export class KaspaEngine {
       // The WASM client can reconnect its own socket without this.rpc ever changing, which
       // silently drops the node-side subscription. Re-send it whenever the socket comes up.
       const reconnectHandler = () => {
-        if (this.blockScanChannels.size === 0) return;
+        if (!this.blockScanWanted()) return;
         Promise.resolve()
           .then(() => rpc.subscribeBlockAdded())
           .then(() => this.setBroadcastScanState({ status: "scanning", lastError: "" }))
@@ -365,7 +378,7 @@ export class KaspaEngine {
         // Every room closed while the subscription was on its way: the stop that ran meanwhile may
         // have found nothing to undo yet, or unsubscribed before this subscribe landed. Undone
         // here, or the node would stream every block to an app watching no room.
-        if (this.blockScanChannels.size === 0) {
+        if (!this.blockScanWanted()) {
           const stillAttached = this.blockScanRpc === rpc;
           await this.detachBroadcastBlockScan();
           if (!stillAttached) { try { await rpc.unsubscribeBlockAdded(); } catch { /* node already gone */ } }
@@ -406,7 +419,7 @@ export class KaspaEngine {
   /** Re-attaches the scan to whatever node is primary now. Called after every reconnect and
    *  failover, plus as a heartbeat backstop. */
   async rebuildBroadcastBlockScan() {
-    if (this.blockScanChannels.size === 0) {
+    if (!this.blockScanWanted()) {
       await this.detachBroadcastBlockScan();
       return null;
     }
@@ -421,7 +434,125 @@ export class KaspaEngine {
   async stopBroadcastBlockScan() {
     this.blockScanChannels = new Set();
     this.setBroadcastScanState({ channels: [] });
-    await this.detachBroadcastBlockScan();
+    if (!this.blockScanWanted()) await this.detachBroadcastBlockScan();
+  }
+
+  // -------------------------------------------------------------------------
+  // Indexer outage (iOS 4f8e14bb)
+  //
+  // Clients of the block stream that public rooms already use, kept apart from the rooms' wanted
+  // set. All of them belong to one account: setWallet and clearSession stop them.
+  // -------------------------------------------------------------------------
+
+  blockScanWanted() {
+    return this.blockScanChannels.size > 0 || this.blockScanClients.size > 0;
+  }
+
+  /** `client(block)` for every block until the returned function is called. */
+  addBlockScanClient(client) {
+    this.blockScanClients.add(client);
+    if (!this.blockScanHandler || this.blockScanRpc !== this.rpc) {
+      queueMicrotask(() => { this.startBroadcastBlockScan().catch(() => {}); });
+    }
+    return () => {
+      if (!this.blockScanClients.delete(client) || this.blockScanWanted()) return;
+      queueMicrotask(() => { this.detachBroadcastBlockScan().catch(() => {}); });
+    };
+  }
+
+  /** One REST transaction with its inputs resolved, or null when it isn't listed (yet). */
+  async fetchChainTransaction(txId) {
+    const base = String(getEndpoint("kaspaApi") || "").replace(/\/+$/, "");
+    const response = await fetch(`${base}/transactions/${encodeURIComponent(txId)}?inputs=true&outputs=true&resolve_previous_outpoints=light`, { headers: { Accept: "application/json" }, cache: "no-store" });
+    return response.ok ? response.json() : null;
+  }
+
+  verifyChainTransaction(raw, txId) {
+    return verifyIncomingPayment(raw, txId, "");
+  }
+
+  /** "proven" | "forged" | "unknown": whether `expected` signed the inputs of `txId`. Pass `raw`
+   *  when the REST transaction is already in hand. */
+  provenChainSender({ txId, expected, raw = null }) {
+    return provenTxSender({ txId, expected, raw, fetchTx: (id) => this.fetchChainTransaction(id), verify: (tx, id) => this.verifyChainTransaction(tx, id) });
+  }
+
+  /** Whether the indexer is confirmed down; the next outage check may also probe for its return. */
+  shouldSkipGroupIndexer() {
+    return shouldSkipIndexer(getEndpoint("kasiaIndexer"));
+  }
+
+  isGroupIndexerDown() {
+    return isIndexerDown(getEndpoint("kasiaIndexer"));
+  }
+
+  /** An address's accepted transactions since `since` (ms), oldest first, from the REST API. */
+  groupChainTransactions(address, since) {
+    return chainHistory.chainTransactions(address, since);
+  }
+
+  /** The block-stream side of the group outage path: `onRows(rows)` gets each block's group rows
+   *  (`groupRowsFromBlock`). The group store starts and stops this itself. */
+  startGroupBlockScan({ wallet = this.address, onRows } = {}) {
+    if (!wallet || wallet !== this.address || typeof onRows !== "function") return false;
+    if (this.groupBlockScan?.wallet === wallet) { this.groupBlockScan.onRows = onRows; return true; }
+    this.stopGroupBlockScan();
+    const scan = { wallet, onRows, remove: null };
+    scan.remove = this.addBlockScanClient((block) => {
+      if (this.address !== wallet || this.groupBlockScan !== scan) return;
+      const rows = groupRowsFromBlock(this.kaspa, block, { networkId: NETWORK_ID });
+      if (rows.length) scan.onRows(rows);
+    });
+    this.groupBlockScan = scan;
+    return true;
+  }
+
+  stopGroupBlockScan() {
+    const scan = this.groupBlockScan;
+    this.groupBlockScan = null;
+    scan?.remove?.();
+  }
+
+  /** While the indexer is down, watches every block for first-contact messages tagged for this
+   *  wallet (iOS refreshInboxBlockScan). `onHit({ sender, txid, blockTime, payloadHex })`:
+   *  `sender`, `txid` and `blockTime` are a `fetchInboxMessages` row with `sender` proven by the
+   *  input's signature; `payloadHex` is the whole `kchat:1:dm:<tag>:<alias>:<sealed>`. Calling it
+   *  again for the same wallet and tag only swaps `onHit`. Returns whether a scan is running. */
+  startInboxBlockScan({ wallet = this.address, tag = null, onHit } = {}) {
+    if (!wallet || wallet !== this.address || typeof onHit !== "function") return false;
+    const inboxTag = tag || inboxTagFor(wallet);
+    if (this.inboxBlockScan?.wallet === wallet && this.inboxBlockScan.tag === inboxTag) {
+      this.inboxBlockScan.onHit = onHit;
+      return true;
+    }
+    this.stopInboxBlockScan();
+    const scan = createInboxBlockScan({
+      kaspa: this.kaspa,
+      networkId: NETWORK_ID,
+      wallet,
+      tag: inboxTag,
+      onHit,
+      prove: (txId, expected) => this.provenChainSender({ txId, expected }),
+      isCurrent: () => this.address === wallet && this.inboxBlockScan === scan,
+      retryDelays: this.outageProofRetryDelaysMs,
+    });
+    this.inboxBlockScan = scan;
+    scan.remove = this.addBlockScanClient(scan.handleBlock);
+    return true;
+  }
+
+  stopInboxBlockScan() {
+    const scan = this.inboxBlockScan;
+    this.inboxBlockScan = null;
+    if (!scan) return;
+    scan.stop();
+    scan.remove?.();
+  }
+
+  /** An account change: nothing read for the old account may arrive after it. */
+  stopOutageBlockScans() {
+    this.stopInboxBlockScan();
+    this.stopGroupBlockScan();
   }
 
 
@@ -887,7 +1018,7 @@ export class KaspaEngine {
       // Backstop for the live broadcast scan: any path that swapped the primary out from
       // under us (or a start that failed while the node was down) is caught here, so a
       // wanted room can never be left silently unwatched.
-      if (this.blockScanChannels.size > 0 && this.blockScanRpc !== this.rpc && !this.blockScanStartPromise) {
+      if (this.blockScanWanted() && this.blockScanRpc !== this.rpc && !this.blockScanStartPromise) {
         queueMicrotask(() => { this.rebuildBroadcastBlockScan().catch(() => {}); });
       }
       // A hidden tab keeps the primary probed (the wallet subscription rides on it) and leaves
@@ -1064,12 +1195,14 @@ export class KaspaEngine {
     this.privateKeyHex = wallet.privateKeyHex;
     this.address = wallet.address;
     this.currentUtxos = [];
+    if (previousAddress && previousAddress !== this.address) this.stopOutageBlockScans();
     if (previousAddress && previousAddress !== this.address) queueMicrotask(() => this.stopWalletSubscription());
     if (this.rpc) queueMicrotask(() => this.rebuildWalletSubscription());
     return wallet;
   }
 
   clearSession() {
+    this.stopOutageBlockScans();
     queueMicrotask(() => this.stopWalletSubscription());
     this.privateKey = null;
     this.privateKeyHex = null;

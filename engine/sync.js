@@ -14,6 +14,8 @@ import {
   paymentPayloadEncryptedHex,
 } from "./kasia-protocol.js";
 import { getEndpoint, ENDPOINT_DEFAULTS } from "./endpoints.js";
+import { fromIndexerOrChain, shouldSkipIndexer } from "./indexer-health.js";
+import { chainHistory } from "./chain-history.js";
 import { kasTextFromSompi } from "./amounts.js";
 import { decodeAddress, AddressVersion } from "./kachat-names/registry-state.js";
 import { verifyRestTransactionSignaturesWithSender, scriptPublicKeyFromAddress, parseU32 } from "./payment-signatures.js";
@@ -262,9 +264,25 @@ export async function fetchBlockTimePages({
   return { rows, newest, pages, complete, error };
 }
 
+const INDEXER_READ_TIMEOUT_MS = 20_000;
+/** Rows read from the chain, as `fetchBlockTimePages` reports indexer pages. */
+function chainPaged(rows) {
+  return { rows, newest: rows.reduce((max, row) => Math.max(max, Number(row?.block_time || 0)), 0), pages: 1, complete: true, error: null };
+}
+/** A REST row's signature verdict: the input that verifies names its author (iOS provenByAuthor). */
+const verifyChainRow = (raw, txid) => verifyIncomingPayment(raw, txid, "");
+
 /** One GET of a JSON row array from the indexer; `label` names the read in the error. */
 async function fetchIndexerRows(url, label) {
-  const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+  // A hung server has to end, or it would never count as a failure (engine/indexer-health.js).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), INDEXER_READ_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store", signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) {
     let detail = "";
     try {
@@ -346,7 +364,7 @@ export async function syncConversationFromIndexer({
   // catching up serves what it has), so a message served late would otherwise be skipped for
   // good. The overlap comes back and is deduped by txid. Full pages are followed from their
   // newest block_time (fetchBlockTimePages, DSK-040).
-  const paged = await fetchBlockTimePages({
+  const paged = await fromIndexerOrChain(plan.indexerUrl, () => fetchBlockTimePages({
     startBlockTime: rewoundCursor(plan.cursor),
     limit: pageLimit,
     fetchPage: ({ blockTime, limit: pageSize }) => {
@@ -358,7 +376,7 @@ export async function syncConversationFromIndexer({
       });
       return fetchIndexerRows(`${plan.indexerUrl}/contextual-messages/by-sender?${query.toString()}`, "Kasia indexer request");
     },
-  });
+  }), async () => chainPaged(await chainHistory.contextualRows({ address: contact.address, alias: plan.alias, since: rewoundCursor(plan.cursor), verify: verifyChainRow })));
   const rows = paged.rows;
 
   const known = new Set(plan.knownTxids);
@@ -465,14 +483,14 @@ export async function syncSentMessagesFromIndexer({
   if (!conversationId || !contact?.address || !walletAddress || !alias) return { messages: [], nextCursor: cursor };
   if (typeof decryptSent !== "function") throw new Error("Kasia cipher decryptor is not available.");
   const baseUrl = String(indexerUrl || "").replace(/\/$/, "");
-  const paged = await fetchBlockTimePages({
+  const paged = await fromIndexerOrChain(baseUrl, () => fetchBlockTimePages({
     startBlockTime: rewoundCursor(Number(cursor) || 0),
     limit: Math.max(1, Math.min(50, Number(limit) || 50)),
     fetchPage: ({ blockTime, limit: pageSize }) => {
       const query = new URLSearchParams({ address: walletAddress, alias: textToHex(alias), block_time: String(blockTime), limit: String(pageSize) });
       return fetchIndexerRows(`${baseUrl}/contextual-messages/by-sender?${query.toString()}`, "Kasia indexer request");
     },
-  });
+  }), async () => chainPaged(await chainHistory.contextualRows({ address: walletAddress, alias, since: rewoundCursor(Number(cursor) || 0), verify: verifyChainRow })));
   const known = new Set(knownTxids);
   const messages = [];
   let nextCursor = Number(cursor) || 0;
@@ -785,15 +803,15 @@ export async function syncIncomingHandshakesFromIndexer({
   try {
     // First page a buffer behind the cursor (late-served rows), full pages followed from their
     // newest block_time (DSK-040, as for messages).
-    const paged = await fetchBlockTimePages({
+    const paged = await fromIndexerOrChain(baseUrl, () => fetchBlockTimePages({
       startBlockTime: rewoundCursor(cursor),
       limit: Math.max(1, Math.min(50, Number(limit) || 50)),
       fetchPage: ({ blockTime, limit: pageSize }) => {
         const query = new URLSearchParams({ address: walletAddress, block_time: String(blockTime), limit: String(pageSize) });
         return fetchIndexerRows(`${baseUrl}/handshakes/by-receiver?${query.toString()}`, "Incoming handshake request");
       },
-    });
-    indexerRows = paged.rows.map((row) => ({ ...row, source: "kasia-indexer" }));
+    }), async () => chainPaged(await chainHistory.handshakeRows({ address: walletAddress, sent: false, since: rewoundCursor(cursor), verify: verifyChainRow })));
+    indexerRows = paged.rows.map((row) => ({ ...row, source: row.source || "kasia-indexer" }));
     indexerPages = paged.pages;
     if (!paged.complete) indexerIncompleteAt = paged.newest;
     if (paged.error) errors.push(`Indexer (page ${paged.pages + 1}): ${paged.error?.message || paged.error}`);
@@ -894,14 +912,14 @@ export async function syncIncomingHandshakesFromIndexer({
 export async function syncOutgoingHandshakesFromIndexer({ walletAddress, cursor = 0, limit = 50, indexerUrl } = {}) {
   const baseUrl = normalizeBaseUrl(indexerUrl || DEFAULT_KASIA_INDEXER_URL);
   // From the cursor itself (no rewind, as before), full pages followed (fetchBlockTimePages).
-  const paged = await fetchBlockTimePages({
+  const paged = await fromIndexerOrChain(baseUrl, () => fetchBlockTimePages({
     startBlockTime: Number(cursor || 0),
     limit: Math.max(1, Math.min(50, Number(limit) || 50)),
     fetchPage: ({ blockTime, limit: pageSize }) => {
       const query = new URLSearchParams({ address: walletAddress, block_time: String(blockTime), limit: String(pageSize) });
       return fetchIndexerRows(`${baseUrl}/handshakes/by-sender?${query.toString()}`, "Outgoing handshake request");
     },
-  });
+  }), async () => chainPaged(await chainHistory.handshakeRows({ address: walletAddress, sent: true, since: Number(cursor || 0), verify: verifyChainRow })));
   const rows = paged.rows;
   let nextCursor = Number(cursor || 0);
   const handshakes = [];
@@ -968,6 +986,19 @@ export async function fetchSavedHandshakeNotes({ walletAddress, privateKeyHex, d
   let blockTime = 0;
   let complete = false;
   let rowCount = 0;
+  // Indexer down: the same rows, read from this wallet's own history (iOS chainSelfStash).
+  if (shouldSkipIndexer(baseUrl)) {
+    for (const row of await chainHistory.selfStashRows({ owner: walletAddress, scope: "saved_handshake" })) {
+      rowCount += 1;
+      for (const candidate of selfStashEncryptedCandidates(row.stashed_data)) {
+        try {
+          const parsed = parseSelfStashPayload(await decryptMessage(candidate, privateKeyHex));
+          if (parsed.partnerAddress) { stashes.push({ txid: row.tx_id, blockTime: row.block_time, ...parsed }); break; }
+        } catch { /* not this candidate */ }
+      }
+    }
+    return { stashes, complete: rowCount === 0 || stashes.length > 0 };
+  }
   for (let page = 0; page < maxPages; page += 1) {
     const query = new URLSearchParams({ owner: walletAddress, scope: scopeHex, limit: String(limit), block_time: String(blockTime) });
     const response = await fetch(`${baseUrl}/self-stash/by-owner?${query.toString()}`, { headers: { Accept: "application/json" }, cache: "no-store" });

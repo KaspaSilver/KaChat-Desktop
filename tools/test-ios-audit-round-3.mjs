@@ -64,7 +64,9 @@ test("a chain copy records reaching the tip, across a save", () => {
 });
 
 test(".kachat: every send is confirmed live; a chain copy past its age answers nothing", () => {
-  assert.doesNotMatch(registry, /source\?\.kind !== "indexer"\) return;/);
+  const confirm = registry.slice(registry.indexOf("async confirmOnChain("), registry.indexOf("async resolveHeldOnChain("));
+  assert.ok(confirm.length > 0);
+  assert.doesNotMatch(confirm, /source\?\.kind/);
   assert.match(registry, /if \(address == null\) return address;/);
   assert.match(registry, /st\.reachedTip !== true/);
   assert.match(registry, /chainCopyMaxAgeMs\(\) \{ return 15 \* 60 \* 1000; \}/);

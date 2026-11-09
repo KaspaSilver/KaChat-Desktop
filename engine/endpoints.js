@@ -12,6 +12,7 @@
 //   knsApi       — KNS domain/profile API
 //   trustedNode  — wRPC node endpoint ("" = auto-discover via the resolver)
 import { IS_TESTNET } from "./network.js";
+import { indexerKey, watchIndexerFetch } from "./indexer-health.js";
 
 // Each network keeps its own connection settings (iOS AppSettings.connectionProfiles): switching
 // to testnet shows testnet values, switching back brings the mainnet ones back untouched.
@@ -260,7 +261,7 @@ function installIndexerProxy() {
   // requests go direct exactly as before.
   const proxyAvailable = () => isProxyAvailable();
 
-  window.fetch = (input, init) => {
+  const routedFetch = (input, init) => {
     let rawUrl = "";
     try {
       // Cover every fetch input shape: string, URL instance (sync.js builds these - a URL has
@@ -309,6 +310,21 @@ function installIndexerProxy() {
     } catch { /* fall through to native fetch */ }
     return traceApiCall(rawUrl, init, () => nativeFetch(input, init));
   };
+  // Every request to the KaChat indexer reports how it went (engine/indexer-health.js), whichever
+  // caller made it and whichever way it was routed.
+  window.fetch = (input, init) => {
+    let url = "";
+    try { url = typeof input === "string" ? input : (input instanceof URL) ? input.href : (input && input.url) || ""; } catch { url = ""; }
+    if (!isTrackedIndexerUrl(url)) return routedFetch(input, init);
+    return watchIndexerFetch(url, () => routedFetch(input, init), { isRelayLimit: isRelayRateLimit });
+  };
+}
+/** Whether `url` is on the indexer chats or KaPost read from, not its own relay or anything else. */
+function isTrackedIndexerUrl(url) {
+  if (!url) return false;
+  let key = "";
+  try { key = indexerKey(new URL(url, window.location.origin).href); } catch { return false; }
+  return Boolean(key) && [getEndpoint("kasiaIndexer"), getEndpoint("kapostIndexer"), getEndpoint("broadcastIndexer")].some((base) => indexerKey(base) === key);
 }
 installIndexerProxy();
 

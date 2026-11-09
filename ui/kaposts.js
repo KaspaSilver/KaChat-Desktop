@@ -17,6 +17,7 @@ import {
   fetchFollowListPage,
   fetchPost,
   fetchChainPost,
+  kaPostIndexerIsDown,
   KAPOST_PLACEHOLDER_REQUESTER,
   fetchThread,
   fetchGlobalFeed,
@@ -59,6 +60,8 @@ import {
   pollClosesAt,
   lastOwnKaPostActivityAt,
 } from "../engine/kaposts.js";
+import { configureKaPostSavedPages, kapostLiveFeed, mergeOutageRows } from "../engine/kaposts-chain-fallback.js";
+import { indexerKey, isIndexerDown, onIndexerAvailabilityChange } from "../engine/indexer-health.js";
 import { setReservedOutpoints } from "../engine/transactions.js";
 import { getEndpoint } from "../engine/endpoints.js";
 import { KAS_UNIT } from "../engine/network.js";
@@ -705,7 +708,7 @@ function mapRemotePoll(poll) {
 function fetchFeedPage(before, limit = PAGER_PAGE_SIZE) {
   const args = { engine: deps.engine, limit, before };
   // "Popular" is the global feed re-sorted client-side, so it pages the same endpoint.
-  return activeFeedTab === "following" ? fetchFollowingFeed(args) : fetchGlobalFeed(args);
+  return activeFeedTab === "following" ? fetchFollowingFeed({ ...args, followingAddresses: prefs.following }) : fetchGlobalFeed(args);
 }
 
 /** Page one. Resets the endless-scroll window: new cursor, cleared end-reached, top of list. */
@@ -749,6 +752,8 @@ async function syncFollowingFromChain() {
 async function checkForNewPosts() {
   if (!deps || checkingForNewPosts || feedLoading || !remotePosts.length) return;
   if (deps.kaPostsSuppressed?.()) return;
+  // Down, the block stream brings what's new (mergeLivePosts), and a saved page has nothing newer.
+  if (kaPostIndexerIsDown()) return;
   const source = feedSourceFor(activeFeedTab);
   if (source !== loadedFeedSource) return;
   // The source alone is not enough: once the new account's first page is in after a switch, the
@@ -822,6 +827,8 @@ async function loadFeed() {
   // first) — deps is still null then, and every deps.* access below would throw.
   if (!deps) return;
   const generation = ++feedGeneration; // any in-flight page from the previous tab is now stale
+  // What's on screen, if it's this same feed: an outage read adds to it rather than replacing it.
+  const sameFeedOnScreen = loadedFeedSource === feedSourceFor(activeFeedTab);
   clearPagerSentinel("feed");
   feedPager = makePager();
   // The page being fetched owns the footer's spinner (iOS feedPage.isLoading): "Loading more..."
@@ -836,13 +843,22 @@ async function loadFeed() {
   try {
     const result = await fetchFeedPage(null);
     if (generation !== feedGeneration) return;
-    remotePosts = carryingUnsentComments(remotePosts, result.posts.map(mapRemotePost).filter(Boolean));
-    // A refresh just delivered whatever the pill was offering.
-    pendingNewPosts = [];
-    seedPager(feedPager, result.posts, result.pagination);
-    loaded = true;
-    // A refresh re-arms Popular's deep sweep: the window it ranked was just thrown away.
-    popularSweptAt = 0;
+    const page = result.posts.map(mapRemotePost).filter(Boolean);
+    if (result.outage) {
+      // Saved or chain rows can be older than the screen, and this load doesn't count as one:
+      // the indexer, when it's back, has the final word.
+      remotePosts = mergeOutageRows(sameFeedOnScreen ? remotePosts : [], page);
+      if (!sameFeedOnScreen) pendingNewPosts = [];
+      seedPager(feedPager, result.posts, null);
+    } else {
+      remotePosts = carryingUnsentComments(remotePosts, page);
+      // A refresh just delivered whatever the pill was offering.
+      pendingNewPosts = [];
+      seedPager(feedPager, result.posts, result.pagination);
+      loaded = true;
+      // A refresh re-arms Popular's deep sweep: the window it ranked was just thrown away.
+      popularSweptAt = 0;
+    }
   } catch (error) {
     if (generation !== feedGeneration) return;
     feedError = userFacingError(error);
@@ -1451,7 +1467,44 @@ function renderAll() {
 // "Loading more..." under posts already on screen), and a failed refresh is the footer's
 // "Couldn't load more ... Tap to retry". The line stays hidden.
 function renderStatus() {
-  if (statusEl) statusEl.hidden = true;
+  if (!statusEl) return;
+  // The indexer is what lists posts: while it's away the feed says why it isn't complete.
+  const down = !kapostsUnavailableHere() && kaPostIndexerIsDown();
+  statusEl.hidden = !down;
+  statusEl.textContent = down ? "KaPost's server isn't answering. Showing saved posts and new ones from the network." : "";
+}
+
+/// New posts off the block stream while the indexer is down, into whichever feed is showing.
+function mergeLivePosts(live) {
+  if (!deps || !loadedFeedSource) return;
+  const known = new Set(remotePosts.map((post) => post.remoteId).filter(Boolean));
+  const following = new Set(prefs.following);
+  const fresh = live
+    .filter((post) => !post.parentPostId && !known.has(post.id))
+    .map(mapRemotePost)
+    .filter((post) => post && !isHiddenAuthor(post.posterAddress) && (loadedFeedSource !== "following" || following.has(post.posterAddress)));
+  if (!fresh.length) return;
+  remotePosts = [...fresh.sort((a, b) => b.timestamp - a.timestamp), ...remotePosts];
+  renderFeed();
+  refreshVisiblePosterNames();
+}
+
+/// The indexer went away or came back. Back, it has the final word: everything loaded during the
+/// outage counts as stale, so each screen asks again.
+function handleKaPostIndexerAvailability(change) {
+  if (!deps || kapostsUnavailableHere() || change.key !== indexerKey(getEndpoint("kapostIndexer"))) return;
+  kapostLiveFeed.setActive(deps.engine, change.down);
+  renderStatus();
+  if (change.down) return;
+  lastFeedLoadAt = 0;
+  ownContentLoadedAt = 0;
+  popularSweptAt = 0;
+  keptProfilePanel = null;
+  keptNotificationsPanel = null;
+  // The check only runs while the feed is the tab on screen; otherwise opening it reloads.
+  if (newPostsCheckTimer) loadFeed();
+  if (activePanel?.type === "profile") refreshProfilePanel(activePanel);
+  if (activePanel?.type === "notifications") loadNotificationsFirstPage(activePanel);
 }
 
 const UNDO_ARROW_SVG = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>`;
@@ -2796,7 +2849,7 @@ async function openThread(post, { scrollToRemoteId = null, ensureComment = null 
       // A reply of this session whose transaction is out but not yet indexed has a txid, so it
       // is not "local" - it is remembered by id and kept on top until the server returns it.
       const kept = p.comments.filter((c) => (!c.remoteId || sessionReplyIds.has(c.remoteId)) && !replies.some((r) => r.remoteId === c.remoteId));
-      p.comments = [...kept, ...replies];
+      p.comments = result.outage ? mergeOutageRows(p.comments, replies) : [...kept, ...replies];
       // The reply a notification was tapped FOR: the indexer can lag the push by seconds, so a
       // brand-new reply is spliced in when the page came back without it (iOS openDetail
       // ensureComment) - the landing scroll then has something to land on.
@@ -4137,7 +4190,8 @@ async function openPosterProfile(address, passedPubkey) {
     panel.loading = false;
     seedPager(panel.pagers.posts, content.posts, content.pagination);
     seedPager(panel.pagers.replies, repliesContent.posts, repliesContent.pagination);
-    keptProfilePanel = { address, panel, loadedAt: Date.now() };
+    // Read from saved pages or the chain, it's opened afresh next time.
+    if (!content.outage) keptProfilePanel = { address, panel, loadedAt: Date.now() };
     renderPanel();
     resolvePosterIdentities([address], () => { if (activePanel === panel) renderPanel(); });
   } catch (error) {
@@ -4184,9 +4238,10 @@ async function refreshProfilePanel(panel) {
       : await fetchUserPosts({ engine: deps.engine, pubkey: panel.pubkey, limit: PAGER_PAGE_SIZE });
     if (activePanel !== panel || generation !== panelGeneration || panel.pagers[tab] !== pager) return;
     const mapped = content.posts.map(mapRemotePost).filter(Boolean);
-    panel[tab] = tab === "replies" ? mapped : mapped.filter((post) => !post.parentRemoteId);
+    const rows = tab === "replies" ? mapped : mapped.filter((post) => !post.parentRemoteId);
+    panel[tab] = content.outage ? mergeOutageRows(panel[tab] || [], rows) : rows;
     seedPager(pager, content.posts, content.pagination);
-    if (keptProfilePanel?.panel === panel) keptProfilePanel.loadedAt = Date.now();
+    if (keptProfilePanel?.panel === panel && !content.outage) keptProfilePanel.loadedAt = Date.now();
     renderPanel();
   } catch (error) {
     deps.appendEngineLog?.(`KaPost profile refresh failed: ${error.message}`);
@@ -4672,7 +4727,8 @@ async function loadNotificationsFirstPage(panel) {
   try {
     const page = await fetchKaPostNotifications({ engine: deps.engine, limit: PAGER_THREAD_PAGE_SIZE });
     if (activePanel !== panel || generation !== panelGeneration || panel.pager !== pager) return false;
-    panel.items = page.notifications.map(mapNotificationRow).filter(Boolean);
+    const rows = page.notifications.map(mapNotificationRow).filter(Boolean);
+    panel.items = page.outage ? mergeOutageRows(panel.items || [], rows, (row) => row?.id) : rows;
     panel.loading = false;
     seedPager(pager, page.notifications, page.pagination);
     // Everything now on screen counts as seen - the background poller will not ping for it
@@ -4688,7 +4744,8 @@ async function loadNotificationsFirstPage(panel) {
     resolvePosterIdentities(panel.items.map((item) => item.actorAddress), () => {
       if (activePanel === panel) renderPanel();
     });
-    return true;
+    // A saved list isn't kept as if it had loaded: the next open asks again.
+    return !page.outage;
   } catch (error) {
     deps.appendEngineLog?.(`KaPost notifications load failed: ${error.message}`);
     if (activePanel === panel && panel.pager === pager) { panel.loading = false; pager.hasMore = false; renderPanel(); }
@@ -6492,6 +6549,15 @@ function ensureNotificationSettingsButton() {
 
 export function initKaPosts(dependencies) {
   deps = dependencies;
+  // Passed the account each time: a page that lands after a switch stays with the one that asked.
+  configureKaPostSavedPages({ scopedKey: (baseKey, account) => deps.accountScopedKey(baseKey, account) });
+  if (!initKaPosts.outageWired) {
+    initKaPosts.outageWired = true;
+    onIndexerAvailabilityChange(handleKaPostIndexerAvailability);
+    kapostLiveFeed.subscribe(mergeLivePosts);
+    // Chats share this indexer, so it can be confirmed down before KaPost starts.
+    if (!kapostsUnavailableHere() && isIndexerDown(getEndpoint("kapostIndexer"))) kapostLiveFeed.setActive(deps.engine, true);
+  }
   startKaPostsNotificationPolling();
   // .kachat names, avatars, banners and bios land on their own (iOS 3d6fb7c), on every network.
   if (!initKaPosts.identityWired) {

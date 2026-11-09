@@ -109,6 +109,7 @@ import {
   statusLabel as engineStatusLabel,
 } from "../engine/conversations.js";
 import { KNSProfileLinkBuilder, safeExternalHref, clearAllKnsCache } from "../engine/kns.js";
+import { onIndexerAvailabilityChange, indexerKey, isIndexerDown, INDEXER_RECOVERY_MARGIN_MS } from "../engine/indexer-health.js";
 import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import { createAccountBackupStatus, nextDefaultAccountName, accountHasFunds } from "./account-backup-status.js";
@@ -5102,14 +5103,16 @@ function noteInboxTagged(address) {
 /** Finds people who wrote to this wallet first: asks the indexer for our inbox tag, then pulls
  *  each new sender's history the normal way (sender + alias). Blocked senders are skipped; the
  *  rest land in Message Requests. */
-async function syncInbox({ catchUp = false } = {}) {
+async function syncInbox({ catchUp = false, streamHits = null } = {}) {
   if (syncInbox.inFlight || !engine.address || typeof engine.fetchInboxMessages !== "function") return 0;
-  if (!(await inboxSupported())) return 0;
+  // With the indexer down nothing can look a tag up: first contacts come from the block scan.
+  if (!streamHits && isIndexerDown(currentIndexerUrl())) return 0;
+  if (!streamHits && !(await inboxSupported())) return 0;
   syncInbox.inFlight = true;
   const wallet = engine.address;
   try {
     const s = chatRequestState();
-    const found = await engine.fetchInboxMessages({ cursor: s.inboxCursor, indexerUrl: currentIndexerUrl() });
+    const found = streamHits || await engine.fetchInboxMessages({ cursor: s.inboxCursor, indexerUrl: currentIndexerUrl() });
     if (engine.address !== wallet) return 0;
     // The cursor moves to the newest entry - but never past one whose sender the indexer hasn't
     // resolved yet (an empty sender until the spent input is known): that entry is asked for
@@ -5997,6 +6000,8 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   // An imported or switched-to wallet's own profile comes from the chain (iOS 5d4ce87): a fresh
   // import has no local copy, so the one saved on iOS / Android / another desktop is adopted.
   try { window.setTimeout(() => { try { syncOwnKachatProfile(); } catch { /* not ready */ } }, 0); } catch { /* not yet initialized */ }
+  // Switched during an outage: the new account's first contacts are watched for too.
+  try { window.setTimeout(() => { try { startInboxBlockScanIfDown(); } catch { /* not ready */ } }, 0); } catch { /* not yet initialized */ }
   const clean = String(address || "").trim();
   if (!clean) {
     state = { contacts: [], conversations: [] };
@@ -6885,6 +6890,64 @@ const conversationSyncInFlight = new Set();
 /// the cursor straight back past them. A run that sees the count change keeps the rewound cursor
 /// and runs once more as a catch-up when it ends.
 const conversationRewinds = new Map();
+// --- The indexer went away and came back (iOS 4f8e14bb catchUpAfterIndexerOutage) -----------------
+/** Every sync cursor back to `floor` (ms): the indexer serves the outage window again, so anything
+ *  the chain's history didn't have comes in now. Messages already here are dropped by txid, and a
+ *  deleted chat's floor is applied to every row as always. */
+function rewindAllSyncCursors(floor) {
+  for (const entry of state.conversations || []) {
+    if (Number(entry.sync?.cursor || 0) > floor) rewindConversationCursor(entry, floor);
+    if (Number(entry.sync?.sentCursor || 0) > floor) entry.sync = { ...entry.sync, sentCursor: floor };
+  }
+  persistState();
+  ensureHandshakeSyncStateForActiveWallet();
+  if (Number(handshakeSyncState.cursor || 0) > floor) handshakeSyncState.cursor = floor;
+  if (Number(handshakeSyncState.outCursor || 0) > floor) handshakeSyncState.outCursor = floor;
+  persistHandshakeSyncState();
+  const requests = chatRequestState();
+  if (Number(requests.inboxCursor || 0) > floor) { requests.inboxCursor = floor; saveChatRequestState(requests); }
+}
+// First-contact messages from the block scan while the indexer is down, proven by their input's
+// signature (engine/outage-scan.js), handled like the indexer's inbox rows (iOS refreshInboxBlockScan).
+const inboxStreamHits = [];
+let inboxStreamDraining = false;
+async function drainInboxStreamHits() {
+  if (inboxStreamDraining) return;
+  inboxStreamDraining = true;
+  try {
+    while (inboxStreamHits.length) {
+      if (syncInbox.inFlight) { await new Promise((resolve) => window.setTimeout(resolve, 1000)); continue; }
+      const wallet = engine.address;
+      const hits = inboxStreamHits.splice(0).filter((hit) => hit.wallet === wallet);
+      if (hits.length) await syncInbox({ streamHits: hits });
+    }
+  } catch (error) {
+    appendEngineLog(`Inbox block scan: ${error?.message || error}`);
+  } finally {
+    inboxStreamDraining = false;
+  }
+}
+function startInboxBlockScanIfDown() {
+  if (!engine.address || !isIndexerDown(currentIndexerUrl())) return;
+  const wallet = engine.address;
+  engine.startInboxBlockScan?.({
+    wallet,
+    tag: engine.inboxTagFor(wallet),
+    onHit: (hit) => { inboxStreamHits.push({ ...hit, wallet }); drainInboxStreamHits(); },
+  });
+}
+function handleIndexerAvailability({ key, down, downSinceMs }) {
+  if (key !== indexerKey(currentIndexerUrl())) return;
+  appendEngineLog(down ? "The indexer isn't answering: reading chats from the node and the Kaspa REST API." : "The indexer is answering again.");
+  if (down) { startInboxBlockScanIfDown(); return; }
+  engine.stopInboxBlockScan?.();
+  if (!engine.address) return;
+  const floor = Math.max(0, Number(downSinceMs) - INDEXER_RECOVERY_MARGIN_MS);
+  rewindAllSyncCursors(floor);
+  getGroupManager()?.rewindGroupCursors?.(floor);
+  refreshAllConversations({ quiet: true }).catch(() => {});
+}
+
 function rewindConversationCursor(conversationEntry, cursor) {
   conversationEntry.sync = { ...(conversationEntry.sync || {}), cursor };
   conversationRewinds.set(conversationEntry.id, (conversationRewinds.get(conversationEntry.id) || 0) + 1);
@@ -7131,7 +7194,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     ...(conversationEntry.sync || {}), lastSyncAt: Date.now(), lastFound: added,
     runs: Number(conversationEntry.sync?.runs || 0) + 1,
     cursor: rewoundMeanwhile ? Number(conversationEntry.sync?.cursor || 0) : Number(result.nextCursor || conversationEntry.sync?.cursor || 0),
-    sentCursor,
+    sentCursor: rewoundMeanwhile ? Number(conversationEntry.sync?.sentCursor || 0) : sentCursor,
     lastNote: result.note || "Automatic Kasia sync complete.",
     scannedCount: Number(result.scannedCount || 0), decryptFailures: Number(result.decryptFailures || 0), indexerUrl,
   };
@@ -8004,7 +8067,9 @@ function startAutomaticRefresh() {
 /// doubling up to a minute and snaps straight back to base on the first success; this does the
 /// same. Self-scheduling also means a sweep that runs long can never have the next one queued on
 /// top of it.
+let indexerAvailabilityHooked = false;
 function startSweepLoop() {
+  if (!indexerAvailabilityHooked) { indexerAvailabilityHooked = true; onIndexerAvailabilityChange(handleIndexerAvailability); }
   if (sweepLoopRunning) return;
   sweepLoopRunning = true;
   let interval = MESSAGE_REFRESH_MS;
@@ -13151,7 +13216,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 274;
+const APP_BUILD = 275;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of

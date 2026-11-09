@@ -28,6 +28,8 @@ import {
   sendBroadcastMessage,
   broadcastPayloadBytes,
 } from "../engine/broadcasts.js";
+import { isIndexerDown, onIndexerAvailabilityChange, indexerKey, INDEXER_RECOVERY_MARGIN_MS } from "../engine/indexer-health.js";
+import { getEndpoint } from "../engine/endpoints.js";
 import { confirmDialog, promptDialog, PROMPT_EXTRA, alertDialog, chooseDialog, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 import { askKaPostTerms, kaPostTermsAccepted, roomHiddenSenders, roomMessageReportBody, sendContentReport } from "./kapost-moderation.js";
@@ -600,6 +602,10 @@ function saveJoinedAt() {
 function indexerOverrideFor(channel) {
   return String(indexerByChannel[channel] || "").trim();
 }
+/** The indexer a room reads from: its own, else the app-wide one. */
+function roomIndexerBase(channel) {
+  return indexerOverrideFor(channel) || String(getEndpoint("broadcastIndexer") || "").trim();
+}
 
 function retentionMillisFor(channel) {
   const stored = Number(retentionByChannel[channel] || 0);
@@ -663,7 +669,8 @@ function scanWantedChannels() {
   }
   if (hasBroadcastIndexer()) {
     for (const channel of [...wanted]) {
-      if (isIndexerTrackedBroadcastChannel(channel)) wanted.delete(channel);
+      // An indexer that isn't answering covers nothing: its rooms keep the stream (iOS ee5ec98).
+      if (isIndexerTrackedBroadcastChannel(channel) && !isIndexerDown(roomIndexerBase(channel))) wanted.delete(channel);
     }
   }
   for (const channel of serviceScanWanted) wanted.add(channel);
@@ -1002,6 +1009,22 @@ function mergeMessages(channel, rows) {
 // Channels that already did the full historical page-back this session — the 8s poll
 // afterwards only needs the newest page.
 const deepBackfilled = new Set();
+// Oldest a room's next backfill needs to reach after an outage (ms): the indexer gets the last word
+// on that stretch, without paging its whole history again (iOS ee5ec98).
+const deepBackfillFloor = new Map();
+/** The rooms' indexer changed state: the wanted scan follows, and once it's back its rooms read the
+ *  outage again from ten minutes before it began. */
+function handleIndexerAvailability({ key, down, downSinceMs }) {
+  if (!down) {
+    for (const channel of [...deepBackfilled]) {
+      if (indexerKey(roomIndexerBase(channel)) !== key) continue;
+      deepBackfilled.delete(channel);
+      deepBackfillFloor.set(channel, Math.max(0, Number(downSinceMs) - INDEXER_RECOVERY_MARGIN_MS));
+    }
+    if (activeChannel) backfillChannel(activeChannel).catch(() => {});
+  }
+  syncScanWanted();
+}
 // ...and of those, the ones whose page-back ran to the end: their whole history is in.
 const deepBackfillDone = new Set();
 
@@ -1037,7 +1060,9 @@ async function backfillChannel(channel, { quiet = true } = {}) {
       // (newest-first, `before` = oldest blockTime seen) so the room shows every
       // message still retained server-side, not just the newest page.
       deepBackfilled.add(channel);
-      const cutoff = retentionCutoffMs(channel);
+      const outageFloor = deepBackfillFloor.get(channel);
+      deepBackfillFloor.delete(channel);
+      const cutoff = Math.max(retentionCutoffMs(channel) || 0, outageFloor || 0) || retentionCutoffMs(channel);
       let before = null;
       listRenderSuppressed = true; // one list rebuild at the end, not one per page
       try {
@@ -2903,6 +2928,7 @@ export function openBroadcastChannelFromNotification(channel) {
 
 export function initBroadcasts(dependencies) {
   deps = dependencies;
+  onIndexerAvailabilityChange(handleIndexerAvailability);
   // A translation landing, or the reader flipping original/translation, repaints the open room.
   deps.translation?.onChange?.(() => { if (activeChannel) renderRoom(); });
   listEl = document.querySelector("[data-broadcast-list]");
