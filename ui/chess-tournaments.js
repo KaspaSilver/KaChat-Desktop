@@ -86,6 +86,12 @@ const claimedGames = new Map();
  *  more until it is done. */
 const claimsInFlight = new Set();
 let queuedPublicRoomId = null;
+// How many more full rooms this tap may move past on its own (KaPlay da59726).
+let autoRejoinsLeft = 0;
+const MAX_AUTO_REJOINS = 2;
+const MAX_ROOM_NUMBER = 1_000_000_000;
+const MAX_ROOM_GAP = 1_000;
+const ROOM_FILLED_MESSAGE = "That room filled first. Tap Join to try the next one.";
 /** A bot challenge link that came while this player was busy online (isBusyOnline): it waits
  *  until that is over and Chess's home is showing (iOS 4922804 ChessHomeView.takeChallenge). */
 let heldBotChallenge = null;
@@ -260,7 +266,10 @@ async function backfillNow({ full = false } = {}) {
 
 function handleHits(hits) {
   // Live hits arrive with the sender already verified by the engine (DSK-045).
-  const mine = (hits || []).filter((h) => h?.channel === T.ARENA_CHANNEL);
+  // Only a row still on this device's clock takes the stream's time: a transaction can sit in
+  // several parallel blocks, and the indexer's time is the one every device ends up with (KaPlay
+  // da59726). A new row, or one of ours, comes through.
+  const mine = (hits || []).filter((h) => h?.channel === T.ARENA_CHANNEL && (!rows.has(h.txId) || rows.get(h.txId).local));
   if (mine.length) mergeRows(mine);
 }
 
@@ -288,7 +297,11 @@ function reduceArenaNow() {
     if (room && T.isFull(room) && !room.players.includes(my)) {
       const wasDuel = T.duelNumber(queuedPublicRoomId) !== null;
       queuedPublicRoomId = null;
-      joinPublicRoom(wasDuel).catch(() => {});
+      // Bounded per tap (KaPlay da59726): a join can never turn into spending nobody asked for.
+      if (autoRejoinsLeft > 0) {
+        autoRejoinsLeft -= 1;
+        joinPublicRoom(wasDuel, { automatic: true }).catch(() => {});
+      } else deps.showToast?.(ROOM_FILLED_MESSAGE);
     } else if (room?.players.includes(my)) {
       queuedPublicRoomId = null;
     }
@@ -380,19 +393,29 @@ function checkMonthRollover() {
 
 /** The room to queue into: the lowest-numbered public room of that kind still waiting for
  *  players; when none is, one past the highest room this device knows (iOS d2ab780). */
-function currentRoomNumber(numberOf) {
-  let open = null;
-  let highest = 0;
+function currentRoomNumber(numberOf, idOf) {
+  // Anyone can write any room id, so only a room's canonical id counts (duel-01 is not room 1),
+  // nothing past 1,000,000,000, and of the runs of numbers near each other only the longest, the
+  // real queue: a stray duel-900000 can't move it (KaPlay da59726).
+  const rooms = [];
   for (const room of Object.values(tournaments)) {
     const number = numberOf(room.id);
-    if (number === null) continue;
-    highest = Math.max(highest, number);
-    if (T.tournamentStatus(room) === "open" && !T.isFull(room)) open = open === null ? number : Math.min(open, number);
+    if (number === null || number > MAX_ROOM_NUMBER || idOf(number) !== room.id) continue;
+    rooms.push({ number, open: T.tournamentStatus(room) === "open" && !T.isFull(room) });
   }
-  return open ?? highest + 1;
+  rooms.sort((a, b) => a.number - b.number);
+  let best = [];
+  let start = 0;
+  rooms.forEach((room, index) => {
+    if (index + 1 === rooms.length || rooms[index + 1].number - room.number > MAX_ROOM_GAP) {
+      if (index + 1 - start > best.length) best = rooms.slice(start, index + 1);
+      start = index + 1;
+    }
+  });
+  return best.find((room) => room.open)?.number ?? ((best.at(-1)?.number ?? 0) + 1);
 }
-const currentPublicRoomId = () => T.publicId(currentRoomNumber(T.publicNumber));
-const currentDuelRoomId = () => T.duelId(currentRoomNumber(T.duelNumber));
+const currentPublicRoomId = () => T.publicId(currentRoomNumber(T.publicNumber, T.publicId));
+const currentDuelRoomId = () => T.duelId(currentRoomNumber(T.duelNumber, T.duelId));
 
 function myPrivate(duel) {
   const my = me();
@@ -500,10 +523,11 @@ async function send(message) {
  *  indexer holds this second is what every other device is choosing from - then the room. A
  *  seat that ran out is still in the player list until the next join drops it, so "already
  *  in" means seated NOW (iOS b552d7d). */
-async function joinPublicRoom(duel) {
+async function joinPublicRoom(duel, { automatic = false } = {}) {
   const my = me();
   if (!my) return false;
   if (!historyReady) { deps.showToast?.("Still loading the rooms - try again in a moment."); return false; }
+  if (!automatic) autoRejoinsLeft = MAX_AUTO_REJOINS;
   await backfill();
   // The account may have changed while the rooms loaded (iOS 8d5f925).
   if (me() !== my) return false;

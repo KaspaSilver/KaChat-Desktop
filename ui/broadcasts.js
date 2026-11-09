@@ -9,6 +9,7 @@
 
 import { IS_TESTNET, KAS_UNIT } from "../engine/network.js";
 import { isKaChatSiteLink } from "./kaposts-format.js";
+import { stripBidiControls } from "./kaposts-markdown.js";
 import { sompiFromUserText, kasTextFromSompi } from "../engine/amounts.js";
 import {
   BROADCAST_RETENTION_MS,
@@ -1458,8 +1459,8 @@ function buildMessageElement(m) {
     // 500-character preview and opens in full on demand, as iOS does.
     const isLong = new TextEncoder().encode(String(fullText || "")).length > LONG_MESSAGE_BYTES;
     const bodyText = isLong ? `${String(fullText).slice(0, LONG_MESSAGE_PREVIEW_CHARS)}…` : fullText;
-    const urls = deps.renderTextWithLinks?.(body, bodyText) ?? [];
-    if (!deps.renderTextWithLinks) body.textContent = bodyText;
+    const urls = deps.renderTextWithLinks?.(body, stripBidiControls(bodyText)) ?? [];
+    if (!deps.renderTextWithLinks) body.textContent = stripBidiControls(bodyText);
     if (isLong) {
       const more = document.createElement("button");
       more.type = "button";

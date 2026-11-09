@@ -654,7 +654,11 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
 // `source` is an opaque, JSON-safe description of where the signer comes from (desktop:
 // { kind: "identity" } or { kind: "spending", index }), kept in the pending-transfer record so
 // "Finish transfer" can derive the same key again; the signer's address is added to it.
+/** The most a transfer's fee can be (iOS 4f8e14bb maxPriorityFeeSompi): the reveal pays it out of the
+ *  2 KAS commit, and a larger one would fail the reveal after the commit went out. */
+export const KNS_TRANSFER_MAX_FEE_SOMPI = 100_000_000n;
 export async function transferDomain({ engine, domain, assetId, toAddress, signer = null, source = null, changeAddress = null, revealPriorityFeeSompi = KNS_ECONOMICS.revealPriorityFeeSompi, onStatus = () => {}, log = () => {} }) {
+  if (BigInt(revealPriorityFeeSompi ?? 0n) > KNS_TRANSFER_MAX_FEE_SOMPI) throw new Error("A domain transfer's fee can be at most 1 KAS.");
   const privateKey = signer?.privateKey || engine?.privateKey;
   const sourceAddress = signer?.address || engine?.address;
   if (!engine?.kaspa || !privateKey || !sourceAddress) throw new Error("Load a wallet before transferring a domain.");

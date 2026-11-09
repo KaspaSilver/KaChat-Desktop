@@ -310,6 +310,9 @@ export class KachatNamesRegistry {
    *  the app walks the chain itself until it catches up (iOS 7aa6c6d `maxIndexerLagDaa`). */
   static get maxIndexerLagDaa() { return 600n; }
 
+  /** A chain copy older than this answers nothing (iOS 4f8e14bb chainCopyMaxAgeMs). */
+  static get chainCopyMaxAgeMs() { return 15 * 60 * 1000; }
+
   /** The most addresses one `POST /identity/batch` takes (the indexer answers 400 past it; iOS
    *  710b78f chunks at the same). */
   static get identityBatchMax() { return 200; }
@@ -468,7 +471,10 @@ export class KachatNamesRegistry {
       report = await walkFrom(state);
       report.fromGenesis = true; // started over: an automatic refresh announces it (iOS 0c305b5)
     }
-    state.verifiedAt = this._nowMs();
+    if (report.reachedTip) {
+      state.reachedTip = true;
+      state.verifiedAt = this._nowMs();
+    }
     if (report.applied.length) {
       this.deps.log(`[KachatNames] walked ${report.applied.length} registry transaction(s) in ${report.rounds} round(s)`);
     }
@@ -559,6 +565,19 @@ export class KachatNamesRegistry {
 
   // MARK: - Reads
 
+  /** The chain copy, only while it holds the whole registry as it stands (iOS 4f8e14bb
+   *  readChainState). Otherwise "not in here" says nothing, so a read fails rather than answer that
+   *  a name is free or an address holds none. */
+  _readChainState() {
+    const st = this.chainState;
+    if (!st || st.reachedTip !== true || st.verifiedAt == null
+      || Number(this._nowMs()) - Number(st.verifiedAt) >= KachatNamesRegistry.chainCopyMaxAgeMs) {
+      Promise.resolve().then(() => this.refreshIfStale({ maxAge: 30 })).catch(() => {});
+      throw new Failure("the registry is still being read from the chain");
+    }
+    return st;
+  }
+
   /** A typed name (any case, `.kachat` optional): `{ kind: "registered", name, info: NameInfo }` or
    *  `{ kind: "free", name, gap: GapInfo|null }`. Throws on an invalid name. */
   async lookup(raw) {
@@ -571,8 +590,7 @@ export class KachatNamesRegistry {
       if (info) return Lookup.registered(info);
       return Lookup.free(name, j.gap);
     }
-    const st = this.chainState;
-    if (!st) throw new Failure("the registry is not loaded");
+    const st = this._readChainState();
     const n = st.name(name);
     if (n) return Lookup.registered(RegistryState.nameInfo(n));
     const g = st.gapContaining(nameKey(name));
@@ -594,7 +612,7 @@ export class KachatNamesRegistry {
       all = IndexerAPI.names(await this._get(this.source.base, `/names/by-owner/${address}?includeInactive=${includeInactive}`), keyOf);
     } else {
       const ownerHex = hex(ownerBytes);
-      all = (this.chainState?.names ?? []).filter((n) => n.owner === ownerHex).map((n) => RegistryState.nameInfo(n));
+      all = this._readChainState().names.filter((n) => n.owner === ownerHex).map((n) => RegistryState.nameInfo(n));
     }
     const grace = this.graceMs, now = this._nowMs();
     return all.filter((n) => includeInactive || n.status(grace, now) === Status.active).sort(byRegistration);
@@ -639,7 +657,7 @@ export class KachatNamesRegistry {
       return IndexerAPI.listings(await this._get(this.source.base, "/market/listings?sort=recent"), keyOf).listings
         .filter((n) => n.status(grace, now) === Status.active);
     }
-    return (this.chainState?.names ?? []).map((n) => RegistryState.nameInfo(n))
+    return this._readChainState().names.map((n) => RegistryState.nameInfo(n))
       .filter((n) => n.isListed && n.status(grace, now) === Status.active)
       .sort((a, b) => { const x = a.updatedAt ?? 0n, y = b.updatedAt ?? 0n; return x > y ? -1 : x < y ? 1 : 0; });
   }
@@ -652,7 +670,7 @@ export class KachatNamesRegistry {
       return IndexerAPI.names(await this._get(this.source.base, "/names/expiring"), keyOf);
     }
     const grace = this.graceMs, now = this._nowMs();
-    return (this.chainState?.names ?? []).map((n) => RegistryState.nameInfo(n))
+    return this._readChainState().names.map((n) => RegistryState.nameInfo(n))
       .filter((n) => n.status(grace, now) === Status.lapsed)
       .sort((a, b) => (a.expiresAt < b.expiresAt ? -1 : a.expiresAt > b.expiresAt ? 1 : 0));
   }
@@ -887,23 +905,22 @@ export class KachatNamesRegistry {
     return this._resolve(raw, (s) => s !== Status.lapsed);
   }
 
-  /** An indexer's answer is only a claim. Before a payment trusts it, the chain has to hold the name
-   *  record it describes: the script commits to the name and its owner, and carries the registry's
-   *  covenant id, so an indexer can't point a name at another address. Throws if it doesn't. A record
-   *  read from the chain itself needs no second look (KaPay 953b255 confirmOnChain). */
+  /** Before a payment follows a record, a node has to hold that exact record: the script commits to
+   *  the name and its owner, and carries the registry's covenant id, so neither an indexer nor an
+   *  out-of-date chain copy can pay anyone but the current owner. Throws if it doesn't, whichever
+   *  source the record came from (KaPay 953b255, iOS 4f8e14bb confirmOnChain). */
   async confirmOnChain(n, service) {
-    if (this.source?.kind !== "indexer") return;
     const fields = n?.fields;
     if (fields == null) throw new Failure("the indexer's record can't be checked");
     const m = await service.loadManifest();
     await service.liveRegistryUtxo({ script: templateScript(m.name, nameState(fields)), outpoint: n.outpoint });
   }
 
-  /** `resolveHeld` for a typed name that money may follow: from an indexer, only once the chain
-   *  backs its answer up. Throws when it can't (the caller shows the lookup as failed). */
+  /** `resolveHeld` for a typed name that money may follow: only once a node backs the answer up,
+   *  whichever source gave it. Throws when it can't (the caller shows the lookup as failed). */
   async resolveHeldOnChain(raw, service) {
     const address = await this.resolveHeld(raw);
-    if (address == null || this.source?.kind !== "indexer") return address;
+    if (address == null) return address;
     const canonical = normalize(raw);
     const found = await this.lookup(canonical);
     const n = found?.info ?? null;

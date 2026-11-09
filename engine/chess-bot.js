@@ -242,7 +242,7 @@ export function botBoardRows({ boards, level, period, wins, address, nowMs }) {
     if (index < 0) rows.push(own);
     else if (mine.moves < rows[index].moves) rows[index] = own;
   }
-  return rows.sort((a, b) => (a.moves - b.moves) || (a.at - b.at));
+  return rows.sort((a, b) => (a.moves - b.moves) || (a.at - b.at) || (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
 }
 
 /** Has anyone played this bot, as far as this device can tell? */

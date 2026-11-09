@@ -972,7 +972,7 @@ export class RegistryState {
 
   constructor({
     version = RegistryState.formatVersion, network, registryCovenantId, gaps = [], names = [], offers = [],
-    applied = [], events = [], verifiedAt = null,
+    applied = [], events = [], verifiedAt = null, reachedTip = false,
   }) {
     this.version = version;
     this.network = network;
@@ -986,6 +986,8 @@ export class RegistryState {
     this.events = events;
     /** when the live set was last confirmed against a node (unix ms) */
     this.verifiedAt = big(verifiedAt);
+    /** a walk got to the end: every tracked UTXO is live. Until then "not in here" says nothing. */
+    this.reachedTip = reachedTip === true;
   }
 
   /** The genesis: the lone genesis gap. */
@@ -1452,6 +1454,7 @@ export class RegistryState {
       for (const [a, ops] of byAddress) for (const op of ops) if (!isUnspent(op)) spent.push([a, op]);
       if (spent.length === 0) {
         report.unresolved = [];
+        report.reachedTip = true;
         return this._walked(report);
       }
       const candidates = new Map();
@@ -1584,6 +1587,7 @@ export class RegistryState {
       network: this.network,
       registryCovenantId: this.registryCovenantId,
       verifiedAt: s(this.verifiedAt),
+      reachedTip: this.reachedTip,
       gaps: this.gaps.map((g) => [g.txid, g.index, g.lo, g.hi, s(g.value)]),
       names: this.names.map((n) => [
         n.txid, n.index, n.name, n.key, n.owner, s(n.price), s(n.periodStart), s(n.expiresAt), s(n.value), s(n.registeredAt),
@@ -1608,6 +1612,7 @@ export class RegistryState {
       network: j.network,
       registryCovenantId: j.registryCovenantId,
       verifiedAt: b(j.verifiedAt),
+      reachedTip: j.reachedTip === true,
       gaps: j.gaps.map((g) => ({ txid: g[0], index: idx(g[1]), lo: g[2], hi: g[3], value: BigInt(g[4]) })),
       names: j.names.map((n) => ({
         txid: n[0], index: idx(n[1]), name: n[2], key: n[3], owner: n[4], price: BigInt(n[5]), periodStart: BigInt(n[6]),

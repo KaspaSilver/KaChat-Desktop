@@ -139,6 +139,8 @@ function removalHarness(storage) {
   const env = {
     localStorage: storage,
     reencodeAddress,
+    accountShellPrefs: {},
+    persistAccountShellPreferences: () => {},
     accountScopedKey: scopedKey,
     SPENDING_BAL_CACHE_KEY, UTXO_LABELS_KEY,
     ACCOUNT_DATA_PREFIX: PREFIX,

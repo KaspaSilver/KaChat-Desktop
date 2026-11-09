@@ -245,7 +245,7 @@ export function kapostsDefaultTipSompi(tip, price) {
 }
 
 // The KaChat links a post can carry (the same set as ui/app.js INTERNAL_LINK_IN_TEXT_RE).
-const KAPOSTS_INTERNAL_LINK_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile|pay)\/[^\s<>"']+|https?:\/\/(?:www\.)?kachat\.app\/(?:post|broadcast|u|pay)\/[^\s<>"']+)/i;
+const KAPOSTS_INTERNAL_LINK_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile|pay)\/[^\s<>"']+|kaposts:\/\/kapost\/[^\s<>"']+|https?:\/\/(?:www\.)?kachat\.app\/(?:post|broadcast|u|pay)\/[^\s<>"']+)/i;
 
 /** A payment request link in a post (iOS 0b9fd28 KaPostCellView.paymentRequestLink): the first
  *  KaChat link in `text`, when it is a payment request `parseLink` accepts (signature and all).

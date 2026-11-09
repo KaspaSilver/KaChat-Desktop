@@ -21,12 +21,11 @@ export function algebraic(square) {
   return String.fromCharCode(97 + square.file) + (square.rank + 1);
 }
 export function squareFromAlgebraic(text) {
-  const s = String(text || "").toLowerCase();
-  if (s.length !== 2) return null;
-  const file = s.charCodeAt(0) - 97;
-  const rank = Number(s[1]) - 1;
-  if (file < 0 || file > 7 || !Number.isInteger(rank) || rank < 0 || rank > 7) return null;
-  return { file, rank };
+  // Exactly what `algebraic` writes, "a1".."h8" and nothing else (iOS 4f8e14bb): a move only some
+  // clients could read would split the two boards.
+  const s = String(text ?? "");
+  if (!/^[a-h][1-8]$/.test(s)) return null;
+  return { file: s.charCodeAt(0) - 97, rank: s.charCodeAt(1) - 49 };
 }
 
 const PROMO_TO_LETTER = { queen: "q", rook: "r", bishop: "b", knight: "n" };
@@ -382,16 +381,20 @@ export function chessResign(gameId, reason = null) {
 }
 
 // "3 | 2"-style label for a time control, matching how chess sites name minute/increment pairs.
+const CHESS_MAX_CLOCK_MS = 30 * 24 * 60 * 60 * 1000;
 export function chessTimeControlLabel(tc) {
   if (!tc || !(tc.minutes > 0)) return null;
   return `${tc.minutes} | ${tc.incSeconds || 0}`;
 }
 // Reads the time control off a raw invite envelope (already-parsed object), or null when casual.
 export function chessTimeControlFromInvite(invite) {
-  const minutes = Number(invite?.tcMinutes);
-  if (!Number.isFinite(minutes) || minutes <= 0) return null;
-  const inc = Number(invite?.tcIncSeconds);
-  return { minutes: Math.round(minutes), incSeconds: Number.isFinite(inc) ? Math.max(Math.round(inc), 0) : 0 };
+  // The envelope's numbers are the sender's word: outside 1-180 minutes or 0-180 seconds the game
+  // is played untimed (iOS 4f8e14bb ChessTimeControl.fromInvite).
+  const minutes = Math.round(Number(invite?.tcMinutes));
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > 180) return null;
+  const inc = invite?.tcIncSeconds == null ? 0 : Math.round(Number(invite.tcIncSeconds));
+  if (!Number.isFinite(inc) || inc < 0 || inc > 180) return null;
+  return { minutes, incSeconds: inc };
 }
 // mm:ss, switching to tenths (0:09.4) under 10 seconds — matches iOS ChessGameView.formatClock.
 export function formatChessClock(ms) {
@@ -450,7 +453,7 @@ export function unwrapReplyText(text) {
 export function summarizeChessGame(gameId, messages, myAddress, contactAddress) {
   let invite = null;
   let inviterAddress = null;
-  let response = null;
+  const responseEntries = [];
   let resignerAddress = null;
   let resignReason = null;
   let lastTxid = "";
@@ -469,10 +472,13 @@ export function summarizeChessGame(gameId, messages, myAddress, contactAddress) 
     const senderAddress = msg.outgoing ? myAddress : contactAddress;
     const unsent = Boolean(msg.outgoing && msg.failed);
     if (env.kind === "invite") {
+      // The first invite is the game: a second one for this gameId can't change the colors or the
+      // time control of a game already under way (iOS 4f8e14bb).
+      if (invite) continue;
       invite = env; inviterAddress = senderAddress;
     } else if (env.kind === "response") {
       if (unsent) continue;
-      response = env;
+      responseEntries.push({ msg, env, sender: senderAddress });
     } else if (env.kind === "move") {
       if (unsent) continue;
       moveEntries.push({ msg, env, sender: senderAddress });
@@ -516,7 +522,8 @@ export function summarizeChessGame(gameId, messages, myAddress, contactAddress) 
       const captured = isEnPassant ? pieceAt(board, sq(to.file, from.rank)) : pieceAt(board, to);
       board = applyMove(board, m);
       if (typeof env.clockMs === "number" && Number.isFinite(env.clockMs)) {
-        lastClockByColor[movingPiece.color] = Math.max(Math.round(env.clockMs), 0);
+        // What the sender wrote, held within what a clock can be: a month (iOS sanitizedClockMs).
+        lastClockByColor[movingPiece.color] = Math.min(Math.max(Math.round(env.clockMs), 0), CHESS_MAX_CLOCK_MS);
       }
       moveHistory.push({
         from, to, pieceType: movingPiece.type, color: movingPiece.color,
@@ -529,6 +536,11 @@ export function summarizeChessGame(gameId, messages, myAddress, contactAddress) 
     }
     if (!applied) break;
   }
+
+  // The answer is the invited side's, once, and only while the game hasn't started: a decline sent
+  // after the first move would otherwise void a game its sender is losing (iOS 4f8e14bb).
+  const firstMoveAt = moveHistory.length ? (moveEntries.find((entry) => entry.msg.txid === moveHistory[0].messageTxid)?.msg.at ?? null) : null;
+  const response = responseEntries.find((entry) => entry.sender !== inviterAddress && (firstMoveAt == null || (entry.msg.at || 0) <= firstMoveAt))?.env ?? null;
 
   let status;
   // `timeout` true when the loser flagged (their clock ran out and their app auto-sent a

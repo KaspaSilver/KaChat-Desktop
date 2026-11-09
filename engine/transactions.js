@@ -85,7 +85,7 @@ async function fetchUtxoEntries({ rpc, withRpc, sourceAddress, label }) {
 // Coins a transaction from this app has just spent (iOS 3942a5b7 reservedMessageOutpoints): the
 // node goes on listing them until that spend is in a block, so the next send, Max or fee estimate
 // would pick a coin already spent - refused, or a Max bigger than the address holds. Held back for
-// JUST_SPENT_HOLD_MS after a send that went out or whose outcome is unknown; never after a rejection.
+// JUST_SPENT_HOLD_MS after a send that went out; never after a rejection or an unknown outcome.
 export const JUST_SPENT_HOLD_MS = 120_000;
 const justSpent = new Map(); // "txid:index" -> held until (ms)
 /** Holds back these outpoints ("txid:index" keys) from the next builds. */
@@ -249,18 +249,14 @@ export function isVerdictRejection(error) {
  * counts as sent, one a node may have received without answering ends in SEND_OUTCOME_UNKNOWN unless
  * a longer look finds it, and anything else is rethrown. A node's answer only counts if its id is
  * `txid`. Every submit in this file goes through here. `spends`: the "txid:index" keys of the coins
- * it spends, held back from the next builds once it went out or its outcome is unknown.
+ * it spends, held back from the next builds once it went out. Not after an unknown outcome (iOS
+ * 4f8e14bb, KaPay 2da5f4b, KaPost ee5ec98): a resend then builds on the same coins, so the network
+ * can only take one of the two, where other coins would let both pay.
  */
 export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, spends = null, label = "Transaction broadcast", log = () => {}, orphanWaitMs = ORPHAN_WAIT_MS, lostAnswerWaitMs = LOST_ANSWER_WAIT_MS, recheckMs = SUBMIT_RECHECK_MS }) {
-  try {
-    const sent = await submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, orphanWaitMs, lostAnswerWaitMs, recheckMs });
-    noteSpentOutpoints(spends);
-    return sent;
-  } catch (error) {
-    // It may have landed: its coins stay out of the next send too (iOS 3942a5b7).
-    if (error?.code === SEND_OUTCOME_UNKNOWN) noteSpentOutpoints(spends);
-    throw error;
-  }
+  const sent = await submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, orphanWaitMs, lostAnswerWaitMs, recheckMs });
+  noteSpentOutpoints(spends);
+  return sent;
 }
 async function submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, orphanWaitMs, lostAnswerWaitMs, recheckMs }) {
   let answerLost = false;
@@ -407,17 +403,23 @@ export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, source
 // output of (total - fee); more than 80 coins are compounded in chunks of 80.
 // `feeMultiplier`: the speed picked (Fast 2, Priority 5), which a chunked compound applies to each
 // chunk's own floor, so it is priced on its own coins (KaPost 071e901 maxConsolidatableChunk).
-export async function sweepAllToSelf({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, totalFeeSompi = null, feeMultiplier = 1, redeemScript = null, log = () => {} }) {
-  return enqueueSend(sourceAddress, () => sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, feeMultiplier, redeemScript, log }));
+export async function sweepAllToSelf({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, totalFeeSompi = null, feeMultiplier = 1, selectedOutpoints = null, redeemScript = null, log = () => {} }) {
+  return enqueueSend(sourceAddress, () => sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, feeMultiplier, selectedOutpoints, redeemScript, log }));
 }
 // One all-schnorr-input transaction tops out near the standard mass ceiling around ~85 inputs.
 const MAX_INPUTS_PER_SWEEP = 80;
-async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, feeMultiplier = 1, redeemScript, log }) {
+async function sweepAllToSelfNow({ kaspa, rpc, withRpc, privateKey, sourceAddress, totalFeeSompi, feeMultiplier = 1, selectedOutpoints = null, redeemScript, log }) {
   let entries = await fetchUtxoEntries({ rpc, withRpc, sourceAddress, label: "Compound UTXO fetch" });
   if (!entries || entries.length === 0) throw new Error("No UTXOs to compound.");
   requireSigningScriptFor(entries, redeemScript);
   entries = excludeReservedUtxos(entries);
   if (entries.length === 0) throw new Error("Every coin is reserved by a scheduled post.");
+  // Coin Control: only the coins picked are combined (KaPay 2da5f4b).
+  if (selectedOutpoints?.length) {
+    const wanted = new Set(selectedOutpoints);
+    entries = entries.filter((entry) => wanted.has(`${entry.outpoint?.transactionId}:${entry.outpoint?.index}`));
+    if (entries.length === 0) throw new Error("Selected UTXOs are no longer available - please reselect.");
+  }
   entries.sort(bySompiAsc);
 
   // Built by hand, never through the generator: asking it for (total - fee) left it a few

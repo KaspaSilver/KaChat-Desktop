@@ -118,7 +118,7 @@ import { ownedNamesStorageKey } from "../engine/kachat-names/owned-names-cache.j
 import { marketAddressesStorageKey } from "../engine/kachat-names/actions.js";
 import { ownProfileStorageKey } from "../engine/kachat-names/registry.js";
 import * as Chess from "../engine/chess.js";
-import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER as KNS_PROFILE_FIELD_EDIT_ORDER } from "../engine/kns-write.js";
+import { registrationAmounts as knsRegistrationAmounts, PROFILE_FIELD_EDIT_ORDER as KNS_PROFILE_FIELD_EDIT_ORDER, KNS_TRANSFER_MAX_FEE_SOMPI } from "../engine/kns-write.js";
 import { normalizeDomainLabel, isKnsEntryFresh } from "../engine/kns.js";
 // Imported, not written as string paths: Vite only rewrites and emits the assets it can SEE, and
 // a path inside a string is invisible to it - so these 404'd on the built site (a broken-image
@@ -1716,6 +1716,13 @@ function removeUtxoLabelsForAddresses(addresses) {
 function removeAccountScopedLocalData(address, { spendingAddresses = [], keepCoinLabels = false } = {}) {
   const cleanAddress = String(address || "").trim();
   if (!cleanAddress) return;
+  // Tips From lives in the shared prefs, under the address on either network (KaPost ee5ec98).
+  if (accountShellPrefs.kaPostsTipSources) {
+    const sources = { ...accountShellPrefs.kaPostsTipSources };
+    for (const encoded of [cleanAddress, reencodeAddress(cleanAddress, "kaspa"), reencodeAddress(cleanAddress, "kaspatest")]) if (encoded) delete sources[encoded];
+    accountShellPrefs.kaPostsTipSources = sources;
+    try { persistAccountShellPreferences(); } catch { /* storage full: gone for this session */ }
+  }
   // Its spending addresses' coin labels are filed by address, outside the account's prefix: found
   // from its seed (the caller's, while unlocked) and from its last-known spending balances, which
   // name every address Manage Addresses showed - read before the sweep below erases them.
@@ -2051,7 +2058,7 @@ document.addEventListener("keydown", (event) => {
 const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"']+/g;
 
 // A link that points back INSIDE KaChat (iOS KaChatInternalLink). Both forms are accepted:
-//   kachat://kapost/<txid>        https://kachat.app/post/<txid>
+//   kachat://kapost/<txid>        https://kachat.app/post/<txid>    (and kaposts://kapost/<txid>, iOS a8a5807a)
 //   kachat://broadcast/<channel>  https://kachat.app/broadcast/<channel>
 //   kachat://profile/<address>    https://kachat.app/u/<address>       (iOS 863b0e9; a missing kaspa: prefix means mainnet)
 //   kachat://pay/<address>?...    https://kachat.app/pay/<address>?... (iOS c6851d6 / 7c71a98, engine/payment-request.js)
@@ -2059,7 +2066,7 @@ const URL_IN_TEXT_RE = /https?:\/\/[^\s<>"']+/g;
 // That one has no card in a chat: INTERNAL_LINK_IN_TEXT_RE leaves it out, and only a KaPost draws it.
 // Everything a pasted link carries is untrusted, so the payload is re-validated here rather
 // than trusted from the URL's text.
-const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile|pay)\/[^\s<>"']+|https?:\/\/(?:www\.)?kachat\.app\/(?:post|broadcast|u|pay)\/[^\s<>"']+)/i;
+const INTERNAL_LINK_IN_TEXT_RE = /(?:kachat:\/\/(?:kapost|broadcast|profile|pay)\/[^\s<>"']+|kaposts:\/\/kapost\/[^\s<>"']+|https?:\/\/(?:www\.)?kachat\.app\/(?:post|broadcast|u|pay)\/[^\s<>"']+)/i;
 // A payment request's link checked once (iOS matchCache, 427f19b): its signature check runs on
 // every message render otherwise. Keyed by the link text; the network is fixed for the page.
 var paymentRequestLinkCache = new Map();
@@ -2093,7 +2100,10 @@ function parseKaChatInternalLink(raw) {
   // with `?chat=1` (iOS 724d477e), which opens the chat only when it comes from outside the app;
   // inside it, it is the person's profile link like any other.
   const custom = text.match(/^kachat:\/\/(kapost|broadcast|profile)\/([^/?#]+)\/?(?:\?[^#]*)?$/i);
+  // KaPost's own scheme: only its post links are ours to recognize (iOS a8a5807a).
+  const kaPostScheme = custom ? null : text.match(/^kaposts:\/\/kapost\/([^/?#]+)\/?(?:\?[^#]*)?$/i);
   if (custom) { target = custom[1].toLowerCase(); payload = custom[2]; }
+  else if (kaPostScheme) { target = "kapost"; payload = kaPostScheme[1]; }
   else {
     const universal = text.match(/^https?:\/\/(?:www\.)?kachat\.app\/(post|broadcast|u)\/([^/?#]+)\/?(?:\?[^#]*)?$/i);
     if (!universal) return null;
@@ -2188,6 +2198,14 @@ function openProfileLink(address) {
 function knownBroadcastRoom(channel) {
   try { return chatListRooms().some((room) => room.name === channel); } catch { return true; }
 }
+/** iOS LazyImageBubble hiddenBubble: eye.slash, "<name> sent a photo", and when it shows. */
+function buildHiddenPhotoTile(senderName) {
+  const hidden = document.createElement("div");
+  hidden.className = "message-photo-hidden";
+  hidden.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7c2 0 3.7.7 5.1 1.6M22 12s-3.6 7-10 7c-2 0-3.7-.7-5.1-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3 3 18 18"/></svg><span></span><small>It shows 10 minutes after you have both sent a message.</small>';
+  hidden.querySelector("span").textContent = `${senderName} sent a photo`;
+  return hidden;
+}
 // The native in-app card (iOS KaChatInternalLinkCardView): glyph, eyebrow, title, what a tap does.
 function buildInternalLinkCard(link) {
   if (link?.kind === "pay") return buildPaymentRequestCard(link.request);
@@ -2205,18 +2223,18 @@ function buildInternalLinkCard(link) {
   }
   const profileContact = isProfile ? state.contacts.find((c) => String(c.address || "").toLowerCase() === link.address) || null : null;
   const icon = isPost
-    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></svg>'
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 3.5V17A2.5 2.5 0 0 1 4 14.5z"/><path d="M8 8.5h8M8 12h5.5"/></svg>'
     : isProfile
       ? '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>'
       : '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 15.5a5 5 0 0 1 0-7M15.5 8.5a5 5 0 0 1 0 7M5.6 18.4a9 9 0 0 1 0-12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>';
   const eyebrow = isPost ? (entry?.action === "reply" ? "KaPost reply" : entry?.action === "quote" ? "KaPost quote" : "KaPost") : isProfile ? "KaChat Profile" : "Public Chat Room";
   const title = isPost
-    ? (entry?.authorName || "KaPost post")
+    ? (entry?.authorName || "A post on KaPost")
     : isProfile
       ? (knsDomainForAddress(link.address) || (profileContact ? displayNameForAddress(profileContact) : (kachatNamesUiEnabled() ? identityNameForAddress(link.address) : shortAddress(link.address))))
       : `#${link.channel}`;
   const subtitle = isPost
-    ? (entry ? (entry.snippet || (entry.action === "quote" ? "Reposted a post." : "Tap to open this post in KaChat.")) : "Tap to open this post in KaChat.")
+    ? (entry?.snippet || (entry?.action === "quote" ? "Reposted a post." : "Tap to open it in KaPost."))
     : isProfile
       ? (profileContact ? "Tap to see their User Info." : "Tap to see their profile on KaChat.")
       // iOS: a featured room or one in your list just opens; any other is joined on the tap.
@@ -5940,6 +5958,13 @@ function handleChatStorageFlushError(error) {
   appendEngineLog("localStorage fallback copy also failed — conversation state is only in memory.");
 }
 
+/** Whether this device holds contacts saved for this account (iOS hasPersistedContacts). */
+function accountHasStoredContacts(address) {
+  try {
+    const parsed = JSON.parse(chatStorageGetSync(accountScopedKey(STORAGE_KEY, address)) || "null");
+    return Array.isArray(parsed?.contacts) && parsed.contacts.length > 0;
+  } catch { return false; }
+}
 function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { closeAccountBackup(); } catch { /* not yet initialized */ }
   // Creating or importing an account while signed in keeps this page alive, so the chat, group or
@@ -6418,7 +6443,7 @@ function chatListDeliveryGlyphHtml(message) {
 const WEB_LINK_RE = /https?:\/\/\S+/i;
 function webLinkPreviewLabel(text) {
   const internal = firstInternalLinkIn(text);
-  if (internal?.kind === "kapost") return "Shared a KaPost post";
+  if (internal?.kind === "kapost") return "Shared a KaPost";
   if (internal?.kind === "profile") return "Shared a KaChat profile";
   if (internal?.kind === "broadcast") return `Public chat room #${internal.channel}`;
   if (internal?.kind === "pay") return kasLabel(`Payment request: ${paymentRequestAmountText(internal.request)} KAS`);
@@ -6437,7 +6462,7 @@ function chatListPreviewText(message) {
   // text is just a web link below.
   const internal = firstInternalLinkIn(unwrapped);
   if (internal && unwrapped.trim() === internal.raw) {
-    if (internal.kind === "kapost") return "Shared a KaPost post";
+    if (internal.kind === "kapost") return "Shared a KaPost";
     if (internal.kind === "profile") return "Shared a KaChat profile";
     if (internal.kind === "broadcast") return `Public chat room #${internal.channel}`;
     if (internal.kind === "pay") return kasLabel(`Payment request: ${paymentRequestAmountText(internal.request)} KAS`);
@@ -6945,9 +6970,14 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
   // No KaChat indexer (testnet, until one exists): nothing to read messages from, but payments
   // still come from the Kaspa REST API below.
   const result = indexerUrl
+    // An indexer that doesn't answer must not stop the payments below, which come from the Kaspa
+    // REST API (iOS 4f8e14bb); the cursor stays put, so the next sweep asks it again.
     ? await engine.syncConversationFromIndexer({
       conversationId: conversationEntry.id, contact, knownTxids,
       cursor: conversationEntry.sync?.cursor || 0, indexerUrl,
+    }).catch((error) => {
+      appendEngineLog(`Chat history didn't load: ${error?.message || error}`);
+      return { messages: [], nextCursor: conversationEntry.sync?.cursor || 0, note: "The KaChat indexer didn't answer." };
     })
     : { messages: [], nextCursor: conversationEntry.sync?.cursor || 0, note: "No KaChat indexer on this network yet." };
   if (!account.still()) return 0;
@@ -11029,10 +11059,11 @@ knsTransferModal?.querySelector("[data-kns-transfer-fee-edit]")?.addEventListene
   knsTransferFeeInput?.focus();
   knsTransferFeeInput?.select?.();
 });
-// iOS commitCustomFee: whatever reads as an amount is the fee; otherwise nothing changes.
+// iOS commitCustomFee: whatever reads as an amount is the fee, 1 KAS at most (iOS 4f8e14bb);
+// otherwise nothing changes.
 function commitKnsTransferCustomFee() {
   const sompi = sompiFromUserText(String(knsTransferFeeInput?.value || ""));
-  if (sompi != null) knsTransferFee.customSompi = sompi;
+  if (sompi != null) knsTransferFee.customSompi = sompi > KNS_TRANSFER_MAX_FEE_SOMPI ? KNS_TRANSFER_MAX_FEE_SOMPI : sompi;
   knsTransferFee.editing = false;
   renderKnsTransferFee();
 }
@@ -13120,7 +13151,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 273;
+const APP_BUILD = 274;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -14572,8 +14603,8 @@ const sendKaspaController = makeSendController({
       const totalFeeKas = trimKas8(sendKaspaTotalFeeKas());
       const feeMultiplier = sendKaspaCustomFeeKas != null ? 1 : (SEND_FEE_MULTIPLIERS[sendKaspaFeeTier] || 1);
       return sendKaspaSourceIndex == null
-        ? engine.compoundUtxos({ totalFeeKas, feeMultiplier })
-        : engine.compoundSpending({ ...spendingSignerArgs(spendingSendAccount()), index: sendKaspaSourceIndex, totalFeeKas, feeMultiplier });
+        ? engine.compoundUtxos({ totalFeeKas, feeMultiplier, selectedOutpoints: outpoints })
+        : engine.compoundSpending({ ...spendingSignerArgs(spendingSendAccount()), index: sendKaspaSourceIndex, totalFeeKas, feeMultiplier, selectedOutpoints: outpoints });
     }
     if (sendKaspaMaxMode) return sendKaspaPinnedMax(destination, selectedOutpoints);
     // A payment request to someone's chatting address goes as a chat payment, its memo inside,
@@ -14599,14 +14630,17 @@ const sendKaspaController = makeSendController({
       // moves, even if another account is active when the node answers (iOS ca09dd0, IOS-109).
       const sourceIndex = sendKaspaSourceIndex;
       const account = spendingSendAccount();
+      // Only a send from the primary moves the primary; from another quantum address the change
+      // just has to be on the list (KaPay 2da5f4b, iOS 4f8e14bb).
+      const noteFreshChange = sourceIndex === getSpendingState(account.owner).activeIndex ? rotatePrimarySpendingTo : revealSpendingChangeAddress;
       return freshChangeForSpendingIndex(sourceIndex, { destination, account }).then((fresh) => engine.sendFromSpending({
         ...spendingSignerArgs(account), index: sourceIndex,
         destinationAddress: destination, amountKas, feeKas,
         selectedOutpoints: outpoints,
         changeAddress: fresh?.address || null,
         expectedFeeSompi,
-      }).catch(keepChangeVisibleIfOutcomeUnknown(fresh, account.owner, rotatePrimarySpendingTo))
-        .then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => rotatePrimarySpendingTo(fresh, account.owner)); return result; }))
+      }).catch(keepChangeVisibleIfOutcomeUnknown(fresh, account.owner, noteFreshChange))
+        .then((result) => { if (fresh) runPostSubmitStep("Change-address rotation", () => noteFreshChange(fresh, account.owner)); return result; }))
         .catch(refreshFeeIfChanged);
     }
     return engine.send(destination, amountKas, feeKas, { ...(outpoints ? { selectedOutpoints: outpoints } : {}), expectedFeeSompi })
@@ -18842,12 +18876,7 @@ function renderMessages(conversationEntry) {
     if (imageEnvelope) {
       const heldBackPhoto = message.direction === "incoming" && photosAreHidden(photosUnlockAt);
       if (heldBackPhoto) {
-        // iOS LazyImageBubble hiddenBubble: eye.slash, "<name> sent a photo", and when it shows.
-        const hidden = document.createElement("div");
-        hidden.className = "message-photo-hidden";
-        hidden.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7c2 0 3.7.7 5.1 1.6M22 12s-3.6 7-10 7c-2 0-3.7-.7-5.1-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3 3 18 18"/></svg><span></span><small>It shows 10 minutes after you have both sent a message.</small>';
-        hidden.querySelector("span").textContent = `${peerName} sent a photo`;
-        bubble.append(hidden);
+        bubble.append(buildHiddenPhotoTile(peerName));
       } else {
         // Photo-only bubble: no chat-bubble background, just the image (timestamp overlays it).
         bubble.classList.add("photo-bubble");
@@ -18898,8 +18927,12 @@ function renderMessages(conversationEntry) {
       const autoFetch = message.direction === "outgoing"
         || isAcceptedContact(requestContact, conversationEntry)
         || (previewable && (linkPreviewCache.has(previewable) || approvedPreviewUrls.has(previewable)));
+      // A card can show the linked site's picture or the shared photo itself, so while photos from
+      // this person are held back nothing is fetched and it is a hidden photo's tile (iOS 4f8e14bb).
+      const linkPhotoHeld = Boolean(previewable) && message.direction === "incoming" && photosAreHidden(photosUnlockAt);
       const card = internalLink
         ? buildInternalLinkCard(internalLink)
+        : linkPhotoHeld ? buildHiddenPhotoTile(peerName)
         : previewable ? (autoFetch ? buildLinkPreviewCard(previewable, { autoLoad: true, outgoing: message.direction !== "incoming" }) : buildTapToLoadCard(previewable, conversationEntry)) : null;
       // A link-only message renders as just the preview card (no chat bubble, timestamp below),
       // matching iOS. A link into KaChat is the whole message even with text around it (iOS
@@ -20190,6 +20223,12 @@ function setKaPostsCooldownEnabled(on) {
 // (its index) tips leave from, the instant tip and the tip sheet's first choice; null = the chatting
 // address, the only one whose tips count on the post. Kept per account, since an index names one
 // account's address. A slot this account can't derive right now is the chatting address.
+/** A Tips From address that can't be read right now: the tip waits for the person to pick (KaPost
+ *  ee5ec98), rather than go out publicly from the chatting address. */
+function kaPostsTipSourceUnavailable() {
+  const index = accountShellPrefs.kaPostsTipSources?.[engine.address || ""];
+  return Number.isInteger(index) && !deriveSpendingAddressAt(index);
+}
 function kaPostsTipSourceIndex() {
   const index = accountShellPrefs.kaPostsTipSources?.[engine.address || ""];
   return Number.isInteger(index) && deriveSpendingAddressAt(index) ? index : null;
@@ -20433,6 +20472,9 @@ function estimateTipPayloadBytes(memo, amountSompi) {
 // Posts whose instant tip is going out now, by post id (the address for a tip naming no post): a
 // second Tip tap meanwhile would send a second tip (iOS e5a9b11 tipsInFlight).
 const instantTipsInFlight = new Set();
+// Posts whose instant tip got no answer, and until when (KaPost ee5ec98 KaPostsTipHolds).
+const instantTipHolds = new Map();
+const INSTANT_TIP_HOLD_MS = 2 * 60 * 1000;
 
 // The default tip, sent at once: same contact creation, funding source and destination rules
 // as a payment in that person's chat (and as the tip sheet's Send), with a toast and no screen.
@@ -24408,6 +24450,9 @@ async function submitPaymentSheet() {
       extraFeeSompi: max ? max.extraFeeSompi : paymentExtraFeeSompi(),
       manualUtxos: paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null,
       max,
+      // Held to the fee the sheet shows: rebuilt from coins that changed since, it would pay more
+      // (iOS 4f8e14bb). A Max checks its own coins and amount instead.
+      expectedFeeSompi: max ? null : paymentTotalFeeSompi(),
       // As soon as a node has the transaction the swipe-up screen shows Sent with it until Done
       // (iOS 7abc06e8 sentPayment); the form behind is cleared for the next one.
       onSubmitted: (txid) => {
@@ -24432,6 +24477,8 @@ async function submitPaymentSheet() {
       refreshPaymentSheetState();
       return;
     }
+    // The fee moved: nothing went out, and the sheet works it out again.
+    if (error?.code === SEND_FEE_CHANGED && isPaySheetOpen()) schedulePaymentFee();
     // Shown in the sheet, which is still up.
     paySheetError = userFacingError(error);
     if (isPaySheetOpen()) refreshPaymentSheetState();
@@ -24757,7 +24804,7 @@ function sameCoinKeys(a, b) {
 
 // `max`: the sheet's pinned Max (fillPaymentMax) - the payment then goes as ONE exact output of
 // that amount from exactly its coins, with no change (DSK-042), or not at all (DSK-043).
-async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null, sourceSpendingIndex = null, extraFeeSompi = 0n, manualUtxos = null, max = null } = {}) {
+async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null, sourceSpendingIndex = null, extraFeeSompi = 0n, manualUtxos = null, max = null, expectedFeeSompi = null } = {}) {
   if (paymentSendInFlight) return false;
   const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
   const contact = contactForConversation(conversationEntry);
@@ -24880,8 +24927,9 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
             changeAddress: payFresh?.address || null,
             payload,
             exactAmount: true,
+            expectedFeeSompi,
           }).catch(keepChangeVisibleIfOutcomeUnknown(payFresh, spendingAccount.owner))
-        : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true, extraFeeSompi: extraSompi, manualUtxos: manualKeys });
+        : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true, extraFeeSompi: extraSompi, manualUtxos: manualKeys, expectedFeeSompi });
       if (payFresh) {
         // The node has the payment by now: a bookkeeping slip here must not mark it failed.
         runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(payFresh, spendingAccount.owner));
@@ -24889,9 +24937,9 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
       submittedTxids = (result?.txids || []).map((value) => String(value || "").trim()).filter(Boolean);
       if (!submittedTxids.length) throw new Error("Kaspa node accepted the send request but did not return a transaction ID.");
     } catch (error) {
-      if (error?.code === "SEND_CANCELLED" || error?.code === MAX_AMOUNT_CHANGED) {
-        // Nothing was sent (cancelled at Face ID / the password, or the Max is recomputed on the
-        // sheet), so no failed bubble is left.
+      if (error?.code === "SEND_CANCELLED" || error?.code === MAX_AMOUNT_CHANGED || error?.code === SEND_FEE_CHANGED) {
+        // Nothing was sent (cancelled at Face ID / the password, or the Max or the fee is worked
+        // out again on the sheet), so no failed bubble is left.
         conversationEntry.messages = (conversationEntry.messages || []).filter((entry) => entry.id !== message.id);
         persistState();
         if (activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
@@ -29758,10 +29806,17 @@ async function importAndEnterAccount({ name, recoveryPhrase, passphrase = "", pa
       throw new Error("Enter this account's password to import it again.");
     }
   }
+  // Asked before the scope below is opened: does this device already hold chats for it?
+  const hadStoredChats = accountHasStoredContacts(wallet.address);
   activateWalletDataScope(wallet.address, { migrateLegacy: false });
   // Compared as an account (iOS d23e6f7a isSameAccount): the same words entered again - on either
   // network - are the account already in the slot, and must not reset it or delete its chats.
-  if (resetState && !sameStoredAccountAddress(previousSlotAddress, wallet.address)) {
+  // Nor must a saved account's words, or an account with chats stored here: those bring it back
+  // (iOS 4f8e14bb isNewAccount).
+  const isNewAccount = !sameStoredAccountAddress(previousSlotAddress, wallet.address)
+    && !loadSavedAccounts().some((entry) => sameStoredAccountAddress(entry.address, wallet.address))
+    && !hadStoredChats;
+  if (resetState && isNewAccount) {
     state = { contacts: [], conversations: [] };
     persistState();
     resetHandshakeSyncStateFor(wallet.address); // empty chats: the handshakes are read again (IOS-004)
@@ -31182,8 +31237,16 @@ queueMicrotask(async () => {
         // A second tap while this post's instant tip is going out is ignored (iOS e5a9b11).
         const inFlightKey = tip?.postId || `address:${address}`;
         if (instantTipsInFlight.has(inFlightKey)) return;
+        // A tip with no answer can still land: a second tap for a while says so (KaPost ee5ec98).
+        const heldUntil = instantTipHolds.get(inFlightKey);
+        if (heldUntil && heldUntil > Date.now()) { showKaPostsActionToast(SEND_OUTCOME_UNKNOWN_MESSAGE); return; }
+        instantTipHolds.delete(inFlightKey);
         const defaultTip = kaPostsDefaultTip();
         if (!defaultTip) { openTipModal({ address, name, tip, onTipped }); return; }
+        if (kaPostsTipSourceUnavailable()) {
+          openTipModal({ address, name, tip, onTipped, error: "Your Tips From address can't be read right now, so nothing was sent. Choose where this tip comes from." });
+          return;
+        }
         const fiatText = defaultTip.fiat ? fiatAmountText(defaultTip.fiat, defaultTip.currency) : null;
         let failure = null;
         // Held from the price lookup on, so a tap during it can't start a second send either.
@@ -31206,6 +31269,7 @@ queueMicrotask(async () => {
           if (error?.code === SEND_OUTCOME_UNKNOWN) {
             // It may have gone through: no amount screen, which would invite a second tip (iOS e5a9b11).
             appendEngineLog("Instant tip outcome unknown");
+            instantTipHolds.set(inFlightKey, Date.now() + INSTANT_TIP_HOLD_MS);
             showKaPostsActionToast(SEND_OUTCOME_UNKNOWN_MESSAGE);
             return;
           }

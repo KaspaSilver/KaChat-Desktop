@@ -17,6 +17,7 @@ import {
   fetchFollowListPage,
   fetchPost,
   fetchChainPost,
+  KAPOST_PLACEHOLDER_REQUESTER,
   fetchThread,
   fetchGlobalFeed,
   fetchKaPostNotifications,
@@ -835,7 +836,7 @@ async function loadFeed() {
   try {
     const result = await fetchFeedPage(null);
     if (generation !== feedGeneration) return;
-    remotePosts = result.posts.map(mapRemotePost).filter(Boolean);
+    remotePosts = carryingUnsentComments(remotePosts, result.posts.map(mapRemotePost).filter(Boolean));
     // A refresh just delivered whatever the pill was offering.
     pendingNewPosts = [];
     seedPager(feedPager, result.posts, result.pagination);
@@ -1216,6 +1217,22 @@ async function loadAncestorsFor(post) {
 }
 
 /// Who holds this comment, at any depth (iOS findParent(ofCommentId:)).
+/** A page-one reset replaces its rows, whose comment trees only this device has: this carries over
+ *  the replies that aren't on chain yet, pending or failed, with the replies above them (iOS ee5ec98). */
+export function carryingUnsentComments(old, fresh) {
+  const previous = new Map((old || []).map((post) => [post.id, post]));
+  const unsentOf = (post) => (post.comments || []).flatMap((comment) => {
+    if (!comment.remoteId) return [comment];
+    const below = unsentOf(comment);
+    return below.length ? [{ ...comment, comments: below }] : [];
+  });
+  return fresh.map((post) => {
+    const prior = previous.get(post.id);
+    const unsent = prior ? unsentOf(prior) : [];
+    return unsent.length ? { ...post, comments: [...unsent, ...(post.comments || [])] } : post;
+  });
+}
+
 function findParentOf(id) {
   const search = (list) => {
     for (const post of list || []) {
@@ -2849,6 +2866,9 @@ async function submitReply(parent, text) {
   }
   parent = freshParent;
   const comment = makeLocalPost(text);
+  // What a retry needs if the parent has left memory by then (iOS ee5ec98).
+  comment.parentRemoteId = parent.remoteId;
+  comment.parentPosterPubkey = parent.posterPubkey || null;
   // The indexer orders replies newest first, so the new one goes to the TOP straight away
   // rather than out of view at the bottom (iOS 7f82118).
   mutatePost(parent.id, (p) => { p.comments = [comment, ...p.comments]; });
@@ -2914,6 +2934,14 @@ function retryPost(post) {
         if (!parent.remoteId) throw new Error("The post this replies to is not on the network yet.");
         txid = await submitKaPostReply({
           engine: deps.engine, text: post.text, postId: parent.remoteId, parentAuthorPubkey: parent.posterPubkey,
+          mentionedPubkeys: await mentionedPubkeysFor(post.text),
+        });
+        sessionReplyIds.add(txid);
+      } else if (post.parentRemoteId) {
+        // A reply whose parent has left memory (a thread segment, a page gone) is still a reply
+        // (iOS ee5ec98): it never falls through to a top-level post.
+        txid = await submitKaPostReply({
+          engine: deps.engine, text: post.text, postId: post.parentRemoteId, parentAuthorPubkey: post.parentPosterPubkey,
           mentionedPubkeys: await mentionedPubkeysFor(post.text),
         });
         sessionReplyIds.add(txid);
@@ -4480,23 +4508,60 @@ function notificationParentTxId(n) {
 // a snippet, and whether it is a reply or a quote. Resolved once per post id.
 const kaPostLinkPreviews = new Map();
 const kaPostLinkPreviewPending = new Map();
+// A post not found is asked again after five minutes at most (iOS 23920c8): one just made can turn
+// up, and every repaint of the chat would ask otherwise.
+const kaPostLinkPreviewMisses = new Map();
+const KAPOST_LINK_PREVIEW_RETRY_MS = 5 * 60 * 1000;
+const KAPOST_LINK_SNIPPET_MAX = 300;
+/** Someone else's text in a small card (iOS a8a5807a, 23920c8): one paragraph, no control or
+ *  direction marks (KaPost's invisible marker among them), at most 300 characters. */
+export function kaPostLinkSnippet(raw) {
+  const cleaned = String(raw ?? "").replace(/\r\n|[\n\r\v\f\u0085\u2028\u2029]/g, " ").replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
+  const characters = Array.from(cleaned);
+  return characters.length > KAPOST_LINK_SNIPPET_MAX ? `${characters.slice(0, KAPOST_LINK_SNIPPET_MAX).join("")}…` : cleaned;
+}
+/** The poster as the card names them: KNS or .kachat name first, then the name you gave them, then
+ *  the short address (iOS 23920c8). A post's own rows put your contact name first (posterName). */
+function kaPostLinkAuthorName(address) {
+  if (!address) return null;
+  if (kachatNamesUiEnabled()) {
+    const label = kachatCachedLabel(address);
+    if (label) return label;
+  } else if (deps.engine.knsNamesAsIdentity) {
+    const domain = deps.engine.peekKnsAddressInfo?.(address)?.explicitPrimaryDomain || deps.engine.peekKnsAddressProfile?.(address)?.domainName;
+    if (domain) return domain;
+  }
+  return posterName(address);
+}
 function kaPostLinkPreviewEntry(post) {
   if (!post) return null;
-  const text = String(post.text || "").replace(/\s+/g, " ").trim();
   return {
-    authorName: posterName(post.posterAddress),
     authorAddress: post.posterAddress,
-    avatarHtml: posterAvatarHtml(post.posterAddress),
-    snippet: text.length > 140 ? `${text.slice(0, 137).trimEnd()}...` : text,
+    snippet: kaPostLinkSnippet(post.text),
     action: post.parentRemoteId ? "reply" : post.quoted ? "quote" : "post",
   };
+}
+// The name and picture are read at each paint, so one that arrives later shows.
+function kaPostLinkPreviewShown(entry) {
+  return entry ? { ...entry, authorName: kaPostLinkAuthorName(entry.authorAddress), avatarHtml: posterAvatarHtml(entry.authorAddress) } : null;
+}
+/** The post a card names, with no reader key sent: the indexer (iOS KaPostPreviewLoader), then the
+ *  chain for one the indexer hasn't got (iOS KaPostChainReader). */
+async function kaPostLinkPost(id) {
+  let raw = null;
+  try { raw = await fetchPost({ engine: deps.engine, id, requesterPubkey: KAPOST_PLACEHOLDER_REQUESTER }); } catch { /* the chain below */ }
+  if (raw) return mapRemotePost(raw);
+  const record = await fetchChainPost(id);
+  const posterAddress = record ? kaspaAddressFromPubkey(deps.engine, record.authorPubkey) : null;
+  if (!posterAddress) return null;
+  return { posterAddress, text: record.message, parentRemoteId: record.action === "reply" ? record.referencedId : null, quoted: record.action === "quote" };
 }
 export function peekKaPostLinkPreview(txId) {
   const id = String(txId || "");
   if (!id || !deps) return null;
-  if (kaPostLinkPreviews.has(id)) return kaPostLinkPreviews.get(id);
+  if (kaPostLinkPreviews.has(id)) return kaPostLinkPreviewShown(kaPostLinkPreviews.get(id));
   const local = findPostByRemoteId(id);
-  if (local) { const entry = kaPostLinkPreviewEntry(local); kaPostLinkPreviews.set(id, entry); return entry; }
+  if (local) { const entry = kaPostLinkPreviewEntry(local); kaPostLinkPreviews.set(id, entry); return kaPostLinkPreviewShown(entry); }
   return null;
 }
 export async function resolveKaPostLinkPreview(txId) {
@@ -4505,11 +4570,14 @@ export async function resolveKaPostLinkPreview(txId) {
   const known = peekKaPostLinkPreview(id);
   if (known) return known;
   if (kaPostLinkPreviewPending.has(id)) return kaPostLinkPreviewPending.get(id);
-  const promise = indexerPost(id).then((post) => {
+  const missedAt = kaPostLinkPreviewMisses.get(id);
+  if (missedAt && Date.now() - missedAt < KAPOST_LINK_PREVIEW_RETRY_MS) return null;
+  const promise = kaPostLinkPost(id).then((post) => {
     const entry = kaPostLinkPreviewEntry(post);
-    if (entry) kaPostLinkPreviews.set(id, entry);
-    return entry;
-  }).finally(() => kaPostLinkPreviewPending.delete(id));
+    if (entry) { kaPostLinkPreviews.set(id, entry); kaPostLinkPreviewMisses.delete(id); }
+    else kaPostLinkPreviewMisses.set(id, Date.now());
+    return kaPostLinkPreviewShown(entry);
+  }).catch(() => { kaPostLinkPreviewMisses.set(id, Date.now()); return null; }).finally(() => kaPostLinkPreviewPending.delete(id));
   kaPostLinkPreviewPending.set(id, promise);
   return promise;
 }

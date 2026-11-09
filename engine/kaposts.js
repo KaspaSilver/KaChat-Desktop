@@ -180,6 +180,10 @@ export function requesterPubkeyFor(engine) {
   return hex;
 }
 
+/** Stands in for the reader's key on a link card's lookup (iOS a8a5807a KaPostPreviewLoader): the
+ *  indexer wants one, but it only marks per-reader fields, and who is reading stays out of it. */
+export const KAPOST_PLACEHOLDER_REQUESTER = `02${"0".repeat(64)}`;
+
 /** Compressed (02/03 + x) or raw x-only pubkey hex -> "kaspa:..." address, or null. */
 export function kaspaAddressFromPubkey(engine, pubkeyHex) {
   const hex = String(pubkeyHex || "").toLowerCase();
@@ -314,8 +318,8 @@ export async function fetchReplies({ engine, postId, limit = 100, before = null 
 /// Deliberately NOT run through filterKaChatPosts: the feeds drop posts without the KaChat marker
 /// because they are another client's content, but a parent IS the context the reader asked for,
 /// and a hole in a thread is worse than a Kasia-origin post inside it.
-export async function fetchPost({ engine, id } = {}) {
-  const json = await kapostGet("get-post", { id, requesterPubkey: requesterPubkeyFor(engine) });
+export async function fetchPost({ engine, id, requesterPubkey = null } = {}) {
+  const json = await kapostGet("get-post", { id, requesterPubkey: requesterPubkey || requesterPubkeyFor(engine) });
   return json?.post || null;
 }
 

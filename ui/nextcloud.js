@@ -580,6 +580,12 @@ async function readServerPortfolios(wallet) {
       result.taken.add(String(file.name).toLowerCase());
     }
   }
+  // Once any of this account's files is encrypted, a plain one proves nothing: it may have been
+  // planted, so it is left alone like anyone else's (KaPay 2da5f4b).
+  if (result.own.some((found) => !found.plain)) {
+    for (const found of result.own) if (found.plain) result.taken.add(String(found.file.name).toLowerCase());
+    result.own = result.own.filter((found) => !found.plain);
+  }
   return result;
 }
 
@@ -697,9 +703,12 @@ async function performPortfolioBackup() {
   // uploaded earlier only to carry a deletion has no job left and goes too (KaPay 1652437 seedIds).
   const uploadedReal = sync.portfolios.length > 0
     && !sync.portfolios.some((p) => isPristinePortfolioSeed(p, sync.transactions, sync.fees));
+  // A name just written is a current portfolio's, whatever the listing from before said: two
+  // portfolios that swapped names must not lose the file written a moment ago (KaPay 2da5f4b).
+  const writtenNames = new Set([...names.values()].map((name) => String(name).toLowerCase()));
   for (const found of server.own) {
     const ids = found.parsed.sync.portfolios.map((p) => p.id);
-    if (ids.some((id) => names.get(id)?.toLowerCase() === String(found.file.name).toLowerCase())) continue;
+    if (writtenNames.has(String(found.file.name).toLowerCase())) continue;
     const { transactions: fileTransactions, fees: fileFees } = found.parsed.sync;
     const seedCarrier = uploadedReal && found.parsed.sync.portfolios.length > 0
       && found.parsed.sync.portfolios.every((p) => isPristinePortfolioSeed(p, fileTransactions, fileFees));

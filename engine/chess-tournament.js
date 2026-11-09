@@ -48,6 +48,8 @@ export function allowanceMs(ply, startedAt) {
 const PUBLIC_ID_PREFIX = "public-";
 /** Public 1v1 rooms: the same queue, two seats: `duel-1`, `duel-2`, ... (iOS 10f3926). */
 const DUEL_ID_PREFIX = "duel-";
+// Ties end on the address (KaPlay da59726): every device lists the same board.
+const byRecencyThenAddress = (a, b) => (b.lastPlayedAt - a.lastPlayedAt) || (a.address < b.address ? -1 : a.address > b.address ? 1 : 0);
 function numberOf(id, prefix) {
   if (!String(id || "").startsWith(prefix)) return null;
   const rest = String(id).slice(prefix.length);
@@ -727,7 +729,7 @@ export function mergedLeaderboard(local, remote, period, nowMs) {
   return [...rows.values()].sort((a, b) => {
     if (a.wins !== b.wins) return b.wins - a.wins;
     if (a.losses !== b.losses) return a.losses - b.losses;
-    return b.lastPlayedAt - a.lastPlayedAt;
+    return byRecencyThenAddress(a, b);
   });
 }
 
@@ -764,7 +766,7 @@ export function leaderboard(tournaments, since = LEADERBOARD_FRESH_FROM_MS) {
   return Object.values(rows).sort((a, b) => {
     if (a.wins !== b.wins) return b.wins - a.wins;
     if (a.losses !== b.losses) return a.losses - b.losses;
-    return b.lastPlayedAt - a.lastPlayedAt;
+    return byRecencyThenAddress(a, b);
   });
 }
 
@@ -774,7 +776,7 @@ export function duelLeaderboard(rows) {
   return rows.filter((r) => r.wins + r.losses > 0).sort((a, b) => {
     if (a.wins !== b.wins) return b.wins - a.wins;
     if (a.losses !== b.losses) return a.losses - b.losses;
-    return b.lastPlayedAt - a.lastPlayedAt;
+    return byRecencyThenAddress(a, b);
   });
 }
 
@@ -784,7 +786,7 @@ export function tournamentLeaderboard(rows) {
   return rows.filter((r) => r.tournamentsWon + r.tournamentsLost > 0).sort((a, b) => {
     if (a.tournamentsWon !== b.tournamentsWon) return b.tournamentsWon - a.tournamentsWon;
     if (a.tournamentsLost !== b.tournamentsLost) return a.tournamentsLost - b.tournamentsLost;
-    return b.lastPlayedAt - a.lastPlayedAt;
+    return byRecencyThenAddress(a, b);
   });
 }
 

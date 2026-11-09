@@ -333,7 +333,7 @@ test("coins a send just spent are held back, then come back", async () => {
   assert.equal(excludeJustSpentUtxos(coins, Date.now() + JUST_SPENT_HOLD_MS + 1).length, 2, "held for a while, not for good");
   clearJustSpentOutpoints();
 });
-test("an unknown outcome holds its coins back; a rejection doesn't", () => withNoRest(async () => {
+test("neither an unknown outcome nor a rejection holds coins back, so a resend can't pay twice", () => withNoRest(async () => {
   clearJustSpentOutpoints();
   const coins = [heldCoin("aa", 0, 5), heldCoin("bb", 1, 7)];
   await assert.rejects(submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => { throw new Error("fee too low"); }, txid: TXID, spends: ["bb:1"], lostAnswerWaitMs: 1 }));
@@ -342,7 +342,7 @@ test("an unknown outcome holds its coins back; a rejection doesn't", () => withN
     submitConfirmingAcceptance({ rpc: NOT_FOUND, submit: async () => { throw new Error("timed out"); }, txid: TXID, spends: ["bb:1"], lostAnswerWaitMs: 1 }),
     (error) => error.code === SEND_OUTCOME_UNKNOWN,
   );
-  assert.deepEqual(excludeJustSpentUtxos(coins).map((c) => c.outpoint.transactionId), ["aa"]);
+  assert.equal(excludeJustSpentUtxos(coins).length, 2, "iOS 4f8e14bb: the resend builds on the same coins");
   clearJustSpentOutpoints();
 }));
 test("Max past one transaction's coins spends the largest 80; a coin-control pick is kept as is", () => {

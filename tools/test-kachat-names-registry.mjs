@@ -746,6 +746,8 @@ function memoryStorage() {
   return { map, get: (k) => map.get(k) ?? null, set: (k, v) => { map.set(k, v); } };
 }
 
+// These walks are read at far-apart fake times; the age limit has its own test.
+Object.defineProperty(KachatNamesRegistry, "chainCopyMaxAgeMs", { get: () => Infinity, configurable: true });
 async function runRegistryChain(v, r) {
   const { m, visibleUpTo } = simulatedChain(v);
   const { visible, live, transactions } = visibleUpTo(e2eCount);

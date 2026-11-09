@@ -10152,7 +10152,7 @@ button.quick-reaction-slot { cursor: pointer; padding: 0; line-height: 1; }
 .internal-link-card { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); text-align: left; cursor: pointer; color: var(--text); font: inherit; }
 .internal-link-card .message-link-card-meta { padding: 0; }
 .internal-link-card strong { font-size: 14px; }
-.internal-link-card small { color: var(--muted); font-size: 12px; }
+.internal-link-card small { color: var(--muted); font-size: 12px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .internal-link-icon { width: 40px; height: 40px; flex: 0 0 auto; border-radius: 10px; background: rgba(112,199,186,.18); display: grid; place-items: center; }
 .internal-link-icon svg { width: 20px; height: 20px; fill: none; stroke: var(--kaspa); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .voice-recording-panel.preview { border-color: rgba(112,199,186,.35); background: rgba(112,199,186,.08); }

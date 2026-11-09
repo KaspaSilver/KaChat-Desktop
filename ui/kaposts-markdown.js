@@ -38,9 +38,16 @@ export function containsKaPostsFormatting(source) {
   return renderKaPostsMarkdown(source).hasFormatting;
 }
 
+/** `text` without the bidi embedding, override and isolate controls (iOS ee5ec98): anyone can post
+ *  them, and one reverses the order the rest of the text is read in. The plain direction marks
+ *  (U+200E, U+200F) stay: they can't reorder anything, and right-to-left writing uses them. */
+export function stripBidiControls(text) {
+  return String(text ?? "").replace(/[\u202A-\u202E\u2066-\u2069]/g, "");
+}
+
 export function renderKaPostsMarkdown(source) {
   const state = { out: "", spans: [] };
-  const lines = String(source ?? "").split("\n");
+  const lines = stripBidiControls(source).split("\n");
   lines.forEach((line, index) => {
     if (index > 0) state.out += "\n";
     renderLine(line, state);

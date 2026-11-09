@@ -1180,8 +1180,8 @@ export class KaspaEngine {
   /** Submits a Kaspa WASM SDK Transaction as is; returns the node's transaction id.
    *  `expectedTxId`: the id computed locally (the .kachat core's), looked up when the submit fails;
    *  else the SDK transaction's own id (iOS 9139e88 `submitRpcTransaction(_:expectedTxId:)`).
-   *  `spends`: the "txid:index" coins it spends; by default read from its inputs. Once it went out
-   *  or its outcome is unknown they stay out of the next build for a while (iOS 3942a5b7). */
+   *  `spends`: the "txid:index" coins it spends; by default read from its inputs. Once it went out,
+   *  they stay out of the next build for a while (iOS 3942a5b7). */
   async submitRpcTransaction(transaction, { expectedTxId = null, spends = null } = {}) {
     this.requireSdk();
     // A submit whose answer was lost but whose transaction the network has is a send that went
@@ -1314,7 +1314,7 @@ export class KaspaEngine {
   }
 
   // Compound: sweep every UTXO at the chatting address into one (self-send, no change).
-  async compoundUtxos({ totalFeeKas = null, feeMultiplier = 1 } = {}) {
+  async compoundUtxos({ totalFeeKas = null, feeMultiplier = 1, selectedOutpoints = null } = {}) {
     this.requireWallet();
     await this.connect();
     return sweepAllToSelf({
@@ -1325,6 +1325,7 @@ export class KaspaEngine {
       sourceAddress: this.address,
       totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
       feeMultiplier,
+      selectedOutpoints,
       log: this.log,
     });
   }
@@ -1418,7 +1419,7 @@ export class KaspaEngine {
   }
 
   // Compound: sweep every UTXO at a spending address into one (self-send, no change).
-  async compoundSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", totalFeeKas = null, feeMultiplier = 1, owner = this.address }) {
+  async compoundSpending({ mnemonic, index, passphrase = "", passphraseForm = "nfkd", totalFeeKas = null, feeMultiplier = 1, selectedOutpoints = null, owner = this.address }) {
     this.requireSdk();
     await this.connect();
     const spending = deriveSpendingWallet(this.kaspa, mnemonic, index, passphrase, { passphraseForm });
@@ -1432,6 +1433,7 @@ export class KaspaEngine {
         sourceAddress: spending.address,
         totalFeeSompi: totalFeeSompiFrom(totalFeeKas),
         feeMultiplier,
+        selectedOutpoints,
         redeemScript: spending.redeemScript || null,
         log: this.log,
       });

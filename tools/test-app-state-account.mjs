@@ -342,7 +342,8 @@ test("importing the account already in the slot doesn't reset its chats", () => 
   const source = between("async function importAndEnterAccount(", "// STEP 1 → STEP 2");
   assert.match(source, /const previousSlotAddress = String\(engine\.address \|\| readActiveAccountAddress\(\) \|\| ""\)/);
   assert.ok(source.indexOf("previousSlotAddress =") < source.indexOf("importMnemonicWithFamily"), "read before the import moves engine.address");
-  assert.match(source, /if \(resetState && !sameStoredAccountAddress\(previousSlotAddress, wallet\.address\)\) \{\n\s*state = \{ contacts: \[\], conversations: \[\] \};/);
+  assert.match(source, /const isNewAccount = !sameStoredAccountAddress\(previousSlotAddress, wallet\.address\)/);
+  assert.match(source, /if \(resetState && isNewAccount\) \{\n\s*state = \{ contacts: \[\], conversations: \[\] \};/);
 });
 
 for (const [name, fn] of tests) {
