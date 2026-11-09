@@ -36,6 +36,7 @@ import { askKaPostTerms, kaPostTermsAccepted, roomHiddenSenders, roomMessageRepo
 import { SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
 import { settleLeftoverRoomRows, markRoomRowUnconfirmed, settleRoomCopy, ROOM_UNCONFIRMED } from "./leftover-sends.js";
 import { accountGuard } from "./account-guard.js";
+import { recordRoomEdit, restoreRoomEdit, roomLinkJoinPrompt, roomPollGapFloor } from "../engine/kaposts.js";
 
 // Public chain data caches are global but per network: a testnet room is not the mainnet room.
 const NET_SUFFIX = IS_TESTNET ? "-testnet" : "";
@@ -805,27 +806,19 @@ function saveEdits() {
   try { localStorage.setItem(EDITS_KEY, JSON.stringify(editsCache)); } catch { /* fine */ }
 }
 function recordEdit(channel, txId, edit, editorAddress, blockTime, status = null) {
-  if (!editorAddress || !edit?.targetTxId) return false;
-  const byTarget = (editsCache[channel] ||= {});
-  const existing = byTarget[edit.targetTxId];
-  if (txId && existing?.txIds?.includes(txId)) return false;
-  if (existing && Number(existing.blockTime || 0) > blockTime) {
-    if (txId) (existing.txIds ||= []).push(txId);
-    return false;
-  }
-  byTarget[edit.targetTxId] = { text: String(edit.text || ""), blockTime, editor: editorAddress, txIds: [...(existing?.txIds || []), ...(txId ? [txId] : [])].slice(-20), ...(status ? { status } : {}) };
-  return true;
+  return recordRoomEdit((editsCache[channel] ||= {}), txId, edit, editorAddress, blockTime, status);
 }
 /** A room message's content with its edit applied - when the editor is the message's sender. */
 function effectiveContent(channel, m) {
-  const edit = editsCache[channel]?.[m?.txId];
-  if (!edit || edit.editor !== m.senderAddress) return m?.content ?? "";
+  const edit = editFor(channel, m);
+  if (!edit) return m?.content ?? "";
   if (!deps.isEditableContent?.(m.content)) return m.content ?? "";
   return deps.applyEditToContent?.(edit.text, m.content) ?? edit.text;
 }
 function editFor(channel, m) {
   const edit = editsCache[channel]?.[m?.txId];
-  return edit && edit.editor === m.senderAddress ? edit : null;
+  // A failed edit (only an older build left one) never reached the chain (iOS ee5ec98).
+  return edit && edit.editor === m.senderAddress && edit.status !== "failed" ? edit : null;
 }
 
 /** Applies one reaction event. Newest-wins per (targetTxId, reactor); a "remove" is kept as
@@ -1012,6 +1005,13 @@ const deepBackfilled = new Set();
 // Oldest a room's next backfill needs to reach after an outage (ms): the indexer gets the last word
 // on that stretch, without paging its whole history again (iOS ee5ec98).
 const deepBackfillFloor = new Map();
+// The newest block time the indexer has shown for each room this session. A steady poll whose whole
+// page is newer than this has a gap behind it (iOS ee5ec98).
+const roomNewestSeen = new Map();
+function noteRoomNewest(channel, rows) {
+  const newest = (rows || []).reduce((max, row) => Math.max(max, Number(row?.blockTime) || 0), 0);
+  if (newest) roomNewestSeen.set(channel, Math.max(newest, roomNewestSeen.get(channel) || 0));
+}
 /** The rooms' indexer changed state: the wanted scan follows, and once it's back its rooms read the
  *  outage again from ten minutes before it began. */
 function handleIndexerAvailability({ key, down, downSinceMs }) {
@@ -1053,9 +1053,19 @@ async function backfillChannel(channel, { quiet = true } = {}) {
     if (deepBackfilled.has(channel)) {
       const result = await fetchBroadcastHistory({ channel, baseUrl });
       added = mergeMessages(channel, result.messages);
+      // More arrived since the last poll than the page holds (a busy room, or the tab away for a
+      // while, when the block stream isn't watching it): page back to the rows already seen,
+      // through the backfill below (iOS ee5ec98).
+      const gapFloor = roomPollGapFloor(result, roomNewestSeen.get(channel));
+      noteRoomNewest(channel, result.messages);
+      if (gapFloor != null) {
+        deepBackfilled.delete(channel);
+        deepBackfillFloor.set(channel, gapFloor);
+      }
       // After an account switch the room's history is already in, so its next poll settles it.
       if (deepBackfillDone.has(channel) && settlePendingFromEarlierRuns(channel)) added += 1;
-    } else {
+    }
+    if (!deepBackfilled.has(channel)) {
       // First open this session: page backwards through the indexer's full history
       // (newest-first, `before` = oldest blockTime seen) so the room shows every
       // message still retained server-side, not just the newest page.
@@ -1069,6 +1079,7 @@ async function backfillChannel(channel, { quiet = true } = {}) {
       for (let page = 0; page < 20; page++) {
         const result = await fetchBroadcastHistory({ channel, limit: 500, before, baseUrl });
         added += mergeMessages(channel, result.messages);
+        noteRoomNewest(channel, result.messages);
         if (!result.hasMore || !result.messages.length) break;
         const oldest = result.messages.reduce(
           (min, m) => Math.min(min, Number(m.blockTime) || Infinity), Infinity);
@@ -1549,8 +1560,12 @@ function buildMessageElement(m) {
   timeLine.append(time);
   if (mine && deps.createDeliveryStatusIcon) {
     // "Not confirmed": the same label as a 1:1 send whose outcome is unknown, with no Retry (iOS 33095ac).
-    const status = m.status === "pending" ? "pending" : m.status === "failed" ? "failed" : m.status === ROOM_UNCONFIRMED ? ROOM_UNCONFIRMED : "confirmed";
-    const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status }, { onRetry: () => retryBroadcastMessage(m) });
+    const baseStatus = m.status === "pending" ? "pending" : m.status === "failed" ? "failed" : m.status === ROOM_UNCONFIRMED ? ROOM_UNCONFIRMED : "confirmed";
+    // The bubble carries its edit's send state; `m` keeps the row's own (iOS ee5ec98 shownMessage).
+    const editFailed = failedRoomEdits.has(failedRoomEditKey(activeChannel, m.txId));
+    const status = editFailed ? "failed" : roomEdit?.status === ROOM_UNCONFIRMED ? ROOM_UNCONFIRMED : baseStatus;
+    const onRetry = editFailed ? () => retryFailedRoomEdit(activeChannel, m.txId) : () => retryBroadcastMessage(m);
+    const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status }, { onRetry });
     if (icon) {
       icon.classList.add("broadcast-delivery-icon");
       timeLine.append(icon);
@@ -1687,6 +1702,14 @@ function cancelBroadcastComposeBanner() {
 }
 
 let broadcastEditTarget = null; // the row being edited
+// Room edits whose send failed, "channel:targetTxId" -> the text, for Retry Edit. The row itself goes
+// back to what it read before, since that text never reached the chain (iOS ee5ec98).
+const failedRoomEdits = new Map();
+const failedRoomEditKey = (channel, targetTxId) => `${channel}:${targetTxId}`;
+function retryFailedRoomEdit(channel, targetTxId) {
+  const text = failedRoomEdits.get(failedRoomEditKey(channel, targetTxId));
+  if (text != null) sendBroadcastEdit(channel, targetTxId, text);
+}
 function startBroadcastEdit(m) {
   cancelBroadcastReply();
   broadcastEditTarget = m;
@@ -1705,6 +1728,9 @@ async function sendBroadcastEdit(channel, targetTxId, text) {
   const clean = String(text || "").trim().slice(0, 4000);
   if (!myAddress || !targetTxId || !clean) return;
   if (deps.isChattingBalanceZero?.()) { deps.showFundingGate?.(); return; }
+  failedRoomEdits.delete(failedRoomEditKey(channel, targetTxId));
+  // What the message reads now, to go back to if this never leaves the browser.
+  const previous = editsCache[channel]?.[targetTxId] ? { ...editsCache[channel][targetTxId] } : null;
   recordEdit(channel, null, { targetTxId, text: clean }, myAddress, Date.now(), "pending");
   saveEdits();
   if (activeChannel === channel) renderRoom();
@@ -1716,10 +1742,17 @@ async function sendBroadcastEdit(channel, targetTxId, text) {
     const sent = editsCache[channel]?.[targetTxId];
     if (sent && sent.editor === myAddress) delete sent.status;
   } catch (error) {
-    deps.appendEngineLog?.(`Broadcast edit send failed (local applied): ${error.message}`);
-    deps.showToast?.(`Failed to edit: ${userFacingError(error)}`);
-    const edit = editsCache[channel]?.[targetTxId];
-    if (edit) edit.status = "failed";
+    deps.appendEngineLog?.(`Broadcast edit send failed: ${error.message}`);
+    // Not "Failed": it may well have gone through (iOS ee5ec98 showEditFailure).
+    deps.showToast?.(roomSendErrorText(error, "Failed to edit: "));
+    if (error?.code === SEND_OUTCOME_UNKNOWN) {
+      // "Not confirmed" with no Retry, which could pay twice. Its chain copy turns it into a normal edit.
+      recordEdit(channel, error.txid || null, { targetTxId, text: clean }, myAddress, Date.now(), ROOM_UNCONFIRMED);
+    } else {
+      // Never sent: the message goes back to what it read, and the text waits for Retry Edit.
+      restoreRoomEdit(editsCache[channel] ||= {}, targetTxId, previous);
+      failedRoomEdits.set(failedRoomEditKey(channel, targetTxId), clean);
+    }
   }
   saveEdits();
   if (activeChannel === channel) renderRoom();
@@ -1795,6 +1828,9 @@ function openBroadcastMessageMenu(m, x, y) {
   }
   if (mine && m.status === "failed") {
     items.push({ label: "Retry Send", icon: icons.retry, onClick: () => retryBroadcastMessage(m) });
+  }
+  if (mine && failedRoomEdits.has(failedRoomEditKey(activeChannel, m.txId))) {
+    items.push({ label: "Retry Edit", icon: icons.retry, onClick: () => retryFailedRoomEdit(activeChannel, m.txId) });
   }
   const reactionEntries = Object.entries(perReactor).filter(([, entry]) => !entry.removed)
     .map(([reactorAddress, entry]) => ({ emoji: entry.emoji, reactorAddress }));
@@ -2864,6 +2900,9 @@ export function resetBroadcastsForAccount() {
   settledPendingRooms.clear();
   // Reaction marks and their Retry are the previous account's reactions.
   broadcastReactionStatus.clear();
+  // And these were the previous account's rooms (iOS ee5ec98 setCurrentWallet).
+  roomNewestSeen.clear();
+  failedRoomEdits.clear();
   activeChannel = null;
   loadState();
   syncScanWanted();
@@ -2909,13 +2948,18 @@ export function stopBroadcastPolling() {
 
 /** Deep-open a channel's room from OUTSIDE this module (the global bell center). */
 // An in-chat room link (kachat://broadcast/<channel>): joins the room if it is not in the list
-// yet, then opens it - the same gate a pasted room name goes through.
+// yet, once the person says so, then opens it - the same gate a pasted room name goes through. Any
+// post can hand over a link, and the name is whatever it likes (iOS ee5ec98).
 export function openBroadcastRoomFromLink(channel) {
   if (!deps) return;
   // Before the join: Not Now on the Terms leaves the list as it was (KaPosts-iPhone 9e22075).
   if (!kaPostTermsAccepted()) { askKaPostTerms({ onAgree: () => openBroadcastRoomFromLink(channel) }); return; }
   loadState({ caches: false });
-  joinChannel(channel);
+  const name = normalizeBroadcastChannel(channel);
+  const listed = isCuratedBroadcastChannel(name) || joinedChannels.includes(name);
+  // A name that can't be a room goes straight to joinChannel, which says so.
+  if (listed || !isValidBroadcastChannel(name)) { joinChannel(channel); return; }
+  confirmDialog(roomLinkJoinPrompt(name)).then((join) => { if (join) joinChannel(channel); });
 }
 
 export function openBroadcastChannelFromNotification(channel) {

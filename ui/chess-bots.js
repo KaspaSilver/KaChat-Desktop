@@ -156,7 +156,7 @@ async function sendContent(content, address) {
   const engine = deps().engine;
   // The game belongs to the address it started under: another account never signs its moves.
   if (!engine?.address || engine.address !== address) throw new Error("This game belongs to another account.");
-  await sendBroadcastMessage({ engine, channel: CHESS_BOTS_CHANNEL, content, feeKas: "0", singleInput: true });
+  return sendBroadcastMessage({ engine, channel: CHESS_BOTS_CHANNEL, content, feeKas: "0", singleInput: true });
 }
 
 /** The "about 0.0017 KAS" figure (ChessBotCodec.stampFeeText): a game of 40 moves a side. */
@@ -546,6 +546,7 @@ function newGame() {
   const g = new ChessBotGame({
     bot, playerColor,
     send: (content) => sendContent(content, address),
+    isAccepted: async (txId) => (await ctx.lookUpTransaction(txId)).status === "accepted",
     think,
     // Into the record of the account the game was played under: a stamp still going out after
     // Play again and an account switch is not the new account's win.
@@ -658,8 +659,8 @@ function tapSquare(file, rank) {
 /** `dependencies`: Chess Online's deps (engine, escapeHtml, estimateFeeKas, isChattingBalanceZero,
  *  showFundingGate, appendEngineLog, showToast; accountScopedKey when the host passes it).
  *  `render`: repaint Chess Online's screen. `exit`: back to Chess Online's home. */
-export function initChessBots({ deps: dependencies, render, exit }) {
-  ctx = { deps: dependencies || {}, render, exit };
+export function initChessBots({ deps: dependencies, render, exit, lookUpTransaction }) {
+  ctx = { deps: dependencies || {}, render, exit, lookUpTransaction };
 }
 
 /** The home card opened the bots: the ladder. */

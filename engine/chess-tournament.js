@@ -254,6 +254,41 @@ export function claimMayPost(lastClaimAt, now, force = false) {
   if (force || lastClaimAt == null) return true;
   return now - lastClaimAt >= CLAIM_RETRY_MS;
 }
+/** The automatic claims of one flag: a claim that keeps not taking is going against a board that's
+ *  wrong, so each one after the first reads the arena again first, and after this many the app
+ *  stops paying for them. The board's Claim win is still there (iOS da59726 AutoClaim). */
+export const MAX_AUTO_CLAIMS = 4;
+/** One automatic claim that is due, given its record so far (`{ flagAt, tries, repaged }`, or
+ *  undefined): `{ record, action }`, the record to keep and "post", "repage" or "stop". A new
+ *  flag starts a new count. */
+export function nextAutoClaim(record, flag) {
+  const current = record && record.flagAt === flag ? record : { flagAt: flag, tries: 0, repaged: false };
+  if (current.tries >= MAX_AUTO_CLAIMS) return { record: current, action: "stop" };
+  if (current.tries > 0 && !current.repaged) return { record: { ...current, repaged: true }, action: "repage" };
+  return { record: { ...current, tries: current.tries + 1, repaged: false }, action: "post" };
+}
+
+/** Polls further apart than this (the tab hidden, the machine asleep, polls failing) may have
+ *  missed rows the newest page can't reach (iOS da59726 pollLapseMs). */
+export const POLL_LAPSE_MS = 20_000;
+/** A repeat of the paging starts this long before the point it has to reach. */
+export const REPAGE_MARGIN_MS = 60_000;
+/** A game of this player's showing a move missing pages the arena back at most this often. */
+export const GAP_REPAGE_GAP_MS = 30_000;
+/** A game of `me`'s still undecided has a move from one of its players beyond the next ply: a row
+ *  before it is missing here. The earliest such game's start, or null (iOS da59726 earliestGap). */
+export function earliestArenaGap(events, tournaments, me, now) {
+  let since = null;
+  for (const { message, sender } of events || []) {
+    if (message?.a !== "move" || message.g == null || message.n == null) continue;
+    const game = tournaments[message.t]?.games[message.g];
+    if (!game || !colorOf(game, me) || !colorOf(game, sender)) continue;
+    if (message.n <= game.moves.length + 1 || isDecided(game, now)) continue;
+    since = since === null ? game.startedAt : Math.min(since, game.startedAt);
+  }
+  return since;
+}
+
 /** Taps on Claim win closer together than this (to the last claim posted) are one claim (iOS
  *  4922804 claimTapGapMs). */
 export const CLAIM_TAP_GAP_MS = 5_000;

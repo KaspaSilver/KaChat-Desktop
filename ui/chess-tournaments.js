@@ -23,6 +23,7 @@ import {
 const ARENA_CACHE_KEY = "kachat-chess-arena-v1";   // device-wide: the arena is the same for every wallet
 const ARENA_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const ARENA_MAX_ROWS = 40_000;
+const ARENA_MAX_UNVERIFIED = 2_000;
 const POLL_MS = 8_000;
 /** While this player holds a seat or has a game on, the arena is pulled from the indexer every
  *  two seconds on top of the 8 s poll and the block scan (iOS 593620e). */
@@ -101,6 +102,18 @@ const RECENT_ANSWER_MS = 15_000;
 const CHAIN_FLAG_MARGIN_MS = 5_000;
 // When the newest indexer answer for the arena was asked for (wall ms).
 let arenaIndexerAnsweredAt = 0;
+// When the newest poll the indexer answered was asked for (wall ms): rows older than this that a
+// newest-rows poll can't reach are paged in again (iOS da59726 indexerCoveredUntil).
+let arenaCoveredUntil = 0;
+// How far back the next poll has to page, or null when no repeat is owed.
+let repageFloor = null;
+// Moves on each time a repage is asked for: a crawl already running doesn't settle it.
+let repageSerial = 0;
+let lastGapRepageAt = 0;
+// The start of the earliest game of this player's with a move missing here, from the last replay.
+let gapSince = null;
+/** Per game, the automatic claims of its flag: T.nextAutoClaim. */
+const autoClaims = new Map();
 // While the indexer is down, when each of this player's games last had its players read from the
 // REST API (wall ms).
 const chainReadAt = new Map();
@@ -246,6 +259,15 @@ async function verifyCachedArenaRows() {
   } catch { unverifiedCachedRows = list; }
 }
 
+/** Rows a crawl couldn't verify, asked about again on each poll (verifyCachedArenaRows). */
+function holdUnverifiedRows(list) {
+  const held = new Set(unverifiedCachedRows.map((r) => r.txId));
+  for (const r of list || []) {
+    if (unverifiedCachedRows.length >= ARENA_MAX_UNVERIFIED) return;
+    if (!held.has(r.txId)) { held.add(r.txId); unverifiedCachedRows.push(r); }
+  }
+}
+
 let backfillInFlight = null;
 function backfill(opts = {}) {
   // One crawl at a time: the 8 s and 2 s polls must not each start a 20-page walk.
@@ -253,27 +275,55 @@ function backfill(opts = {}) {
   backfillInFlight = backfillNow(opts).finally(() => { backfillInFlight = null; });
   return backfillInFlight;
 }
+/** The next poll pages the arena back to `since`: rows may be missing (iOS da59726 requestRepage).
+ *  A crawl already going over the whole window, or to an older point, is left to go there. Until
+ *  it's done no answer counts as fresh. */
+function requestRepage(since) {
+  if (backfilled && repageFloor === null) { repageFloor = since; repageSerial += 1; }
+  else if (repageFloor !== null && since < repageFloor) { repageFloor = since; repageSerial += 1; }
+  arenaIndexerAnsweredAt = 0;
+}
+/** A game of this player's has a later move than its board reached: a row before it is missing. */
+function repageForGapIfDue() {
+  const at = Date.now();
+  if (gapSince === null || at - lastGapRepageAt < T.GAP_REPAGE_GAP_MS) return;
+  lastGapRepageAt = at;
+  requestRepage(gapSince - T.REPAGE_MARGIN_MS);
+}
 async function backfillNow({ full = false } = {}) {
   await verifyCachedArenaRows();
   if (!hasBroadcastIndexer()) { historyReady = true; return; }
   const askedAt = Date.now();
+  // The polls stopped for a while: the rows since then may be past what the newest page holds.
+  if (backfilled && arenaCoveredUntil > 0 && askedAt - arenaCoveredUntil > T.POLL_LAPSE_MS) requestRepage(arenaCoveredUntil - T.REPAGE_MARGIN_MS);
+  repageForGapIfDue();
+  const serial = repageSerial;
   try {
     let before = null;
-    const cutoff = Date.now() - ARENA_RETENTION_MS;
-    const pages = backfilled && !full ? 1 : 20;
+    const wholeWindow = full || !backfilled;
+    const cutoff = Math.max(askedAt - ARENA_RETENTION_MS, wholeWindow ? 0 : repageFloor ?? 0);
+    const pages = wholeWindow || repageFloor !== null ? 20 : 1;
     for (let page = 0; page < pages; page += 1) {
       // An incremental poll needs only the newest rows; the full walk pages 500 at a time.
       const result = await fetchBroadcastHistory({ channel: T.ARENA_CHANNEL, limit: pages === 1 ? 100 : 500, before });
       // Not trusted as served: the sender is verified against the chain first (DSK-045).
-      mergeRows((await verifiedArenaRows(result.messages)).accepted);
+      const { accepted, unknown } = await verifiedArenaRows(result.messages);
+      mergeRows(accepted);
+      // The REST API had no answer yet: past the newest page no poll would serve these again.
+      if (pages > 1) holdUnverifiedRows(unknown);
+      if (page === 0) arenaCoveredUntil = askedAt;
       if (!result.hasMore || !result.messages?.length) break;
       const oldest = result.messages.reduce((min, m) => Math.min(min, Number(m.blockTime) || Infinity), Infinity);
       if (!Number.isFinite(oldest) || oldest < cutoff) break;
       before = oldest;
     }
     backfilled = true;
-    // Rows up to the moment it was asked are in, once any paging due has finished (iOS da59726).
-    arenaIndexerAnsweredAt = askedAt;
+    // Asked for again while this ran (a merge above can find a gap): the next poll does that one.
+    if (repageSerial === serial) {
+      repageFloor = null;
+      // Rows up to the moment it was asked are in, once any paging due has finished (iOS da59726).
+      arenaIndexerAnsweredAt = askedAt;
+    }
     if (!historyReady) { historyReady = true; render(); }
   } catch (error) {
     // The indexer may not track the arena yet (CHESS_TOURNAMENTS.md §6): the lobby then shows
@@ -309,6 +359,8 @@ function reduceArenaNow() {
   tournaments = T.reduce(T.orderingLocalStamps(events, localStamps));
   recomputeLocalBoards();
   const my = me();
+  gapSince = my ? T.earliestArenaGap(events, tournaments, my, Date.now()) : null;
+  repageForGapIfDue();
   // Asked to join a public room that filled first: queue into the next one, once.
   if (queuedPublicRoomId && my) {
     const room = tournaments[queuedPublicRoomId];
@@ -942,6 +994,14 @@ function postClaim(t, game, { force = false } = {}) {
   const key = keyOf(t.id, game.id);
   const at = Date.now();
   if (claimsInFlight.has(key) || !T.claimMayPost(claimedGames.get(key), at, force)) return;
+  if (!force) {
+    const step = T.nextAutoClaim(autoClaims.get(key), T.flagAt(game) ?? 0);
+    autoClaims.set(key, step.record);
+    if (step.action === "stop") return;
+    // It didn't take: read the arena again before paying for another. The tick waits on
+    // flagIsConfirmed until that's done (iOS da59726).
+    if (step.action === "repage") { requestRepage(game.startedAt - T.REPAGE_MARGIN_MS); return; }
+  }
   claimedGames.set(key, at);
   claimsInFlight.add(key);
   // The board's button reads "Claiming…" while it goes out.
@@ -2058,13 +2118,14 @@ function onClick(event) {
 export function initChessTournaments(dependencies) {
   // Back from an outage: the arena is paged again, and the indexer has the last word.
   onIndexerAvailabilityChange(({ down }) => {
-    if (!down && arenaIndexerAnsweredAt > 0) backfill({ full: true }).catch(() => {});
+    if (!down && (arenaIndexerAnsweredAt > 0 || repageFloor !== null)) backfill({ full: true }).catch(() => {});
   });
   deps = dependencies;
   screenEl = document.querySelector("[data-chess-tournaments]");
   if (!screenEl) return;
   initChessBots({
     deps,
+    lookUpTransaction: lookUpArenaTransaction,
     render: () => { if (view.name === "bots") render(); },
     exit: (to = "home") => { view = { ...view, name: to, tournamentId: null, gameId: null }; render(); },
   });
@@ -2194,6 +2255,8 @@ export function resetChessTournamentsForAccount() {
   pendingMoveGames.clear();
   pendingMoveSentAt.clear();
   claimedGames.clear();
+  autoClaims.clear();
+  lastGapRepageAt = 0;
   spectatorSwitchedFor = null;
   queuedPublicRoomId = null;
   joinFeeText = null;

@@ -1815,7 +1815,7 @@ function removeAccountScopedLocalData(address, { spendingAddresses = [], keepCoi
     const groupsAll = JSON.parse(localStorage.getItem("kachat-groups-v1") || "null") || {};
     for (const bucketKey of bucketKeys) for (const groupId of Object.keys(groupsAll?.[bucketKey] || {})) removedGroupIds.add(groupId);
   } catch { /* unreadable: no group ids to clear */ }
-  for (const key of ["kachat-groups-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY, GROUP_MUTED_MEMBERS_KEY, "kachat-group-tombstones-v1", "kachat-group-control-cursor-v1", "kachat-group-msg-counter-v1", "kachat-group-invites-v1", "kachat-group-invite-answers-v1", "kachat-group-member-status-v1", SPENDING_STATE_KEY, UTXO_LABELS_KEY]) {
+  for (const key of ["kachat-groups-v1", "kachat-group-seen-msgs-v1", GROUP_MSG_KEY, GROUP_REACTIONS_KEY, GROUP_EDITS_KEY, GROUP_UNREAD_KEY, GROUP_HIDDEN_MEMBERS_KEY, GROUP_MUTED_MEMBERS_KEY, "kachat-group-tombstones-v1", "kachat-group-control-cursor-v1", "kachat-group-msg-counter-v1", "kachat-group-invites-v1", "kachat-group-invite-answers-v1", "kachat-group-member-status-v1", SPENDING_STATE_KEY, UTXO_LABELS_KEY]) {
     try {
       const all = JSON.parse(localStorage.getItem(key) || "null");
       if (!all || typeof all !== "object") continue;
@@ -1843,6 +1843,31 @@ function removeAccountScopedLocalData(address, { spendingAddresses = [], keepCoi
   } catch { /* prefs stay */ }
 }
 
+// The chatting addresses an account used before its current one (iOS 4f8e14bb): their chats stay on
+// this device under those addresses until the account is removed.
+const PREVIOUS_CHATTING_ADDRESSES_KEY = "kachat-previous-chatting-addresses-v1";
+function readPreviousChattingAddresses() {
+  try { return JSON.parse(localStorage.getItem(PREVIOUS_CHATTING_ADDRESSES_KEY) || "{}") || {}; } catch { return {}; }
+}
+function movePreviousChattingAddresses(previous, current) {
+  const all = readPreviousChattingAddresses();
+  const list = [...(all[previous] || []), previous].filter((address) => !sameStoredAccountAddress(address, current));
+  delete all[previous];
+  if (list.length) all[current] = [...new Set(list)]; else delete all[current];
+  try { localStorage.setItem(PREVIOUS_CHATTING_ADDRESSES_KEY, JSON.stringify(all)); } catch { /* the old chats just stay */ }
+}
+/** One since added as an account of its own is left out: from then on that data is that account's. */
+function takePreviousChattingAddresses(address) {
+  const all = readPreviousChattingAddresses();
+  const saved = loadSavedAccounts();
+  const list = (all[address] || []).filter((old) => !saved.some((entry) => sameStoredAccountAddress(entry?.address, old)));
+  if (all[address]) {
+    delete all[address];
+    try { localStorage.setItem(PREVIOUS_CHATTING_ADDRESSES_KEY, JSON.stringify(all)); } catch { /* removed again next time */ }
+  }
+  return list;
+}
+
 /** Every removal path ends here (iOS d23e6f7a / KaPay 1652437 removeLocalData: one list, so no path
  *  leaves a different part behind). `context`: accountRemovalContext(address), taken by a caller
  *  that locks the vault first. Resolves once its Nextcloud app passwords are revoked (best effort). */
@@ -1861,6 +1886,9 @@ function removeSavedAccountFromDevice(account, context = null) {
   // Its closed-app notifications stop with it (the device key removes the registration).
   webPushForgetAccount(address).catch(() => {});
   removeAccountScopedLocalData(address, { spendingAddresses, keepCoinLabels });
+  for (const earlier of takePreviousChattingAddresses(address)) {
+    try { removeAccountScopedLocalData(earlier, { keepCoinLabels: true }); } catch { /* the rest still go */ }
+  }
   // Its keys opened in this tab go too: they must not outlive the account in memory (iOS 3942a5b7).
   forgetAccountSecrets(address);
   // Its own password and Face ID record protect nothing now, whether or not other accounts remain;
@@ -3558,7 +3586,7 @@ async function sendEdit(conversationEntry, message, text) {
       localNonce: nowId(),
       createdAt: Date.now(),
     });
-    await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {} });
+    await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {}, ownerAddress: envelope.fromAddress });
     if (message.edit) { delete message.edit.status; persistState(); rerender(); }
   } catch (error) {
     appendEngineLog(`Edit send failed (local text already applied): ${error.message}`);
@@ -6000,6 +6028,8 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   // An imported or switched-to wallet's own profile comes from the chain (iOS 5d4ce87): a fresh
   // import has no local copy, so the one saved on iOS / Android / another desktop is adopted.
   try { window.setTimeout(() => { try { syncOwnKachatProfile(); } catch { /* not ready */ } }, 0); } catch { /* not yet initialized */ }
+  // A .kas commit whose reveal never went out is finished now (iOS 4f8e14bb KNSRevealRecovery).
+  try { window.setTimeout(() => { engine.resumePendingKnsReveals?.().catch(() => {}); }, 3000); } catch { /* not yet initialized */ }
   // Switched during an outage: the new account's first contacts are watched for too.
   try { window.setTimeout(() => { try { startInboxBlockScanIfDown(); } catch { /* not ready */ } }, 0); } catch { /* not yet initialized */ }
   const clean = String(address || "").trim();
@@ -8068,6 +8098,8 @@ function startAutomaticRefresh() {
 /// same. Self-scheduling also means a sweep that runs long can never have the next one queued on
 /// top of it.
 let indexerAvailabilityHooked = false;
+let lastKnsRevealCheckAt = 0;
+const KNS_REVEAL_CHECK_MS = 5 * 60 * 1000;
 function startSweepLoop() {
   if (!indexerAvailabilityHooked) { indexerAvailabilityHooked = true; onIndexerAvailabilityChange(handleIndexerAvailability); }
   if (sweepLoopRunning) return;
@@ -8083,6 +8115,10 @@ function startSweepLoop() {
     if (hiddenSweepDue) lastHiddenSweepAt = Date.now();
     if (!document.hidden || hiddenSweepDue) {
       await refreshAllConversations({ quiet: true });
+      if (Date.now() - lastKnsRevealCheckAt >= KNS_REVEAL_CHECK_MS) {
+        lastKnsRevealCheckAt = Date.now();
+        engine.resumePendingKnsReveals?.().catch(() => {});
+      }
       if (lastSweepFailed) {
         const next = Math.min(interval * 2, MESSAGE_REFRESH_MAX_MS);
         if (next !== interval) appendEngineLog(`Message sweep backing off to ${Math.round(next / 1000)}s after indexer failure.`);
@@ -9025,7 +9061,15 @@ function freshQuantumSlotFor(account) {
     usedState: (address) => spendingAddressUsedState(address, owner),
     stillSaved: () => spendingAccountStillSaved(owner),
     onSkip: (index) => appendEngineLog(`Quantum slot ${chainLocalIndex(index)} already has history - skipping it.`),
+    reservedIndex: receiveIndexOf(owner),
   });
+}
+/** The slot the Receive QR points at for this account, or null. */
+function receiveIndexOf(owner) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(accountScopedKey(RECEIVE_INDEX_KEY, owner)) || "null");
+    return Number.isInteger(stored) ? stored : null;
+  } catch { return null; }
 }
 async function verifiedFreshQuantumIndexFor(account) {
   return (await freshQuantumSlotFor(account)).index;
@@ -9790,7 +9834,7 @@ async function sendPaymentNoticeEnvelope(conversationEntry, contact, payload) {
     localNonce: nowId(),
     createdAt: Date.now(),
   });
-  await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {} });
+  await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {}, ownerAddress: envelope.fromAddress });
 }
 
 // --- Notices waiting for the chatting address (iOS 710fdc0, IOS-086) ---
@@ -12525,6 +12569,8 @@ async function freshReceiveAddress({ revealing = true } = {}) {
   const state = getSpendingState();
   const untouched = async (address) => {
     if (!address) return false;
+    // Spent on this device, even if the network hasn't said so yet (KaPay 2da5f4b).
+    if (isQuantumAddressSpentLocally(address, owner)) return false;
     spendingUsageCache.delete(address); // live answer: a QR is scanned the instant it appears
     const usage = await spendingUsageFor(address);
     return usage.used !== true;
@@ -13216,7 +13262,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 275;
+const APP_BUILD = 276;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -14797,7 +14843,13 @@ async function loadSpendingSourceEntries() {
     if (address) rows.push({ index: i, address });
   }
   let balances = new Map();
-  try { balances = await spendingBalancesBatchSompi(rows.map((r) => r.address)); } catch { /* listed with 0 */ }
+  // A failed read isn't an empty address: the last figures known keep a funded one in the From
+  // lists (KaPay 2da5f4b).
+  try { balances = await spendingBalancesBatchSompi(rows.map((r) => r.address)); }
+  catch {
+    const cache = loadSpendingBalCache();
+    balances = new Map(rows.map((r) => [r.address, kasTextToSompi(String(cache[r.address]?.kas ?? "0")) || 0]));
+  }
   return rows.map((r) => ({
     ...r,
     label: spendingSourceLabel(r.index),
@@ -15653,8 +15705,11 @@ document.querySelector("[data-open-address-actions]")?.addEventListener("click",
 function openPublicKeySheet() {
   let hex = "";
   try { hex = String(engine.privateKey?.toPublicKey?.().toString?.() || "").toLowerCase(); } catch { hex = ""; }
+  showPublicKeySheet(hex, "This is the public half of your chatting address. It identifies you and cannot spend anything.");
+}
+function showPublicKeySheet(hex, note) {
   const html = hex
-    ? `<div class="public-key-card"><strong>Safe to share</strong><p>This is the public half of your chatting address. It identifies you and cannot spend anything.</p></div>
+    ? `<div class="public-key-card"><strong>Safe to share</strong><p>${escapeHtml(note)}</p></div>
        <div class="recovery-phrase-box public-key-hex">${escapeHtml(hex)}</div>
        <button type="button" class="secondary-button full" data-copy-public-key="${escapeHtml(hex)}">Copy Public Key</button>`
     : `<p class="field-hint">This address does not carry a public key.</p>`;
@@ -15665,6 +15720,33 @@ document.addEventListener("click", async (event) => {
   if (!copy) return;
   try { await copyTextToClipboard(copy.dataset.copyPublicKey); showCopyToast("Public key copied"); } catch {}
 });
+
+// The one options button on a spending address's page (iOS 4f8e14bb AddressActionsSheet). A
+// quantum-safe address shows no public key: its point is that the key stays hidden until it spends.
+document.querySelector("[data-spending-detail-options]")?.addEventListener("click", async () => {
+  const index = spendingDetailIndex;
+  const choice = await chooseDialog({
+    title: "Address Actions",
+    options: [
+      { id: "private", title: "View Private Key", subtitle: "The key that spends this address. Never share it." },
+      isQuantumIndex(index) ? null : { id: "public", title: "View Public Key", subtitle: "The public half of this address, for anyone who asks for it." },
+      { id: "explorer", title: "View in Explorer", subtitle: "Opens this address on your chosen block explorer." },
+    ],
+  });
+  if (choice === "private") document.querySelector("[data-spending-detail-privatekey]")?.click();
+  else if (choice === "public") openSpendingPublicKeySheet(index);
+  else if (choice === "explorer" && spendingDetailAddress) window.open(explorerAddressUrl(spendingDetailAddress), "_blank", "noopener,noreferrer");
+});
+function openSpendingPublicKeySheet(index) {
+  const mnemonic = activeAccountMnemonic();
+  if (!mnemonic) { showCopyToast("This account has no 12 or 24 words, so its keys aren't available."); return; }
+  let hex = "";
+  try {
+    const spending = engine.deriveSpendingWallet(mnemonic, index, activeAccountPassphrase(), { passphraseForm: activeAccountPassphraseForm() });
+    hex = String(spending?.privateKey?.toPublicKey?.().toString?.() || "").toLowerCase();
+  } catch { hex = ""; }
+  showPublicKeySheet(hex, "This is the public half of this address. It cannot spend anything.");
+}
 
 // Export a specific spending address's private key (derived from the account phrase at its index).
 document.querySelector("[data-spending-detail-privatekey]")?.addEventListener("click", async () => {
@@ -15820,6 +15902,15 @@ function countMessagesOutsideRetention(cutoff) {
 function applyMessageRetention() {
   if (!engine.address) return 0;
   const cutoff = messageRetentionCutoffMs();
+  // Group messages follow the same retention (iOS 4f8e14bb GroupStore).
+  if (cutoff) {
+    try {
+      if (getGroupManager()?.applyGroupRetention(cutoff, { loadMessages: loadGroupMsgAll, saveMessages: saveGroupMsgAll })) {
+        if (activeGroupId) renderGroupMessages();
+        renderGroupList();
+      }
+    } catch { /* the next pass tries again */ }
+  }
   if (!cutoff) return 0;
   // Before old messages go: a chat from before Message Requests must not become one (iOS 60c9fd0).
   try { grandfatherPreexistingChats(); } catch { /* the next pass tries again */ }
@@ -24871,6 +24962,8 @@ function sameCoinKeys(a, b) {
 // that amount from exactly its coins, with no change (DSK-042), or not at all (DSK-043).
 async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitted = null, sourceSpendingIndex = null, extraFeeSompi = 0n, manualUtxos = null, max = null, expectedFeeSompi = null } = {}) {
   if (paymentSendInFlight) return false;
+  // The account that asked: signing under whichever is active by then is refused (iOS 4f8e14bb).
+  const paymentOwner = engine.address;
   const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
   const contact = contactForConversation(conversationEntry);
   if (!conversationEntry || !contact) throw new Error("Conversation contact was unavailable.");
@@ -24994,7 +25087,7 @@ async function sendKasPayment(conversationId, rawAmount, { note = "", onSubmitte
             exactAmount: true,
             expectedFeeSompi,
           }).catch(keepChangeVisibleIfOutcomeUnknown(payFresh, spendingAccount.owner))
-        : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true, extraFeeSompi: extraSompi, manualUtxos: manualKeys, expectedFeeSompi });
+        : await engine.send(destinationAddress, amountKas, "0", { payload, exactAmount: true, extraFeeSompi: extraSompi, manualUtxos: manualKeys, expectedFeeSompi, ownerAddress: paymentOwner });
       if (payFresh) {
         // The node has the payment by now: a bookkeeping slip here must not mark it failed.
         runPostSubmitStep("Change-address reveal", () => revealSpendingChangeAddress(payFresh, spendingAccount.owner));
@@ -25490,6 +25583,7 @@ function openChessGame(preferGameId = null, timeControl = null) {
 function closeChess() {
   if (chessOverlay) chessOverlay.hidden = true;
   chessState = null;
+  if (chessUnconfirmedTimer) { window.clearTimeout(chessUnconfirmedTimer); chessUnconfirmedTimer = 0; }
   stopChessClockTimer();
   if (chessWaitingTimer) { clearInterval(chessWaitingTimer); chessWaitingTimer = 0; }
   if (chessWaitingEl) chessWaitingEl.hidden = true;
@@ -25607,6 +25701,40 @@ function renderChessStatus() {
   // Accept/Decline only when an incoming invite awaits my response.
   const awaitingMyResponse = s.status.kind === "pendingResponse" && !s.iAmInviter;
   if (chessActionsEl) chessActionsEl.hidden = !awaitingMyResponse;
+  renderChessUnconfirmedMove();
+}
+// My last move got no answer from the network (iOS 4f8e14bb canPlayUnconfirmedMoveAgain): it says
+// so, and after a minute it can be sent again as a new transaction. Replay drops a double-landed
+// move, and the row stays until its copy is read back.
+const CHESS_UNCONFIRMED_REPLAY_MS = 60_000;
+let chessUnconfirmedTimer = 0;
+function unconfirmedChessMove() {
+  const conversation = state.conversations.find((entry) => entry.id === activeConversationId);
+  const last = chessState?.summary?.lastTxid;
+  if (!conversation || !last) return null;
+  const message = (conversation.messages || []).find((entry) => (entry.txid || entry.id) === last);
+  if (!message || message.direction === "incoming" || message.status !== MESSAGE_STATUS_UNCONFIRMED) return null;
+  return Chess.parseChessEnvelope(Chess.unwrapReplyText(String(message.text || "")))?.kind === "move" ? message : null;
+}
+function renderChessUnconfirmedMove() {
+  if (!chessStatusEl) return;
+  chessStatusEl.querySelector("[data-chess-unconfirmed]")?.remove();
+  if (chessUnconfirmedTimer) { window.clearTimeout(chessUnconfirmedTimer); chessUnconfirmedTimer = 0; }
+  const message = unconfirmedChessMove();
+  if (!message) return;
+  const row = document.createElement("span");
+  row.dataset.chessUnconfirmed = "";
+  row.textContent = " · Not confirmed";
+  if (Date.now() - Number(message.createdAt || 0) >= CHESS_UNCONFIRMED_REPLAY_MS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button";
+    button.textContent = "Play It Again";
+    button.addEventListener("click", () => { button.disabled = true; queueConversationMessage(activeConversationId, message.text); refreshChessOverlay(); });
+    row.append(" ", button);
+  }
+  chessStatusEl.append(row);
+  chessUnconfirmedTimer = window.setTimeout(renderChessUnconfirmedMove, 5000);
 }
 function renderChessBoard() {
   if (!chessBoardEl) return;
@@ -27641,7 +27769,7 @@ async function sendReaction(conversationEntry, targetMessage, emoji) {
         localNonce: nowId(),
         createdAt: Date.now(),
       });
-      await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {} });
+      await engine.sendMessageOnchain({ envelope, amountKas: onchainAmountKas(), feeKas: "0", onStatus: () => {}, ownerAddress: envelope.fromAddress });
       if (statusKey) setReactionSendStatus(statusKey, "sent", { rerender });
     } catch (error) {
       // The pill turns red with a Retry; the reason goes to the same toast a failed send uses
@@ -29370,6 +29498,7 @@ async function performChattingAddressSwitch() {
     // lands — the account IS this seed, now living at the new address. Its own
     // chat scope is deliberately left in place.
     if (previousAddress && previousAddress !== engine.address) {
+      movePreviousChattingAddresses(previousAddress, engine.address);
       persistSavedAccounts(loadSavedAccounts().filter((entry) => entry.address !== previousAddress));
       accountBackupStatus.carry(previousAddress, engine.address);
     }

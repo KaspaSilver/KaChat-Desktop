@@ -2632,13 +2632,16 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5 8 12l7 7"/></svg>
         </button>
         <span class="chatting-address-balance" data-spending-detail-title>Spending</span>
-        <!-- iOS SpendingAddressTransactionHistoryView toolbar: Export (the private key), then the
-             explorer, two round icons. -->
+        <!-- iOS 4f8e14bb AddressOptionsButton: one options button, opening the same Address
+             Actions sheet as the chatting address. The two controls below are its targets. -->
         <div class="manage-address-toolbar">
-          <button type="button" class="manage-address-icon-button" data-spending-detail-privatekey aria-label="Export private key">
+          <button type="button" class="manage-address-icon-button" data-spending-detail-options aria-label="Address Actions">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="19" cy="12" r="1.6" fill="currentColor"/></svg>
+          </button>
+          <button type="button" class="manage-address-icon-button" data-spending-detail-privatekey hidden aria-hidden="true" aria-label="Export private key">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 8H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-2.5"/><path d="M12 3v11M8.5 6.5 12 3l3.5 3.5"/></svg>
           </button>
-          <a class="manage-address-icon-button" data-spending-detail-explorer href="#" target="_blank" rel="noopener noreferrer" aria-label="View address in explorer">
+          <a class="manage-address-icon-button" data-spending-detail-explorer hidden aria-hidden="true" href="#" target="_blank" rel="noopener noreferrer" aria-label="View address in explorer">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
           </a>
         </div>

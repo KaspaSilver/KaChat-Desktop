@@ -253,12 +253,12 @@ export function isVerdictRejection(error) {
  * 4f8e14bb, KaPay 2da5f4b, KaPost ee5ec98): a resend then builds on the same coins, so the network
  * can only take one of the two, where other coins would let both pay.
  */
-export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, spends = null, label = "Transaction broadcast", log = () => {}, orphanWaitMs = ORPHAN_WAIT_MS, lostAnswerWaitMs = LOST_ANSWER_WAIT_MS, recheckMs = SUBMIT_RECHECK_MS }) {
-  const sent = await submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, orphanWaitMs, lostAnswerWaitMs, recheckMs });
+export async function submitConfirmingAcceptance({ rpc = null, withRpc = null, submit, txid, spends = null, label = "Transaction broadcast", log = () => {}, escalateOrphan = true, orphanWaitMs = ORPHAN_WAIT_MS, lostAnswerWaitMs = LOST_ANSWER_WAIT_MS, recheckMs = SUBMIT_RECHECK_MS }) {
+  const sent = await submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, escalateOrphan, orphanWaitMs, lostAnswerWaitMs, recheckMs });
   noteSpentOutpoints(spends);
   return sent;
 }
-async function submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, orphanWaitMs, lostAnswerWaitMs, recheckMs }) {
+async function submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label, log, escalateOrphan = true, orphanWaitMs, lostAnswerWaitMs, recheckMs }) {
   let answerLost = false;
   // A node that rejected the transaction gave its verdict on it: the answer isn't lost even if
   // another node timed out, and "may have gone through" would be wrong (iOS 3942a5b7). Only a
@@ -296,7 +296,8 @@ async function submitConfirmingAcceptanceNow({ rpc, withRpc, submit, txid, label
       log(`${label}: the node called ${txid || "the transaction"} an orphan (its parent hasn't reached it yet); waiting ${orphanWaitMs}ms and submitting the same transaction again.`);
       await sleep(orphanWaitMs);
       try { return await checked(await submitOnce(false)); } catch (retryError) { if (retryError?.code === SEND_OUTCOME_UNKNOWN) throw retryError; /* still not there: let the node hold it */ }
-      try {
+      // A send that moves money never sits in a node's orphan pool (iOS 4f8e14bb escalateOrphan).
+      if (escalateOrphan) try {
         const orphaned = await submitOnce(true);
         log(`${label}: ${String(orphaned).slice(0, 12)} submitted as an orphan: its parent hadn't reached that node yet.`);
         return await checked(orphaned);
@@ -386,7 +387,7 @@ export function extraFeeSompiFrom(value) {
 // Schnorr source, as before.
 // `expectedFeeSompi` (iOS d23e6f7a expectedFeeSompi): the fee the Review showed. A send rebuilt here
 // that would pay more (checkFeeAgainstReview) throws SEND_FEE_CHANGED before anything is signed.
-export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, expectedFeeSompi = null, log = () => {} }) {
+export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", payload = null, selectedOutpoints = null, manualUtxos = null, extraFeeSompi = 0, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, expectedFeeSompi = null, escalateOrphan = true, log = () => {} }) {
   const outpoints = selectedOutpoints && selectedOutpoints.length ? selectedOutpoints : outpointKeysFrom(manualUtxos);
   // Coin control never falls back to coins the person didn't pick (iOS IOS-012): a non-empty pick
   // that names no readable coin is refused, not sent as an automatic selection.
@@ -394,7 +395,7 @@ export async function sendKaspa({ kaspa, rpc, withRpc = null, privateKey, source
     throw new Error("Selected UTXOs are no longer available - please reselect.");
   }
   const extraFee = extraFeeSompiFrom(extraFeeSompi);
-  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, extraFeeSompi: extraFee, payload, selectedOutpoints: outpoints.length ? outpoints : null, changeAddress, singleInput, exactAmount, redeemScript, expectedFeeSompi, log }));
+  return enqueueSend(sourceAddress, () => sendKaspaWithUtxoRetry({ kaspa, rpc, withRpc, privateKey, sourceAddress, destinationAddress, amountKas, feeKas, extraFeeSompi: extraFee, payload, selectedOutpoints: outpoints.length ? outpoints : null, changeAddress, singleInput, exactAmount, redeemScript, expectedFeeSompi, escalateOrphan, log }));
 }
 
 // Consolidate ("compound") every UTXO at `sourceAddress` into a single self-output with NO change,
@@ -888,7 +889,7 @@ async function createKip22Transactions(kaspa, settings, prioritySompi) {
   throw new Error("Could not price this quantum-safe transaction. Try again.");
 }
 
-async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", extraFeeSompi = 0n, payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, expectedFeeSompi = null, log = () => {} }) {
+async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddress, destinationAddress, amountKas, feeKas = "0", extraFeeSompi = 0n, payload = null, selectedOutpoints = null, changeAddress = null, singleInput = false, exactAmount = false, redeemScript = null, expectedFeeSompi = null, escalateOrphan = true, log = () => {} }) {
   const to = validateMainnetAddress(destinationAddress);
   const amount = String(amountKas ?? "").trim();
   // Exact sompi (engine/amounts.js, iOS IOS-010): "1,5" is 1.5 KAS, never NaN, and an absurd
@@ -962,7 +963,7 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
         const tx = kaspa.createTransaction(entries, [{ address: to, amount: reduced }], 0n, payload || undefined);
         const signed = signSdkTransaction(kaspa, tx, privateKey, redeemScript);
         const submitReduced = (activeRpc, { allowOrphan = false } = {}) => activeRpc.submitTransaction({ transaction: signed, allowOrphan });
-        const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitReduced, txid: signed.id, spends: entries.map(outpointKeyOf), label: "Transaction broadcast", log });
+        const txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitReduced, txid: signed.id, spends: entries.map(outpointKeyOf), label: "Transaction broadcast", log, escalateOrphan });
         log("Broadcast txid:", txid);
         return { result: { summary: { reduced: true, amountSompi: reduced, feeSompi: totalFee } }, txids: [txid] };
       }
@@ -1009,7 +1010,8 @@ async function sendKaspaNow({ kaspa, rpc, withRpc = null, privateKey, sourceAddr
     try { localId = pending.id ? String(pending.id) : null; } catch { localId = null; }
     let txid;
     try {
-      txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitSignedTransaction, txid: localId, spends: pendingSpends(pending), label: "Transaction broadcast", log });
+      // Messages chain on their own change; of a money send only the later transactions of a chain may.
+      txid = await submitConfirmingAcceptance({ rpc, withRpc, submit: submitSignedTransaction, txid: localId, spends: pendingSpends(pending), label: "Transaction broadcast", log, escalateOrphan: escalateOrphan || txids.length > 0 });
     } catch (error) {
       // A chained send whose earlier transactions went out: never retried (that would pay again).
       if (txids.length) error.submittedTxids = [...txids];

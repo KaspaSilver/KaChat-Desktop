@@ -767,6 +767,7 @@ await test("a newer signature with nothing else changed moves the pin quietly", 
 });
 
 await test("a held invite's signed roster isn't replaced by an unsigned or older one", async () => {
+  localStorage.removeItem(GROUP_INVITES_KEY); // the shared store would be past the per-admin invite cap by now
   const seed = G.generateGroupSeed();
   const m = useWallet(INVITEE);
   const members = [ADMIN.address, INVITEE.address];

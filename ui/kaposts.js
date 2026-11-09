@@ -59,10 +59,26 @@ import {
   KAPOSTS_SCHEDULE_MAX_MS,
   pollClosesAt,
   lastOwnKaPostActivityAt,
+  scheduledPostsAwaitIndexer,
+  applyScheduledOutcomes,
+  submitDueScheduledPosts,
+  cancelScheduledEntry,
+  scheduledWaitingLine,
+  draftSourceNotice,
+  draftSourceIds,
+  threadRemainderDraft,
+  KAPOSTS_THREAD_UNCONFIRMED_PROMPT,
+  kapostOutcomeUnknown,
+  settleFailedKaPostDelete,
+  settleFailedKaPostEdit,
+  restoreKaPostVote,
+  restoreKaPostRepost,
+  followingAfterFailedFollow,
+  feedPageLeavesGap,
 } from "../engine/kaposts.js";
 import { configureKaPostSavedPages, kapostLiveFeed, mergeOutageRows } from "../engine/kaposts-chain-fallback.js";
 import { indexerKey, isIndexerDown, onIndexerAvailabilityChange } from "../engine/indexer-health.js";
-import { setReservedOutpoints } from "../engine/transactions.js";
+import { setReservedOutpoints, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/transactions.js";
 import { getEndpoint } from "../engine/endpoints.js";
 import { KAS_UNIT } from "../engine/network.js";
 import { decodeAddress, AddressVersion } from "../engine/kachat-names/registry-state.js";
@@ -137,6 +153,9 @@ let remotePosts = [];
 /// screens down and pushing everything you were reading off the bottom is the behaviour this
 /// avoids; the pill sits at the top until you ask for it. Matches iOS's pendingNewPosts.
 let pendingNewPosts = [];
+/// More than a page arrived, so splicing those in would leave a hole below them: the pill reloads
+/// the feed instead (iOS ee5ec98).
+let pendingNewPostsHaveGap = false;
 let newPostsCheckTimer = null;
 let checkingForNewPosts = false;
 /// iOS uses 60s, and asks for page ONE only - this answers "is there anything new", not "fetch
@@ -775,6 +794,7 @@ async function checkForNewPosts() {
       .filter(Boolean)
       .filter((post) => post.remoteId && !known.has(post.remoteId) && !isHiddenAuthor(post.posterAddress));
     if (fresh.length) {
+      pendingNewPostsHaveGap = feedPageLeavesGap(result.posts, result.pagination, known);
       pendingNewPosts = fresh;
       renderAll();
     }
@@ -787,6 +807,13 @@ async function checkForNewPosts() {
 /// Folds the held-back posts into the feed and goes back to the top.
 function showPendingNewPosts() {
   if (!pendingNewPosts.length) return;
+  // The whole page was new: posts between it and the feed were never fetched (iOS ee5ec98). The
+  // flag stays until the reload lands, so a failed one can't splice on the next click.
+  if (pendingNewPostsHaveGap) {
+    kapostsScrollEl()?.scrollTo({ top: 0, behavior: "smooth" });
+    loadFeed();
+    return;
+  }
   const known = new Set(remotePosts.map((post) => post.remoteId).filter(Boolean));
   remotePosts = [...pendingNewPosts.filter((post) => !known.has(post.remoteId)), ...remotePosts];
   pendingNewPosts = [];
@@ -848,12 +875,13 @@ async function loadFeed() {
       // Saved or chain rows can be older than the screen, and this load doesn't count as one:
       // the indexer, when it's back, has the final word.
       remotePosts = mergeOutageRows(sameFeedOnScreen ? remotePosts : [], page);
-      if (!sameFeedOnScreen) pendingNewPosts = [];
+      if (!sameFeedOnScreen) { pendingNewPosts = []; pendingNewPostsHaveGap = false; }
       seedPager(feedPager, result.posts, null);
     } else {
       remotePosts = carryingUnsentComments(remotePosts, page);
       // A refresh just delivered whatever the pill was offering.
       pendingNewPosts = [];
+      pendingNewPostsHaveGap = false;
       seedPager(feedPager, result.posts, result.pagination);
       loaded = true;
       // A refresh re-arms Popular's deep sweep: the window it ranked was just thrown away.
@@ -2345,8 +2373,8 @@ const actionToasts = [];
 /** The feed's action toast (check, text, "View" on the explorer), for the app's instant tip
  *  (iOS KaPostsView showActionToast "Tipped ... to ..."). */
 export function showKaPostsActionToast(text, txId = null) { showActionToast(text, txId); }
-function showActionToast(text, txId = null) {
-  const toast = { text, txId };
+function showActionToast(text, txId = null, { failure = false } = {}) {
+  const toast = { text, txId, failure };
   actionToasts.push(toast);
   renderToasts();
   setTimeout(() => {
@@ -2356,13 +2384,22 @@ function showActionToast(text, txId = null) {
   }, 4000);
 }
 
+/// What didn't go through, on the red toast (iOS ee5ec98): "Couldn't follow: <why>". Nothing after
+/// an unknown outcome: it may have landed.
+function showFailureToast(action, error) {
+  showActionToast(`${action}: ${actionErrorText(error)}`, null, { failure: true });
+}
+
 function renderToasts() {
   if (!toastsEl) return;
   const parts = [];
   for (const toast of actionToasts) {
     parts.push(`
       <div class="kaposts-toast kaposts-toast-action">
-        <svg class="kaposts-toast-check" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m7.75 12.25 2.75 2.75 5.75-6"/></svg>
+        ${toast.failure
+    // Something didn't go through: the red mark instead of the check (iOS ee5ec98 isFailure).
+    ? `<svg class="kaposts-toast-check" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" style="fill:var(--danger, #ff3b30)"/><path d="M12 7v6M12 17v.5"/></svg>`
+    : `<svg class="kaposts-toast-check" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m7.75 12.25 2.75 2.75 5.75-6"/></svg>`}
         <span>${deps.escapeHtml(toast.text)}</span>
         ${toast.txId && deps.explorerTxUrl ? `<a class="kaposts-toast-view" href="${deps.escapeHtml(deps.explorerTxUrl(toast.txId))}" target="_blank" rel="noopener">View</a>` : ""}
       </div>`);
@@ -2485,7 +2522,9 @@ function scheduleVote(post, optionIndex) {
       showActionToast("Vote posted to the network", txid);
       refreshPollNumbers(post);
     } catch (error) {
+      // The card only moves once the vote has gone out, so there's nothing to undo (iOS ee5ec98).
       deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`);
+      if (!kapostOutcomeUnknown(error)) showFailureToast("Couldn't post your vote", error);
       renderAll();
     }
   }, null, "Voting");
@@ -2668,7 +2707,21 @@ async function continueThread(localId) {
     // Not confirmed: the remainders stay, but with no Retry to resume them (iOS e5a9b11).
     mutatePost(localId, (p) => { p.delivery = kapostsFailureDelivery(error); p.failureReason = error?.message || String(error); });
     deps.appendEngineLog?.(`KaPost thread submit failed (resumable): ${error.message}`);
+    // Not confirmed has no Retry, so nothing would ever send the rest (iOS ee5ec98).
+    if (kapostOutcomeUnknown(error) && threadRemainders.get(localId) === state) offerThreadRemainderDraft(state);
   }
+  renderAll();
+}
+
+/// The part of a thread a Not confirmed stopped, kept only if the person says so (iOS ee5ec98).
+async function offerThreadRemainderDraft(state) {
+  const owner = accountGuard(() => deps?.engine?.address);
+  const save = await deps.confirmDialog?.({ title: "KaPost", message: KAPOSTS_THREAD_UNCONFIRMED_PROMPT, confirmLabel: "Save as Draft", cancelLabel: "Not Now" });
+  if (!save || !owner.still()) return;
+  const draft = threadRemainderDraft(state, nowId());
+  if (!draft) return;
+  kapostDrafts = [draft, ...kapostDrafts];
+  saveDrafts();
   renderAll();
 }
 
@@ -2678,6 +2731,7 @@ function scheduleQuote(target, text) {
   const key = `post:quote-${post.id}`;
   scheduleUndoable(key, async () => {
     renderToasts();
+    const wasReposted = (findPost(target.id) || target).repostedByMe === true;
     mutatePost(target.id, (p) => { if (!p.repostedByMe) { p.repostedByMe = true; p.reposts += 1; } });
     try {
       const txid = await submitKaPostQuote({
@@ -2688,6 +2742,8 @@ function scheduleQuote(target, text) {
     } catch (error) {
       mutatePost(post.id, (p) => { p.delivery = kapostsFailureDelivery(error); p.failureReason = error?.message || String(error); });
       deps.appendEngineLog?.(`KaPost quote failed: ${error.message}`);
+      // It says so on its own card, with Retry: only the repost mark comes off (iOS ee5ec98).
+      if (!kapostOutcomeUnknown(error)) mutatePost(target.id, (p) => restoreKaPostRepost(p, wasReposted));
     }
     renderAll();
   }, () => {
@@ -2723,6 +2779,11 @@ function scheduleRepost(target) {
       }
     } catch (error) {
       deps.appendEngineLog?.(`KaPost ${wasReposted ? "unrepost" : "repost"} failed: ${error.message}`);
+      // Not after an unknown outcome, which may have landed (iOS ee5ec98).
+      if (kapostOutcomeUnknown(error)) return;
+      mutatePost(target.id, (p) => restoreKaPostRepost(p, wasReposted));
+      renderAll();
+      showFailureToast(wasReposted ? "Couldn't remove your repost" : "Couldn't repost", error);
     }
   }, null, wasReposted ? "Removing repost" : "Reposting");
 }
@@ -2788,11 +2849,21 @@ function performVote(post, kind, wasSet) {
   const other = kind === "like" ? "dislikedByMe" : "likedByMe";
   const count = kind === "like" ? "likes" : "dislikes";
   const otherCount = kind === "like" ? "dislikes" : "likes";
+  const current = findPost(post.id) || post;
+  const before = { likedByMe: current.likedByMe === true, dislikedByMe: current.dislikedByMe === true };
   if (post.remoteId && post.posterPubkey) {
     const vote = wasSet ? "unvote" : (kind === "like" ? "upvote" : "downvote");
     submitKaPostVote({ engine: deps.engine, postId: post.remoteId, vote, authorPubkey: post.posterPubkey })
       .then((txid) => showActionToast(`${kind === "like" ? "Like" : "Dislike"} ${wasSet ? "removed on" : "posted to"} the network`, txid))
-      .catch((error) => deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`));
+      .catch((error) => {
+        deps.appendEngineLog?.(`KaPost vote failed: ${error.message}`);
+        // The post goes back to what it was when tapped, and the person is told. Not after an
+        // unknown outcome, which may have landed (iOS ee5ec98 voteFailed).
+        if (kapostOutcomeUnknown(error)) return;
+        mutatePost(post.id, (p) => restoreKaPostVote(p, before));
+        renderAll();
+        showFailureToast(`Couldn't ${wasSet ? "remove" : "post"} your ${kind}`, error);
+      });
   }
   mutatePost(post.id, (p) => {
     if (p[flag]) { p[flag] = false; p[count] = Math.max(0, (p[count] || 0) - 1); }
@@ -2814,9 +2885,17 @@ function toggleFollow(post) {
   savePrefs();
   renderAll();
   if (!post.posterPubkey) return;
+  const owner = accountGuard(() => deps?.engine?.address); // prefs are the account's own
   submitKaPostFollow({ engine: deps.engine, follow: willFollow, followedPubkey: post.posterPubkey })
     .then((txid) => showActionToast(willFollow ? "Follow posted to the network" : "Unfollow posted to the network", txid))
-    .catch((error) => deps.appendEngineLog?.(`KaPost follow failed: ${error.message}`));
+    .catch((error) => {
+      deps.appendEngineLog?.(`KaPost follow failed: ${error.message}`);
+      if (kapostOutcomeUnknown(error) || !owner.still()) return;
+      prefs.following = followingAfterFailedFollow(prefs.following, address, willFollow);
+      savePrefs();
+      renderAll();
+      showFailureToast(willFollow ? "Couldn't follow" : "Couldn't unfollow", error);
+    });
 }
 
 /**
@@ -3002,6 +3081,9 @@ function retryPost(post) {
         // A failed quote goes out again as the quote it was, never as plain text (iOS f28f1dc).
         if (!post.quoted.remoteId || !post.quoted.posterPubkey) throw new Error("The quoted post can't be found to quote it again.");
         txid = await submitKaPostQuote({ engine: deps.engine, text: post.text, contentId: post.quoted.remoteId, quotedAuthorPubkey: post.quoted.posterPubkey });
+        // The failure took the repost mark off (scheduleQuote), so it comes back with this.
+        const quotedPost = allPostLists().find((candidate) => candidate.remoteId === post.quoted.remoteId);
+        if (quotedPost) mutatePost(quotedPost.id, (p) => restoreKaPostRepost(p, true));
       } else if (post.poll) {
         // And a failed poll as the poll: its options, and its full length again from now, so a
         // late retry never puts an already-closed poll on chain (iOS IOS-093). The length is the
@@ -3112,7 +3194,7 @@ function renderComposerThreadUi() {
   }
   // The + appears once you type, and never while quoting or replying - both are one post about
   // one other post, so neither stacks into a thread.
-  if (addBtn) addBtn.hidden = Boolean(composerQuoteTarget) || Boolean(composerReplyTarget) || Boolean(composerEditTarget) || !trimmed || Boolean(composerPoll) || composerScheduleAt != null;
+  if (addBtn) addBtn.hidden = Boolean(composerKeptSource) || Boolean(composerQuoteTarget) || Boolean(composerReplyTarget) || Boolean(composerEditTarget) || !trimmed || Boolean(composerPoll) || composerScheduleAt != null;
   // iOS KaPostComposerView's header: an edit is "Edit Post" / "Save" whatever it edits, a reply
   // "Reply to Post" / "Reply", a quote "Quote Post"; this runs on every keystroke, so each mode
   // has to win here or the next render resets it.
@@ -3129,8 +3211,10 @@ function renderComposerThreadUi() {
           : composerScheduleAt != null ? "Schedule"
             : (total > 1 ? `Post All (${total})` : "Post");
     // A poll posts only with its question and two to four valid options (iOS canPost).
-    composerSubmit.disabled = composerPoll ? !(trimmed && pollEditorValid()) : total === 0;
+    // A reply or quote is never posted as a plain post: off until its source loads (iOS ee5ec98).
+    composerSubmit.disabled = composerKeptSource ? true : composerPoll ? !(trimmed && pollEditorValid()) : total === 0;
   }
+  renderComposerSourceNotice();
   if (composerInput) {
     composerInput.placeholder = composerReplyTarget
       ? "Post your reply"
@@ -3181,6 +3265,7 @@ function autoGrowReply() {
 // an undone post all open as they are.
 function openComposer(quoteTarget = null, { replyTarget = null, editTarget = null } = {}) {
   editingDraftId = null;
+  composerKeptSource = null;
   composerEditTarget = editTarget;
   // Replying is a composer now, not a bar under the thread: the whole screen to write in, with
   // the post being answered rendered below - the same card a quote shows.
@@ -3193,23 +3278,40 @@ function openComposer(quoteTarget = null, { replyTarget = null, editTarget = nul
   composerSubmit.disabled = !editTarget;
   composerMeter.hidden = true;
   composerThreadSegments = [];
-  if (quoteTarget) {
-    composerQuote.hidden = false;
-    // The post this composer is about, five lines of it, with who wrote it and when (iOS
-    // quotedPostCard).
-    composerQuote.innerHTML = `
-      ${quoteCardHeadHtml(quoteTarget, { withTime: true })}
-      <span>${markdownPreviewHtml(quoteTarget.text)}</span>`;
-  } else {
-    composerQuote.hidden = true;
-    composerQuote.innerHTML = "";
-  }
+  renderComposerQuoteCard(quoteTarget);
   composerPoll = null;
   composerScheduleAt = null;
   renderComposerExtras();
   renderComposerThreadUi();
   composerEl.hidden = false;
   composerInput.focus();
+}
+
+/// The post this composer is about, five lines of it, with who wrote it and when (iOS
+/// quotedPostCard).
+function renderComposerQuoteCard(target) {
+  composerQuote.hidden = !target;
+  composerQuote.innerHTML = target
+    ? `
+      ${quoteCardHeadHtml(target, { withTime: true })}
+      <span>${markdownPreviewHtml(target.text)}</span>`
+    : "";
+}
+
+/// Says why Post is off while a reopened draft's source hasn't loaded (iOS ee5ec98 sourceNotice).
+function renderComposerSourceNotice() {
+  if (!composerQuote) return;
+  let notice = composerQuote.parentElement?.querySelector("[data-kaposts-composer-source-notice]");
+  const text = draftSourceNotice(composerKeptSource);
+  if (!notice) {
+    if (!text) return;
+    notice = document.createElement("p");
+    notice.className = "field-hint";
+    notice.dataset.kapostsComposerSourceNotice = "";
+    composerQuote.after(notice);
+  }
+  notice.hidden = !text;
+  notice.textContent = text || "";
 }
 
 /// A pre-written post from KaPlay's Share to KaPost (KaPost 9e22075 presentPendingComposeLink): the
@@ -3371,6 +3473,7 @@ async function closeComposer({ keepDraft = null } = {}) {
   composerEditTarget = null;
   composerThreadSegments = [];
   editingDraftId = null;
+  composerKeptSource = null;
   renderComposerThreadUi();
   if (save) renderAll();
   if (pendingComposeText != null) {
@@ -3398,10 +3501,11 @@ function scheduleEdit(post, text) {
       await submitKaPostEdit({ engine: deps.engine, postId: post.remoteId, text: next, mentionedPubkeys: await mentionedPubkeysFor(next) });
       mutatePost(post.id, (p) => { p.sentAt = Date.now(); p.delivery = "sent"; });
     } catch (error) {
-      mutatePost(post.id, restore);
+      // It may have landed, so the new text stays up, marked as unconfirmed (iOS ee5ec98).
+      mutatePost(post.id, (p) => settleFailedKaPostEdit(p, error, restore));
       deps.appendEngineLog?.(`KaPost edit failed: ${error.message}`);
       // iOS fae6686: a failed edit says so in an alert (it used to be logged and nothing more).
-      deps.alertDialog?.({ title: "KaPost", message: `Couldn't save the edit: ${actionErrorText(error)}`, confirmLabel: "OK" });
+      deps.alertDialog?.({ title: "KaPost", message: kapostOutcomeUnknown(error) ? SEND_OUTCOME_UNKNOWN_MESSAGE : `Couldn't save the edit: ${actionErrorText(error)}`, confirmLabel: "OK" });
     }
     renderAll();
   }, () => {
@@ -3423,9 +3527,10 @@ function scheduleDelete(post) {
       await submitKaPostDelete({ engine: deps.engine, postId: post.remoteId });
       removePostEverywhere(post);
     } catch (error) {
-      mutatePost(post.id, (p) => { p.pendingDeletion = false; });
+      // It may have landed: the card stays dimmed, with no second Delete on offer (iOS ee5ec98).
+      mutatePost(post.id, (p) => settleFailedKaPostDelete(p, error));
       deps.appendEngineLog?.(`KaPost delete failed: ${error.message}`);
-      deps.alertDialog?.({ title: "KaPost", message: `Couldn't delete the post: ${actionErrorText(error)}`, confirmLabel: "OK" });
+      deps.alertDialog?.({ title: "KaPost", message: kapostOutcomeUnknown(error) ? SEND_OUTCOME_UNKNOWN_MESSAGE : `Couldn't delete the post: ${actionErrorText(error)}`, confirmLabel: "OK" });
     }
     renderAll();
   }, () => {
@@ -5164,6 +5269,9 @@ let kapostDrafts = [];
 /// The draft currently open in the composer, so saving again updates it rather than piling up a
 /// second copy of the same unfinished post.
 let editingDraftId = null;
+/// A reopened draft whose source hasn't loaded: { quotedRemoteId, replyRemoteId, failed }. Post stays
+/// off and saving again keeps these ids (iOS ee5ec98 keptQuotedRemoteId).
+let composerKeptSource = null;
 
 function loadDrafts() {
   try {
@@ -5201,10 +5309,9 @@ function saveDraftFromComposer() {
     id: editingDraftId || nowId(),
     text,
     threadSegments,
-    quotedRemoteId: composerQuoteTarget?.remoteId || null,
     // Separate from quotedRemoteId rather than one id plus a kind, so drafts saved before replies
     // had a composer still reopen as the quotes they were.
-    replyRemoteId: composerReplyTarget?.remoteId || null,
+    ...draftSourceIds({ quoteTarget: composerQuoteTarget, replyTarget: composerReplyTarget, kept: composerKeptSource }),
     savedAt: Date.now(),
   };
   kapostDrafts = [draft, ...kapostDrafts.filter((entry) => entry.id !== draft.id)];
@@ -5226,20 +5333,34 @@ async function openDraft(id) {
   // A draft keeps only the ID of the post it was about (never a stale copy of someone else's
   // post), so resolve it here - loaded lists first, then the indexer. Until get-post existed this
   // lookup could not be done at all, so a quote draft reopened as a plain post and lost its
-  // source; the same resolution now brings a reply draft back with the post it answers.
+  // source; the same resolution now brings a reply draft back with the post it answers. The
+  // composer opens at once with Post off, and a source that can't be found leaves it off rather
+  // than posting a reply or quote as a plain post (iOS ee5ec98).
   const sourceId = draft.replyRemoteId || draft.quotedRemoteId || null;
-  let source = sourceId ? allPostLists().find((post) => post.remoteId === sourceId) || null : null;
-  if (sourceId && !source) source = await indexerPost(sourceId);
-  if (sourceId && !source) source = await chainPost(sourceId).catch(() => null);
-  if (draft.replyRemoteId) openComposer(null, { replyTarget: source });
-  else openComposer(source);
+  const loaded = sourceId ? allPostLists().find((post) => post.remoteId === sourceId) || null : null;
+  if (draft.replyRemoteId && loaded) openComposer(null, { replyTarget: loaded });
+  else openComposer(loaded);
   editingDraftId = draft.id;
+  const kept = sourceId && !loaded ? { quotedRemoteId: draft.quotedRemoteId || null, replyRemoteId: draft.replyRemoteId || null, failed: false } : null;
+  composerKeptSource = kept;
   composerThreadSegments = [...(draft.threadSegments || [])];
   composerInput.value = draft.text || "";
   composerInput.dispatchEvent(new Event("input", { bubbles: true }));
   // A reopened draft's composer has no Poll or Schedule (iOS draftComposer passes neither).
   renderComposerExtras();
   composerInput.focus();
+  if (!kept) return;
+  const source = await indexerPost(sourceId) || await chainPost(sourceId).catch(() => null);
+  if (composerKeptSource !== kept) return; // closed, or another draft was opened meanwhile
+  if (source) {
+    composerKeptSource = null;
+    if (kept.replyRemoteId) composerReplyTarget = source;
+    else composerQuoteTarget = source;
+    renderComposerQuoteCard(source);
+  } else {
+    kept.failed = true;
+  }
+  renderComposerThreadUi();
 }
 
 // ---------------------------------------------------------------------------
@@ -5249,8 +5370,14 @@ async function openDraft(id) {
 // stay reserved until it is on chain.
 // ---------------------------------------------------------------------------
 const SCHEDULED_KEY = "kachat-kaposts-scheduled-v1";
+/// Posts being handed to the indexer, submitted or cancelled right now. Whichever started first
+/// decides, so a cancel can't race a submit and a second pass can't submit again (iOS ee5ec98).
+const scheduledInFlight = new Set();
+/// Moves on when another account's list is loaded: work that was waiting on the network stops.
+let scheduledGeneration = 0;
 let scheduledPosts = [];   // { id (txId), text, notBefore, createdAt, spentOutpoints, serialized, restJson, onServer, status, error, submittedAt }
 function loadScheduled() {
+  scheduledGeneration += 1;
   try { scheduledPosts = JSON.parse(localStorage.getItem(deps.accountScopedKey(SCHEDULED_KEY)) || "[]") || []; }
   catch { scheduledPosts = []; }
   if (!Array.isArray(scheduledPosts)) scheduledPosts = [];
@@ -5293,6 +5420,7 @@ async function scheduleForLater(text, notBefore) {
   scheduledPosts.push(entry);
   saveScheduled();
   const when = new Date(notBefore).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  scheduledInFlight.add(entry.id);
   try {
     await scheduleOnServer({ engine: deps.engine, txId: built.txId, notBeforeMs: notBefore, restJson: built.restJson });
     // Stored under the account that is active NOW: after a switch that is someone else's list.
@@ -5305,85 +5433,60 @@ async function scheduleForLater(text, notBefore) {
     if (!owner.still()) return;
     deps.appendEngineLog?.(`Scheduling on the indexer failed, keeping it local: ${error.message}`);
     showActionToast(`Scheduled for ${when} - sends from this browser`);
+  } finally {
+    scheduledInFlight.delete(entry.id);
   }
   renderAll();
 }
 
-/** Due entries the indexer never took go out from here; the ones it did are re-offered.
- *  One pass at a time: the 15 s first tick and the minute interval must not both submit the
- *  same transaction. A node that refuses the transaction marks it failed; a connection that
- *  is not up yet leaves it scheduled for the next pass. */
+/** One pass at a time: the 15 s first tick and the minute interval must not both submit the same
+ *  transaction. What the indexer did with posts past their time comes first; a post it didn't send
+ *  within 150 s goes out from here, and one a node refuses is marked failed, while a connection that
+ *  is not up yet leaves it scheduled for the next pass (iOS ee5ec98). */
 let dueInFlight = null;
-const NODE_REJECTION_RE = /reject|invalid|already|orphan|missing|spent|insufficient|signature|mass|dust|not found|utxo/i;
 function sendDueScheduled() {
   if (dueInFlight) return dueInFlight;
   dueInFlight = sendDueScheduledNow().finally(() => { dueInFlight = null; });
   return dueInFlight;
 }
 async function sendDueScheduledNow() {
-  const now = Date.now();
-  const list = scheduledPosts;
-  let changed = false;
-  for (const entry of list) {
-    if (list !== scheduledPosts) return; // the account switched mid-pass
-    if (entry.status !== "scheduled" || entry.onServer) continue;
-    if (entry.notBefore <= now) {
-      try {
-        await submitScheduledLocally({ engine: deps.engine, serialized: entry.serialized, safeJson: entry.safeJson || null });
-        if (list !== scheduledPosts) return;
-        entry.status = "submitted";
-        entry.submittedAt = Date.now();
-      } catch (error) {
-        if (list !== scheduledPosts) return;
-        const message = error?.message || String(error);
-        if (NODE_REJECTION_RE.test(message) || /cannot be rebuilt/.test(message)) {
-          entry.status = "failed";
-          entry.error = message;
-        }
-        deps.appendEngineLog?.(`Scheduled post ${entry.status === "failed" ? "failed to submit" : "submit deferred"}: ${message}`);
-      }
-      changed = true;
-    } else {
-      try { await scheduleOnServer({ engine: deps.engine, txId: entry.id, notBeforeMs: entry.notBefore, restJson: entry.restJson }); if (list !== scheduledPosts) return; entry.onServer = true; changed = true; }
-      catch { /* still local */ }
-    }
-  }
-  if (changed && list === scheduledPosts) { saveScheduled(); renderAll(); }
+  if (scheduledPostsAwaitIndexer(scheduledPosts)) await refreshScheduledFromServer();
+  const generation = scheduledGeneration;
+  const changed = await submitDueScheduledPosts({
+    readEntries: () => scheduledPosts,
+    inFlight: scheduledInFlight,
+    stillOurs: () => generation === scheduledGeneration,
+    submit: (entry) => submitScheduledLocally({ engine: deps.engine, serialized: entry.serialized, safeJson: entry.safeJson || null }),
+    handToIndexer: (entry) => scheduleOnServer({ engine: deps.engine, txId: entry.id, notBeforeMs: entry.notBefore, restJson: entry.restJson }),
+    onChange: saveScheduled,
+    log: (line) => deps.appendEngineLog?.(line),
+  });
+  if (changed && generation === scheduledGeneration) renderAll();
 }
 
 async function refreshScheduledFromServer() {
   // Only posts the server holds have anything to learn from it (iOS e5a9b11).
   if (!scheduledPosts.some((entry) => entry.onServer)) return;
+  const generation = scheduledGeneration;
   let remote;
   try { remote = await fetchScheduledPosts({ engine: deps.engine }); } catch { return; }
-  const byId = new Map(remote.map((r) => [r.txId, r]));
-  let changed = false;
-  for (const entry of scheduledPosts) {
-    if (!entry.onServer) continue;
-    const server = byId.get(entry.id);
-    if (!server) continue;
-    const status = ["scheduled", "submitted", "failed", "cancelled"].includes(server.status) ? server.status : entry.status;
-    if (status !== entry.status || (server.error || null) !== (entry.error || null)) {
-      entry.status = status;
-      entry.error = server.error || null;
-      entry.submittedAt = server.submittedAt ? Number(server.submittedAt) : entry.submittedAt;
-      changed = true;
-    }
-  }
-  if (changed) saveScheduled();
+  if (generation !== scheduledGeneration) return;
+  if (applyScheduledOutcomes(scheduledPosts, remote, scheduledInFlight)) saveScheduled();
 }
 
-// iOS KaPostsScheduledStore.cancel / remove: straight from the row's button, no confirmation,
-// and a cancel the indexer did not hear is dropped silently (`try?`).
+// iOS KaPostsScheduledStore.cancel / remove: straight from the row's button, no confirmation. A
+// cancel the indexer did not hear stays scheduled and says so: the indexer will still send it, and
+// its coins are not free (iOS ee5ec98).
 async function cancelScheduledPost(id) {
-  const entry = scheduledPosts.find((e) => e.id === id);
-  if (!entry) return;
-  if (entry.status === "scheduled" && entry.onServer) {
-    try { await cancelScheduledOnServer({ engine: deps.engine, txId: entry.id }); }
-    catch (error) { deps.appendEngineLog?.(`Scheduled post cancel on the indexer failed: ${error?.message || error}`); }
-  }
-  scheduledPosts = scheduledPosts.filter((e) => e.id !== id);
-  saveScheduled();
+  const problem = await cancelScheduledEntry({
+    id,
+    readEntries: () => scheduledPosts,
+    inFlight: scheduledInFlight,
+    cancelOnServer: (entry) => cancelScheduledOnServer({ engine: deps.engine, txId: entry.id }),
+    remove: (entry) => { scheduledPosts = scheduledPosts.filter((e) => e.id !== entry.id); saveScheduled(); },
+    log: (line) => deps.appendEngineLog?.(line),
+  });
+  if (problem) deps.alertDialog?.({ title: "KaPost", message: problem, confirmLabel: "OK" });
   renderAll();
 }
 
@@ -5392,6 +5495,8 @@ async function cancelScheduledPost(id) {
 async function refreshScheduledPanel(panel) {
   try { await sendDueScheduled(); } catch { /* the next pass retries */ }
   await refreshScheduledFromServer();
+  // Whatever that turned local goes out now (iOS ee5ec98 refreshFromServer).
+  try { await sendDueScheduled(); } catch { /* the next pass retries */ }
   if (activePanel === panel) renderPanel();
 }
 
@@ -5409,7 +5514,7 @@ function scheduledPanelHtml() {
     else if (entry.status === "failed") { meta = `Failed to post at ${when}`; icon = "alertCircle"; }
     else if (entry.status === "cancelled") { meta = "Cancelled"; icon = "xCircle"; }
     else {
-      meta = entry.onServer ? `Goes out ${when}` : `Goes out ${when} - from this browser, so keep KaChat open around then`;
+      meta = scheduledWaitingLine(entry, when);
       icon = entry.onServer ? "clock" : "computer";
     }
     return `
@@ -5983,6 +6088,7 @@ export function resetKaPostsForAccount() {
   localPosts = [];
   remotePosts = [];
   pendingNewPosts = [];
+  pendingNewPostsHaveGap = false;
   // Another account's translations are not this one's, and the state is keyed by post id.
   kapostTranslations.clear();
   kapostShowingOriginal.clear();
@@ -6736,6 +6842,7 @@ export function initKaPosts(dependencies) {
     applyComposerFormatting(action);
   });
   composerSubmit?.addEventListener("click", () => {
+    if (composerKeptSource) return; // a draft whose source hasn't loaded (iOS ee5ec98)
     const text = composerInput.value.trim();
     const segments = text ? [...composerThreadSegments, text] : [...composerThreadSegments];
     if (!segments.length) return;

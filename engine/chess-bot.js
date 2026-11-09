@@ -823,6 +823,10 @@ export function chessBotBestMove(board, settings, avoiding = [], opts = {}) {
 
 export const BOT_SEND_RETRIES = 5;
 export const BOT_SEND_RETRY_MS = 1_200;
+/** After the send, how often and how long the REST API is asked whether the stamp was accepted. */
+export const BOT_STAMP_CONFIRM_CHECKS = 20;
+export const BOT_STAMP_CONFIRM_GAP_MS = 4_000;
+export const BOT_STAMP_NOT_CONFIRMED_NOTE = "Sent, but Kaspa hasn't confirmed it yet.";
 /** The bot never answers quicker than this, so a reply does not land in the same instant as
  *  the player's move. */
 export const BOT_MIN_THINK_MS = 800;
@@ -832,15 +836,18 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export class ChessBotGame {
   /**
    * `send(content)`: one broadcast of `content` to #chess-bots; rejects on failure.
+   * `isAccepted(txId)`: resolves whether the chain shows that transaction accepted; `send` then
+   * resolves the txid. Without it the send alone counts as stamped.
    * `think(board, settings, avoiding)`: resolves the bot's move (a Worker, off the main thread).
    * `record(result)`: the result for the player's record, once. `recordStampedWin(moves)`: a win
    * went on chain. `onChange()`: repaint.
    */
-  constructor({ bot, playerColor, send, think, record = () => {}, recordStampedWin = () => {}, onChange = () => {}, log = () => {}, sleep = defaultSleep, now = defaultNow, id = newBotGameId() }) {
+  constructor({ bot, playerColor, send, isAccepted = null, think, record = () => {}, recordStampedWin = () => {}, onChange = () => {}, log = () => {}, sleep = defaultSleep, now = defaultNow, id = newBotGameId() }) {
     this.bot = bot;
     this.playerColor = playerColor;
     this.id = id;
     this.sendContent = send;
+    this.isAccepted = isAccepted;
     this.think = think;
     this.recordResult = record;
     this.recordStampedWin = recordStampedWin;
@@ -992,7 +999,7 @@ export class ChessBotGame {
     this.stampError = null;
     const result = this.result;
     const message = botResultMessage(this.id, this.bot.level, this.playerColor, result, this.moves.map((played) => played.move));
-    this.sendWithRetries(message).then((outcome) => {
+    this.sendWithRetries(message).then(async (outcome) => {
       if (this.disposed) return;
       if (outcome?.unknown) {
         // A node may have taken it and never answered: it may be on chain. No Retry - a second
@@ -1009,6 +1016,24 @@ export class ChessBotGame {
         this.changed();
         return;
       }
+      if (this.isAccepted) {
+        if (!outcome?.txId) {
+          this.stamp = "failed";
+          this.stampError = "The result was not sent.";
+          this.changed();
+          return;
+        }
+        // A node taking it is not the chain showing it: "stamped", and a win counting on the
+        // board, wait for that. No Retry if it doesn't show: it may yet land (iOS da59726).
+        const landed = await this.stampLanded(outcome.txId);
+        if (this.disposed) return;
+        if (!landed) {
+          this.stamp = "unconfirmed";
+          this.stampError = BOT_STAMP_NOT_CONFIRMED_NOTE;
+          this.changed();
+          return;
+        }
+      }
       this.stamp = "stamped";
       if (result.kind === "won") {
         try { this.recordStampedWin(this.playerMoveCount); } catch { /* storage blocked: it is still on chain */ }
@@ -1017,11 +1042,21 @@ export class ChessBotGame {
     });
   }
 
+  /** Whether the REST API shows the stamp accepted, within a little over a minute. */
+  async stampLanded(txId) {
+    for (let check = 0; check < BOT_STAMP_CONFIRM_CHECKS; check += 1) {
+      await this.sleep(BOT_STAMP_CONFIRM_GAP_MS);
+      if (this.disposed) return false;
+      try { if (await this.isAccepted(txId)) return true; } catch { /* asked again */ }
+    }
+    return false;
+  }
+
   /** One broadcast transaction, with the retries a send needs while the change of the last
    *  transaction is not spendable yet (the arena's sends do the same). Only that kind of error
    *  is retried (isRetryableSendError): no KAS on the chatting address, or a send whose outcome
-   *  is unknown (a second stamp of the same game), fails at once (iOS 8d5f925). Resolves null once
-   *  it is sent, `{ unknown: note }` when it may have gone through (SEND_OUTCOME_UNKNOWN, iOS
+   *  is unknown (a second stamp of the same game), fails at once (iOS 8d5f925). Resolves `{ txId }`
+   *  once it is sent, null if the game went away, `{ unknown: note }` when it may have gone through (SEND_OUTCOME_UNKNOWN, iOS
    *  4922804), else `{ error }` - the error to show. */
   async sendWithRetries(message) {
     const content = encodeBotMessage(message);
@@ -1029,8 +1064,7 @@ export class ChessBotGame {
     for (;;) {
       if (this.disposed) return null;
       try {
-        await this.sendContent(content);
-        return null;
+        return { txId: await this.sendContent(content) };
       } catch (error) {
         if (sendOutcomeUnknownTxid(error) !== null) {
           this.log("Chess bot game stamp outcome unknown");

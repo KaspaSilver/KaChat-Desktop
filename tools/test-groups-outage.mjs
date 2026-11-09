@@ -491,6 +491,8 @@ await test("inbox scan: forged sender dropped, unknown retried, wrong tag ignore
     streamTx("dm-self", ME.address, dmPayload(tag)),
     streamTx("dm-slow", MEMBER.address, dmPayload(tag)),
   ]));
+  // The retries wait on timers, which a run of setImmediate can outpace on a fast machine.
+  for (let i = 0; i < 200 && !hits.length; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   await settle();
   assert.deepEqual(hits.map((hit) => hit.txid), ["dm-slow"], "only the one that proved, after retries");
   assert.equal(asked, 3, "asked three times");

@@ -9,7 +9,8 @@
 // produces, so signatures verify server-side against the embedded compressed pubkey.
 
 import { getEndpoint } from "./endpoints.js";
-import { enqueueSend, sendPayloadTransaction, sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, excludeJustSpentUtxos } from "./transactions.js";
+import { enqueueSend, sendPayloadTransaction, sanitizeUtxoEntries, totalUtxoSompi, submitConfirmingAcceptance, excludeJustSpentUtxos, SEND_OUTCOME_UNKNOWN } from "./transactions.js";
+import { isRpcConnectionError } from "./rpc.js";
 import { utxoAmountSompi, checkedUtxoAnswer } from "./amounts.js";
 import { NETWORK_ID } from "./utils.js";
 import { fromIndexerOrChain, isIndexerDown, shouldSkipIndexer } from "./indexer-health.js";
@@ -810,7 +811,9 @@ export async function fetchScheduledPosts({ engine } = {}) {
 
 /** The local fallback: this device submits the signed transaction itself. */
 export async function submitScheduledLocally({ engine, serialized, safeJson = null }) {
-  await engine.connect();
+  // No connection means no node has seen it, whatever the error's words (iOS ee5ec98).
+  try { await engine.connect(); }
+  catch (error) { if (error && typeof error === "object") error.notSubmitted = true; throw error; }
   const Tx = engine.kaspa?.Transaction;
   let transaction = null;
   if (safeJson && typeof Tx?.deserializeFromSafeJSON === "function") {
@@ -940,4 +943,297 @@ export async function submitKaPostUnquote({ engine, contentId }) {
   const pubkey = requesterPubkeyFor(engine);
   const signature = signKaPostString(engine, KAPOSTS_PROTOCOL.unquoteSigningString(contentId));
   return submitKaPostPayload(engine, KAPOSTS_PROTOCOL.unquotePayload(pubkey, signature, contentId));
+}
+
+// ---------------------------------------------------------------------------
+// The audit round of iOS ee5ec98, as plain logic so tools/test-kaposts-audit-remaining.mjs can
+// run what ships: ui/kaposts.js and ui/broadcasts.js need a DOM and call these.
+// ---------------------------------------------------------------------------
+
+/** How long past its time a post is left to the indexer (it ticks once a minute, §5.10) before this
+ *  browser sends it (iOS ee5ec98 KaPostsScheduledStore.indexerGrace). */
+export const KAPOSTS_SCHEDULE_INDEXER_GRACE_MS = 150_000;
+export const KAPOSTS_SCHEDULED_SENDING_SOON = "Sending as soon as the network answers";
+export const KAPOSTS_SCHEDULED_ON_ITS_WAY = "This post is on its way right now, so it can't be cancelled.";
+export const KAPOSTS_SCHEDULED_CANCEL_UNREACHED = "Couldn't reach the server, so this post is still scheduled. Try again in a moment.";
+
+const SCHEDULED_REJECTION_RE = /reject|invalid|already|orphan|missing|spent|insufficient|signature|mass|dust|not found|utxo/i;
+const SCHEDULED_NOT_REACHED_RE = /could not connect|couldn't connect|failed to (?:fetch|connect)|no (?:public )?node|unreachable|offline|still connecting|still in connecting/i;
+
+/** Whether a node turned this scheduled post down, which ends it and frees its coins. Anything else
+ *  - offline, still connecting, no answer - leaves it scheduled for the next pass, and the same
+ *  signed transaction can't pay twice (iOS ee5ec98). There is no typed rejection here, so the words
+ *  decide, and a connection error can carry them: "WebSocket is already in CLOSING or CLOSED state". */
+export function isScheduledPostRejection(error) {
+  if (error?.code === SEND_OUTCOME_UNKNOWN || error?.notSubmitted === true) return false;
+  const message = String(error?.message ?? error ?? "");
+  if (/cannot be rebuilt/.test(message)) return true;
+  if (isRpcConnectionError(error) || SCHEDULED_NOT_REACHED_RE.test(message)) return false;
+  return SCHEDULED_REJECTION_RE.test(message);
+}
+
+/** Whether any post the indexer holds is past its time, so its outcome is worth asking for. */
+export function scheduledPostsAwaitIndexer(entries, now = Date.now()) {
+  return entries.some((entry) => entry.onServer && entry.status === "scheduled" && entry.notBefore <= now);
+}
+
+/** Applies the indexer's list. A post past its time that it no longer knows turns local, so the next
+ *  pass settles it: on chain, or rejected and its coins freed (iOS ee5ec98 pullServerOutcomes).
+ *  Returns whether anything changed. */
+export function applyScheduledOutcomes(entries, remote, inFlight = new Set(), now = Date.now()) {
+  const byId = new Map((remote || []).map((row) => [row.txId, row]));
+  let changed = false;
+  for (const entry of entries) {
+    if (!entry.onServer || inFlight.has(entry.id)) continue;
+    const server = byId.get(entry.id);
+    if (!server) {
+      if (entry.status === "scheduled" && entry.notBefore <= now) {
+        entry.onServer = false;
+        changed = true;
+      }
+      continue;
+    }
+    const status = ["scheduled", "submitted", "failed", "cancelled"].includes(server.status) ? server.status : entry.status;
+    if (status !== entry.status || (server.error || null) !== (entry.error || null)) {
+      entry.status = status;
+      entry.error = server.error || null;
+      entry.submittedAt = server.submittedAt ? Number(server.submittedAt) : entry.submittedAt;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** One pass over the scheduled posts: every post whose time has come and that the indexer isn't
+ *  going to send goes out from here, and local future ones are offered to the indexer again (iOS
+ *  ee5ec98 submitDue). `readEntries` is read afresh each turn, since each turn can wait on the
+ *  network; `inFlight` keeps a post from being sent and cancelled at once. Returns whether anything
+ *  changed. */
+export async function submitDueScheduledPosts({ readEntries, inFlight, now = Date.now(), stillOurs = () => true, submit, handToIndexer, onChange = () => {}, log = () => {} }) {
+  let changed = false;
+  for (const id of readEntries().map((entry) => entry.id)) {
+    if (!stillOurs()) return changed;
+    const entry = readEntries().find((candidate) => candidate.id === id);
+    if (!entry || entry.status !== "scheduled" || inFlight.has(id)) continue;
+    // The indexer's to send until it has had its tick. After that an indexer that's down would
+    // strand the post, so this browser sends the same signed transaction.
+    if (entry.onServer && entry.notBefore + KAPOSTS_SCHEDULE_INDEXER_GRACE_MS > now) continue;
+    inFlight.add(id);
+    try {
+      if (entry.notBefore <= now) {
+        try {
+          await submit(entry);
+          if (!stillOurs()) return changed;
+          entry.status = "submitted";
+          entry.submittedAt = Date.now();
+          // Sent from here: an indexer that comes back late and fails on the same coins mustn't
+          // turn this row into "Failed to post".
+          entry.onServer = false;
+        } catch (error) {
+          if (!stillOurs()) return changed;
+          const message = error?.message || String(error);
+          if (!isScheduledPostRejection(error)) {
+            log(`Scheduled post submit deferred: ${message}`);
+            continue;
+          }
+          entry.status = "failed";
+          entry.error = message;
+          log(`Scheduled post failed to submit: ${message}`);
+        }
+        changed = true;
+        onChange();
+      } else {
+        try {
+          await handToIndexer(entry);
+          if (!stillOurs()) return changed;
+          entry.onServer = true;
+          changed = true;
+          onChange();
+        } catch { /* still local */ }
+      }
+    } finally {
+      inFlight.delete(id);
+    }
+  }
+  return changed;
+}
+
+/** Cancels a post that has not gone out: told to the indexer if it holds it, then removed. Returns
+ *  what to tell the person when it couldn't be, with the post still scheduled: an indexer that didn't
+ *  answer will still send it (iOS ee5ec98 cancel). */
+export async function cancelScheduledEntry({ id, readEntries, inFlight, cancelOnServer, remove, log = () => {} }) {
+  if (inFlight.has(id)) return KAPOSTS_SCHEDULED_ON_ITS_WAY;
+  inFlight.add(id);
+  try {
+    const current = readEntries().find((entry) => entry.id === id);
+    if (!current) return null;
+    if (current.onServer && current.status === "scheduled") {
+      try {
+        await cancelOnServer(current);
+      } catch (error) {
+        log(`Scheduled post cancel on the indexer failed: ${error?.message || error}`);
+        return KAPOSTS_SCHEDULED_CANCEL_UNREACHED;
+      }
+    }
+    remove(current);
+    return null;
+  } finally {
+    inFlight.delete(id);
+  }
+}
+
+/** The status line of a post still waiting: past its time, it's on its way (iOS scheduledLine). */
+export function scheduledWaitingLine(entry, when, now = Date.now()) {
+  if (entry.notBefore <= now) return KAPOSTS_SCHEDULED_SENDING_SOON;
+  return entry.onServer ? `Goes out ${when}` : `Goes out ${when} - from this browser, so keep KaChat open around then`;
+}
+
+export const KAPOSTS_DRAFT_SOURCE_LOADING = "Loading the post this draft is about...";
+export const KAPOSTS_DRAFT_SOURCE_MISSING = "The post this draft is about couldn't be found right now, so it can't be posted yet. It stays in your drafts.";
+
+/** What the composer says while a reopened draft's source hasn't loaded. Null: Post is free. A reply
+ *  or quote is never posted as a plain post (iOS ee5ec98 sourceNotice). */
+export function draftSourceNotice(kept) {
+  if (!kept) return null;
+  return kept.failed ? KAPOSTS_DRAFT_SOURCE_MISSING : KAPOSTS_DRAFT_SOURCE_LOADING;
+}
+
+/** The ids a draft is saved under: the loaded source's, or the ones it was reopened with. */
+export function draftSourceIds({ quoteTarget = null, replyTarget = null, kept = null } = {}) {
+  return {
+    quotedRemoteId: quoteTarget?.remoteId || kept?.quotedRemoteId || null,
+    replyRemoteId: replyTarget?.remoteId || kept?.replyRemoteId || null,
+  };
+}
+
+export const KAPOSTS_THREAD_UNCONFIRMED_PROMPT = "The network didn't confirm part of your thread, so the rest wasn't sent. Save what's left as a draft? Its first post may have gone through, so check before posting it again.";
+
+/** What's left of a thread as a draft, held the way the composer holds it: the last segment is the
+ *  text, the others are stacked above it. A single reply left keeps its link to the post before it;
+ *  several go back as a thread of their own (iOS ee5ec98 holdThreadRemainder). Null when nothing is
+ *  left. */
+export function threadRemainderDraft(state, id, savedAt = Date.now()) {
+  const rest = [...(state?.rootText != null ? [state.rootText] : []), ...(state?.segments || [])];
+  if (!rest.length) return null;
+  return {
+    id,
+    text: rest[rest.length - 1],
+    threadSegments: rest.slice(0, -1),
+    quotedRemoteId: null,
+    replyRemoteId: rest.length === 1 ? state.parentTxId || null : null,
+    savedAt,
+  };
+}
+
+/** Whether a send may have landed. Nothing that would act as if it hadn't may run then. */
+export function kapostOutcomeUnknown(error) {
+  return error?.code === SEND_OUTCOME_UNKNOWN;
+}
+
+/** A delete that failed lifts the dim. With an unknown outcome it stays dimmed and marked, with no
+ *  second Delete on offer (iOS ee5ec98). */
+export function settleFailedKaPostDelete(post, error) {
+  if (kapostOutcomeUnknown(error)) post.delivery = "unconfirmed";
+  else post.pendingDeletion = false;
+}
+
+/** A failed edit puts the old text back. With an unknown outcome the new text may be on chain, so it
+ *  stays up, marked (iOS ee5ec98). */
+export function settleFailedKaPostEdit(post, error, restore) {
+  if (kapostOutcomeUnknown(error)) post.delivery = "unconfirmed";
+  else restore(post);
+}
+
+/** A like or dislike that didn't go through: the post as it was when tapped (iOS voteFailed). */
+export function restoreKaPostVote(target, before) {
+  for (const [flag, count] of [["likedByMe", "likes"], ["dislikedByMe", "dislikes"]]) {
+    const was = before[flag] === true;
+    if ((target[flag] === true) === was) continue;
+    target[count] = Math.max(0, (target[count] || 0) + (was ? 1 : -1));
+    target[flag] = was;
+  }
+}
+
+/** A repost or unrepost that didn't go through. */
+export function restoreKaPostRepost(target, wasReposted) {
+  if ((target.repostedByMe === true) === wasReposted) return;
+  target.repostedByMe = wasReposted;
+  target.reposts = Math.max(0, (target.reposts || 0) + (wasReposted ? 1 : -1));
+}
+
+/** The follow list after a follow or unfollow that didn't go through. */
+export function followingAfterFailedFollow(following, address, willFollow) {
+  if (following.includes(address) !== willFollow) return following;
+  return willFollow ? following.filter((entry) => entry !== address) : [...following, address];
+}
+
+/** True when a page of new posts holds nothing already on screen and more lie behind it: posts
+ *  between it and the feed were never fetched, so the pill reloads (iOS ee5ec98). */
+export function feedPageLeavesGap(rawPosts, pagination, knownRemoteIds) {
+  return pagination?.hasMore === true && !(rawPosts || []).some((post) => knownRemoteIds.has(post?.id));
+}
+
+/** Letters from more than one of the alphabets that share look-alike shapes, the way a Cyrillic "a"
+ *  passes for a Latin one in a well-known room's name (iOS ee5ec98 hasMixedScripts). */
+export function hasMixedScripts(name) {
+  const seen = new Set();
+  for (const character of String(name || "")) {
+    if (!/\p{Alphabetic}/u.test(character)) continue;
+    const code = character.codePointAt(0);
+    if ((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a) || (code >= 0xc0 && code <= 0x24f)) seen.add("latin");
+    else if ((code >= 0x370 && code <= 0x3ff) || (code >= 0x1f00 && code <= 0x1fff)) seen.add("greek");
+    else if ((code >= 0x400 && code <= 0x52f) || (code >= 0x2de0 && code <= 0x2dff) || (code >= 0xa640 && code <= 0xa69f)) seen.add("cyrillic");
+    else if (code >= 0x530 && code <= 0x58f) seen.add("armenian");
+    else if ((code >= 0x13a0 && code <= 0x13ff) || (code >= 0xab70 && code <= 0xabbf)) seen.add("cherokee");
+  }
+  return seen.size > 1;
+}
+
+/** What a room link asks before it adds a room (iOS ee5ec98 confirmJoin). */
+export function roomLinkJoinPrompt(name) {
+  const message = "A link wants to add this room to your Public Chats.";
+  return {
+    title: `Join #${name}?`,
+    message: hasMixedScripts(name) ? `${message}\n\nThis name mixes letters from different alphabets, so it may be imitating another room.` : message,
+    confirmLabel: "Join",
+    cancelLabel: "Cancel",
+  };
+}
+
+/** Stores one room edit. A delivered edit is only replaced by a newer one; one the network never
+ *  confirmed, or a failed one an older build left, gives way to whatever the chain says (iOS ee5ec98
+ *  upsertEditRow). Returns whether the store changed. */
+export function recordRoomEdit(byTarget, txId, edit, editorAddress, blockTime, status = null) {
+  if (!editorAddress || !edit?.targetTxId) return false;
+  const existing = byTarget[edit.targetTxId];
+  if (existing && existing.status !== "unconfirmed" && existing.status !== "failed") {
+    if (txId && existing.txIds?.includes(txId)) return false;
+    if (Number(existing.blockTime || 0) > blockTime) {
+      if (txId) (existing.txIds ||= []).push(txId);
+      return false;
+    }
+  }
+  byTarget[edit.targetTxId] = {
+    text: String(edit.text || ""), blockTime, editor: editorAddress,
+    txIds: [...(existing?.txIds || []), ...(txId ? [txId] : [])].slice(-20),
+    ...(status ? { status } : {}),
+  };
+  return true;
+}
+
+/** Puts a room edit back to `previous` (null: no edit at all) after the send failed. Leaves it alone
+ *  if a delivered edit replaced the pending one meanwhile (iOS ee5ec98 restoreEdit). */
+export function restoreRoomEdit(byTarget, targetTxId, previous) {
+  if (byTarget[targetTxId]?.status !== "pending") return false;
+  if (previous) byTarget[targetTxId] = previous;
+  else delete byTarget[targetTxId];
+  return true;
+}
+
+/** Where a room's poll must page back to: the newest time already seen, when more arrived since the
+ *  last poll than the page holds. Null when there is no gap (iOS ee5ec98 indexerNewestSeen). */
+export function roomPollGapFloor({ messages, hasMore }, newestSeen) {
+  if (hasMore !== true || newestSeen == null || !messages?.length) return null;
+  const oldest = messages.reduce((min, row) => Math.min(min, Number(row.blockTime) || Infinity), Infinity);
+  return Number.isFinite(oldest) && oldest > newestSeen ? newestSeen : null;
 }

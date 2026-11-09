@@ -45,6 +45,7 @@ import {
   validateProfileFields as knsValidateProfileFields,
   uploadKnsProfileImage as knsUploadProfileImage, setKnsPrimaryDomain as knsSetPrimaryDomain,
   peekPendingKnsCommit,
+  resumePendingKnsReveals,
   clearPendingKnsCommit,
   resumeKnsTransfer as knsResumeTransfer,
   listPendingKnsTransfers as knsListPendingTransfers,
@@ -1347,6 +1348,7 @@ export class KaspaEngine {
   }
 
   async send(destinationAddress, amountKas, feeKas = "0", options = {}) {
+    if (options.ownerAddress && options.ownerAddress !== this.address) throw new Error("The account changed before this could be sent.");
     this.requireWallet();
     await this.confirmSpend({ to: destinationAddress, amountKas });
     await this.connect();
@@ -1366,6 +1368,7 @@ export class KaspaEngine {
       exactAmount: Boolean(options.exactAmount),
       // the fee the Review showed: a send rebuilt here that would pay more sends nothing
       expectedFeeSompi: options.expectedFeeSompi ?? null,
+      escalateOrphan: false,
       log: this.log,
     });
   }
@@ -1527,6 +1530,7 @@ export class KaspaEngine {
       exactAmount: Boolean(exactAmount),
       redeemScript: spending.redeemScript || null,
       expectedFeeSompi,
+      escalateOrphan: false,
       log: this.log,
     }).catch((error) => this.noteSpendingOutcomeUnknown(error, spending, owner));
     this.noteSpendingSpent(spending, owner);
@@ -2232,6 +2236,11 @@ export class KaspaEngine {
 
   peekPendingKnsCommit() {
     return peekPendingKnsCommit();
+  }
+
+  /** Finishes .kas reveals an earlier run left owing (iOS 4f8e14bb KNSRevealRecovery). */
+  resumePendingKnsReveals() {
+    return resumePendingKnsReveals({ engine: this, log: this.log });
   }
 
   clearPendingKnsCommit() {

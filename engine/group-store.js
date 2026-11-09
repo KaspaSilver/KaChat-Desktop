@@ -50,12 +50,87 @@ export const GROUP_INVITE_ANSWERS_KEY = "kachat-group-invite-answers-v1";
 // Where members stand on their invite: { [wallet]: { [groupId]: { [address]: "invited" | "joined" |
 // "declined" } } }. A member with no entry has no invite on record: groups from before invites.
 export const GROUP_MEMBER_STATUS_KEY = "kachat-group-member-status-v1";
+// Replay protection (iOS 4f8e14bb CDGroupSeenMessageId), per wallet, in oldest-first order:
+// { [wallet]: { [groupId]: { [hash of sender, epoch, msg_id]: start of the claiming txid } } }.
+// A gcomm's signature covers those and not the transaction, so anyone can put the same bytes in a
+// new transaction, for a fresh block time and txid. Each id belongs to the first txid seen with it;
+// the same txid read again (a rewind, a Refresh Messages) is still fine. Kept after a message is
+// deleted or pruned, or the same bytes could bring it back. Hashed and truncated because this
+// shares localStorage's quota with everything else. Bounded, oldest first: an id that has aged out
+// can be replayed once more.
+export const GROUP_SEEN_MSG_KEY = "kachat-group-seen-msgs-v1";
+const SEEN_IDS_PER_GROUP = 5000;
+const SEEN_IDS_PER_ACCOUNT = 20000;
+const SEEN_KEY_BYTES = 12;
+const SEEN_TX_TAG_LENGTH = 20;
+// Kept in ui/app.js, which owns these two stores; only retention touches them from here.
+const GROUP_REACTIONS_KEY = "kachat-group-reactions-v1";
+const GROUP_EDITS_KEY = "kachat-group-edits-v1";
+// Anyone can name you in a root for the price of a transaction, and each one is held until answered.
+export const MAX_PENDING_GROUP_INVITES = 50;
+export const MAX_PENDING_GROUP_INVITES_PER_ADMIN = 5;
+// Who an admin took out of a group, on its record as `formerMembers` (iOS FormerGroupMember).
+export const MAX_FORMER_MEMBERS_PER_GROUP = 64;
+// Their lane is still read for this long after this device learned of the removal.
+const FORMER_MEMBER_LANE_MS = 30 * 24 * 60 * 60 * 1000;
 // Marks kept per group: older epochs are dropped. Only a stale write that rolled a record back
 // by more than this many rotations could get past it, and the merge-on-write rule below already
 // stops stale writes; this is the backstop, not the mechanism.
 const COUNTER_MARKS_KEPT = 16;
 // _commitRoot's answer on the quick path when the root does need its roster resolved.
 const NEEDS_ROSTER = Symbol("needs-roster");
+
+/** Block times arrive in seconds or milliseconds depending on the source; compared here in ms. */
+function blockTimeMs(blockTime) {
+  const time = Number(blockTime) || 0;
+  return time > 1e12 ? time : time * 1000;
+}
+
+function seenIdKey(parsed) {
+  const id = `${G.bytesToHex(parsed.senderId)}|${parsed.epoch}|${G.bytesToHex(parsed.msgId)}`;
+  return G.bytesToHex(G.groupSha256(id).slice(0, SEEN_KEY_BYTES));
+}
+
+function dropOldestSeen(seen, count) {
+  if (count <= 0) return;
+  for (const key of Object.keys(seen).slice(0, count)) delete seen[key];
+}
+
+function trimSeenIds(byGroup, touched) {
+  for (const groupId of touched) {
+    const seen = byGroup[groupId];
+    if (seen) dropOldestSeen(seen, Object.keys(seen).length - SEEN_IDS_PER_GROUP);
+  }
+  const sizeOf = (seen) => Object.keys(seen).length;
+  let total = Object.values(byGroup).reduce((sum, seen) => sum + sizeOf(seen), 0);
+  while (total > SEEN_IDS_PER_ACCOUNT) {
+    const largest = Object.values(byGroup).reduce((a, b) => (sizeOf(b) > sizeOf(a) ? b : a));
+    const drop = Math.min(total - SEEN_IDS_PER_ACCOUNT, Math.max(1, Math.ceil(sizeOf(largest) / 10)));
+    dropOldestSeen(largest, drop);
+    total -= drop;
+  }
+}
+
+/** `held` plus whoever just left. A rejoiner's old entry stays until they're removed again (the
+ *  roster check passes first). Someone whose key was never resolved can't be matched to a message. */
+function withFormerMembers(held, removed, lastEpoch, removedAt) {
+  const list = Array.isArray(held) ? held : [];
+  const leaving = removed.filter((member) => member.xOnlyPubKeyHex);
+  if (!leaving.length) return list;
+  const now = Date.now();
+  const addresses = new Set(leaving.map((member) => member.address));
+  return [
+    ...list.filter((entry) => !addresses.has(entry.address)),
+    ...leaving.map((member) => ({
+      address: member.address,
+      xOnlyPubKeyHex: member.xOnlyPubKeyHex,
+      isAdmin: false,
+      lastEpoch,
+      removedAt: blockTimeMs(removedAt) || now,
+      recordedAt: now,
+    })),
+  ].slice(-MAX_FORMER_MEMBERS_PER_GROUP);
+}
 
 /** G.groupInviteKey of a held invite: its roots all come from one admin. */
 function inviteKeyOf(invite) {
@@ -122,6 +197,68 @@ export class GroupManager {
     this._sinceRewind = null;
     this._outageState = null;
     this._streamingFor = null;
+    // The seen-id store while a synchronous batch has it open (_withSeenIds).
+    this._seenOpen = null;
+    // The Message retention cutoff last applied: { wallet, cutoffMs }.
+    this._retentionFloor = null;
+  }
+
+  // --- replay protection (iOS GroupStore.claimMessageId) ---
+  // One read and one write of the store per batch, however many rows it decodes. `fn` must be
+  // synchronous, which is also what keeps another batch from opening it meanwhile.
+  _withSeenIds(fn) {
+    if (this._seenOpen) return fn(this._seenOpen);
+    const open = { wallet: this.walletAddress, all: loadJsonMap(GROUP_SEEN_MSG_KEY), touched: new Set() };
+    this._seenOpen = open;
+    try { return fn(open); }
+    finally {
+      this._seenOpen = null;
+      if (open.touched.size) {
+        trimSeenIds(open.all[open.wallet], open.touched);
+        saveJsonMap(GROUP_SEEN_MSG_KEY, open.all);
+      }
+    }
+  }
+  /** False when this id already belongs to another transaction: that's the replay. */
+  _claimMessageId(groupId, parsed, txId) {
+    const tag = String(txId || "").toLowerCase().slice(0, SEEN_TX_TAG_LENGTH);
+    if (!tag) return true;
+    return this._withSeenIds((open) => {
+      const byGroup = open.all[open.wallet] && typeof open.all[open.wallet] === "object" ? open.all[open.wallet] : {};
+      const seen = byGroup[groupId] && typeof byGroup[groupId] === "object" ? byGroup[groupId] : {};
+      const key = seenIdKey(parsed);
+      if (Object.prototype.hasOwnProperty.call(seen, key)) return seen[key] === tag;
+      seen[key] = tag;
+      byGroup[groupId] = seen;
+      open.all[open.wallet] = byGroup;
+      open.touched.add(groupId);
+      return true;
+    });
+  }
+  // A deleted group is tombstoned, as with its counter marks.
+  _dropSeenIds(groupId) {
+    const all = loadJsonMap(GROUP_SEEN_MSG_KEY);
+    const byGroup = all[this.walletAddress];
+    if (!byGroup || !Object.prototype.hasOwnProperty.call(byGroup, groupId)) return;
+    delete byGroup[groupId];
+    saveJsonMap(GROUP_SEEN_MSG_KEY, all);
+  }
+
+  // --- former members ---
+  // Whether this block was made while they were in, for `epoch`. A block time at or after the
+  // removal doesn't count: they keep the old epoch's key and could still sign with it.
+  _formerMemberAt(record, senderPubHex, epoch, blockTime) {
+    const at = blockTimeMs(blockTime);
+    if (!at) return null;
+    const former = (record.formerMembers || []).find((entry) => entry.xOnlyPubKeyHex === senderPubHex);
+    return former && epoch <= former.lastEpoch && at < former.removedAt ? former : null;
+  }
+  /** Blinded ids to read: the roster, plus anyone lately gone from it (everyone ever, for a repair). */
+  _laneIds(record, blindingKey, { allFormer = false } = {}) {
+    const now = Date.now();
+    const former = (record.formerMembers || []).filter((entry) => allFormer || now < entry.recordedAt + FORMER_MEMBER_LANE_MS);
+    const pubs = [...record.members, ...former].map((member) => member.xOnlyPubKeyHex).filter(Boolean);
+    return [...new Set(pubs)].map((pub) => G.bytesToHex(G.deriveBlindedGroupId(blindingKey, pub)));
   }
 
   // --- serialising writers (DSK-053) ---
@@ -264,6 +401,7 @@ export class GroupManager {
     all[this.walletAddress] = bucket;
     saveAll(all);
     this._dropCounterMarks(String(groupId));
+    this._dropSeenIds(String(groupId));
     // Tombstone it so discovery/recovery never re-adds it, and publish an on-chain delete
     // marker (best-effort now, retried by syncGroups' backfill) so the delete survives a
     // seedless re-import too. Local intent is recorded synchronously; the chain write is async.
@@ -447,6 +585,13 @@ export class GroupManager {
       }
       // Someone you rejected stays ignored, in groups too.
       if (!includesMe || !adminAddress || this.isInviterBlocked?.(adminAddress)) return null;
+      // By signing key: the address can fall back to whoever delivered the root.
+      const waiting = invites.filter((invite) => invite.rejected !== true);
+      const fromAdmin = waiting.filter((invite) => String(invite.roots[invite.roots.length - 1].admin_signing_pub || "").toLowerCase() === adminPub);
+      if (waiting.length >= MAX_PENDING_GROUP_INVITES || fromAdmin.length >= MAX_PENDING_GROUP_INVITES_PER_ADMIN) {
+        this.engine.log?.("Too many group invites waiting; dropped one.");
+        return null;
+      }
       invites.push({ groupId: payload.group_id, adminAddress, invitedAt: Number(blockTime) || 0, roots: [payload] });
       this._saveInvites(invites);
       return { kind: "invite", id: key, groupId: payload.group_id, name: payload.name || "Group", adminAddress, invitedAt: Number(blockTime) || 0 };
@@ -660,6 +805,7 @@ export class GroupManager {
       members: members.length ? members : (existing?.members || []),
       cursors: existing?.cursors || {},
       cursorTimes: existing?.cursorTimes || {},
+      formerMembers: existing?.formerMembers || [],
       photoHex: g.photo ? String(g.photo) : (existing?.photoHex || null),
       updatedAt: existing?.updatedAt || 0,
     };
@@ -861,6 +1007,7 @@ export class GroupManager {
     const record = await this._withGroupLock(() => {
       const fresh = this._requireAdmin(groupId);
       if (addr === fresh.adminAddress) throw new Error("The admin can't be removed.");
+      fresh.formerMembers = withFormerMembers(fresh.formerMembers, fresh.members.filter((m) => m.address === addr), Number(fresh.currentEpoch || 0), 0);
       fresh.members = fresh.members.filter((m) => m.address !== addr);
       return this._bumpEpoch(fresh);
     });
@@ -1103,6 +1250,7 @@ export class GroupManager {
       all[this.walletAddress] = bucket;
       saveAll(all);
       this._dropCounterMarks(id);
+      this._dropSeenIds(id);
       return { kind: "deleted", groupId: id };
     }
     return null;
@@ -1167,7 +1315,7 @@ export class GroupManager {
       return this._holdInvite(payload, senderAddress, blockTime);
     }
     if (before && (payload.epoch < before.currentEpoch || this._isSameRoot(before, payload))) {
-      const quick = await this._withGroupLock(() => this._commitRoot(payload, senderAddress, null, null));
+      const quick = await this._withGroupLock(() => this._commitRoot(payload, senderAddress, null, null, blockTime));
       // The record moved between the two reads so that this root does apply after all: resolve
       // the roster and commit it properly.
       if (quick !== NEEDS_ROSTER) return quick;
@@ -1200,7 +1348,7 @@ export class GroupManager {
         : (xOnlyPubKeyHex ? xOnlyPubKeyHex.toLowerCase() === payload.admin_signing_pub : addr === senderAddress);
       roster.push({ address: addr, xOnlyPubKeyHex, isAdmin: memberIsAdmin });
     }
-    const result = await this._withGroupLock(() => this._commitRoot(payload, senderAddress, roster, recoveredSeedHex));
+    const result = await this._withGroupLock(() => this._commitRoot(payload, senderAddress, roster, recoveredSeedHex, blockTime));
     return result === NEEDS_ROSTER ? null : result;
   }
 
@@ -1209,7 +1357,7 @@ export class GroupManager {
   // root applied while those awaited is carried into the new record instead of being dropped.
   // With `roster` null (the quick path) it only archives / skips, and returns NEEDS_ROSTER when
   // the root turns out to need applying.
-  _commitRoot(received, senderAddress, heldRoster, recoveredSeedHex) {
+  _commitRoot(received, senderAddress, heldRoster, recoveredSeedHex, blockTime = 0) {
     let payload = received;
     let roster = heldRoster;
     const groupId = payload.group_id;
@@ -1285,6 +1433,13 @@ export class GroupManager {
       deviceIdHex: existing?.deviceIdHex || G.bytesToHex(G.generateDeviceId()),
       msgCounter: isNewEpoch ? 0 : (existing?.msgCounter || 0),
       members: roster,
+      // Who this root takes out: what they said while they were in still counts on a late catch-up.
+      formerMembers: withFormerMembers(
+        existing?.formerMembers,
+        (existing?.members || []).filter((m) => !roster.some((next) => next.address === m.address)),
+        payload.epoch > 0 ? payload.epoch - 1 : 0,
+        blockTime,
+      ),
       // A recovered admin group already has its recovery invite on chain for this epoch.
       selfInviteEpoch: isAdminRecord ? payload.epoch : existing?.selfInviteEpoch,
       // The newest signed roster applied here: an unsigned or older root can't change the name or
@@ -1320,14 +1475,18 @@ export class GroupManager {
   /// `rejections` (optional, Group Info's Refresh Messages): counts why a message for one of our
   /// groups was dropped, so "nothing recovered" says which wall the repair hit (iOS
   /// GroupRefreshRejections).
-  processMessage(parsed, rejections = null) {
+  /// `tx` is `{ txId, blockTime }` of the transaction carrying it, which is what the replay check
+  /// and the former-member check go on.
+  processMessage(parsed, rejections = null, tx = null) {
     if (!parsed) return null;
     for (const record of this.listGroups()) {
       const blindingKey = G.hexToBytes(record.blindingKeyHex);
       const expected = G.bytesToHex(G.deriveBlindedGroupId(blindingKey, parsed.senderPubKey));
       if (expected !== G.bytesToHex(parsed.blindedGroupId)) continue;
-      // Sender must be in the roster (matched by pubkey).
-      const member = record.members.find((m) => m.xOnlyPubKeyHex === G.bytesToHex(parsed.senderPubKey));
+      // Sender must be in the roster (matched by pubkey), or have been when this was sent.
+      const senderPubHex = G.bytesToHex(parsed.senderPubKey);
+      const member = record.members.find((m) => m.xOnlyPubKeyHex === senderPubHex)
+        || this._formerMemberAt(record, senderPubHex, parsed.epoch, tx?.blockTime);
       if (!member) { if (rejections) rejections.senderNotInRoster += 1; return null; }
       // sender_id must equal SHA256(sender_address).
       if (G.bytesToHex(G.deriveSenderId(member.address)) !== G.bytesToHex(parsed.senderId)) return null;
@@ -1342,6 +1501,19 @@ export class GroupManager {
       let plaintext;
       try { plaintext = G.openGroupMessage(parsed, { groupId: G.hexToBytes(record.groupId), groupRootEpoch: G.hexToBytes(rootHex) }); }
       catch { if (rejections) rejections.decryptFailed += 1; return null; }
+      // All of that passes for a copy of someone's payload in a new transaction too, so the id is
+      // claimed here, before a message, reaction, edit or status can act on it.
+      if (tx && !this._claimMessageId(record.groupId, parsed, tx.txId)) {
+        this.engine.log?.(`Dropped a group message replay: ${tx.txId}`);
+        if (rejections) rejections.replayed = (rejections.replayed || 0) + 1;
+        return null;
+      }
+      // Past Message retention it isn't kept, even if a re-walk brings it back. A member's answer
+      // to their invite isn't a stored message: it's who is in the group.
+      if (tx && this._pastRetention(plaintext, tx.blockTime)) {
+        if (rejections) rejections.expired = (rejections.expired || 0) + 1;
+        return null;
+      }
       return {
         groupId: record.groupId,
         senderAddress: member.address,
@@ -1352,6 +1524,13 @@ export class GroupManager {
       };
     }
     return null;
+  }
+
+  _pastRetention(plaintext, blockTime) {
+    const floor = this._retentionFloor;
+    if (floor?.wallet !== this.walletAddress || !floor.cutoffMs) return false;
+    const at = blockTimeMs(blockTime);
+    return at > 0 && at < floor.cutoffMs && !G.parseMemberStatus(plaintext);
   }
 
   // --- sync: pull new controls (invites/rotations) then new messages ---
@@ -1490,14 +1669,16 @@ export class GroupManager {
             if (switched()) return { controls: [], messages: [] };
             const pageLatest = Number(latestBlockTime) || 0;
             latest = Math.max(latest, pageLatest);
-            for (const row of rows) {
-              if (!row.txId || this._sinceSeen.has(row.txId)) continue;
-              this._sinceSeen.add(row.txId);
-              if (this._sinceSeen.size > 4000) { for (const old of [...this._sinceSeen].slice(0, 2000)) this._sinceSeen.delete(old); }
-              const parsed = G.parseGroupMessagePayload(row.payloadString);
-              const decoded = this.processMessage(parsed);
-              if (decoded) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
-            }
+            this._withSeenIds(() => {
+              for (const row of rows) {
+                if (!row.txId || this._sinceSeen.has(row.txId)) continue;
+                this._sinceSeen.add(row.txId);
+                if (this._sinceSeen.size > 4000) { for (const old of [...this._sinceSeen].slice(0, 2000)) this._sinceSeen.delete(old); }
+                const parsed = G.parseGroupMessagePayload(row.payloadString);
+                const decoded = this.processMessage(parsed, null, { txId: row.txId, blockTime: row.blockTime });
+                if (decoded) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
+              }
+            });
             full = Number(count ?? rows.length) >= SINCE_LIMIT;
             if (!full) break;
             if (pageLatest - 1 > since) since = pageLatest - 1;
@@ -1523,9 +1704,7 @@ export class GroupManager {
       // change landing while the scans await would be rolled back by it.
       const blindingKey = G.hexToBytes(record.blindingKeyHex);
       const startCursors = record.cursors || {};
-      const scans = record.members
-        .filter((member) => member.xOnlyPubKeyHex)
-        .map((member) => G.bytesToHex(G.deriveBlindedGroupId(blindingKey, member.xOnlyPubKeyHex)));
+      const scans = this._laneIds(record, blindingKey);
       let next = 0;
       const results = new Array(scans.length);
       await Promise.all(Array.from({ length: Math.min(4, scans.length) }, async () => {
@@ -1546,15 +1725,15 @@ export class GroupManager {
         if (switched()) return;
         const newest = {};
         const newestTimes = {};
-        results.forEach((rows, i) => {
+        this._withSeenIds(() => results.forEach((rows, i) => {
           if (!rows) return;
           for (const row of rows) {
             const parsed = G.parseGroupMessagePayload(row.payloadString);
-            const decoded = this.processMessage(parsed);
+            const decoded = this.processMessage(parsed, null, { txId: row.txId, blockTime: row.blockTime });
             if (decoded) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
             if (row.cursor) { newest[scans[i]] = row.cursor; newestTimes[scans[i]] = Number(row.blockTime) || 0; }
           }
-        });
+        }));
         if (!Object.keys(newest).length) return;
         this._mutate(record.groupId, (fresh) => {
           const cursors = { ...(fresh.cursors || {}) };
@@ -1626,9 +1805,8 @@ GroupManager.prototype._forceRefreshPass = async function _forceRefreshPass(grou
   const record = this.getGroup(groupId);
   if (!record) return { controls: events, messages: [], rejections };
   const blindingKey = G.hexToBytes(record.blindingKeyHex);
-  const scans = record.members
-    .filter((member) => member.xOnlyPubKeyHex)
-    .map((member) => G.bytesToHex(G.deriveBlindedGroupId(blindingKey, member.xOnlyPubKeyHex)));
+  // Everyone ever removed too: this is the walk for finding what was missed.
+  const scans = this._laneIds(record, blindingKey, { allFormer: true });
   let done = 0;
   onProgress({ phase: "messages", done, total: scans.length });
   let next = 0;
@@ -1653,15 +1831,15 @@ GroupManager.prototype._forceRefreshPass = async function _forceRefreshPass(grou
   await this._withGroupLock(() => {
     const cursors = {};
     const cursorTimes = {};
-    results.forEach((rows, i) => {
+    this._withSeenIds(() => results.forEach((rows, i) => {
       if (!rows) return;
       for (const row of rows) {
         const parsed = G.parseGroupMessagePayload(row.payloadString);
-        const decoded = this.processMessage(parsed, rejections);
+        const decoded = this.processMessage(parsed, rejections, { txId: row.txId, blockTime: row.blockTime });
         if (decoded && decoded.groupId === groupId) messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
         if (row.cursor) { cursors[scans[i]] = row.cursor; cursorTimes[scans[i]] = Number(row.blockTime) || 0; }
       }
-    });
+    }));
     this._mutate(groupId, (fresh) => { fresh.cursors = cursors; fresh.cursorTimes = cursorTimes; });
   });
   rejections.epochRootsArchived = Math.max(0, archivedCount() - archivedBefore);
@@ -1735,13 +1913,15 @@ GroupManager.prototype._ingestBlockRows = function _ingestBlockRows(wallet, rows
 GroupManager.prototype._ingestChainMessage = async function _ingestChainMessage(state, row) {
   if (!this._claimTx(state, row.txId)) return;
   let decoded = null;
+  const refused = {};
   try {
     // In the lock like every other decode: the keys it reads are the ones the record holds now.
     await this._withGroupLock(() => {
       if (this.walletAddress !== state.wallet) return;
-      decoded = this.processMessage(G.parseGroupMessagePayload(row.payloadString));
+      decoded = this.processMessage(G.parseGroupMessagePayload(row.payloadString), refused, { txId: row.txId, blockTime: row.blockTime });
     });
-  } finally { this._releaseTx(state, row.txId, Boolean(decoded)); }
+    // A replay or an expired row is dealt with: no later pass reads it any differently.
+  } finally { this._releaseTx(state, row.txId, Boolean(decoded) || refused.replayed > 0 || refused.expired > 0); }
   if (decoded && this.walletAddress === state.wallet) state.messages.push({ ...decoded, txId: row.txId, blockTime: row.blockTime });
 };
 
@@ -1793,7 +1973,10 @@ GroupManager.prototype._catchUpGroupsFromChain = async function _catchUpGroupsFr
   const since = Math.max(this.sinceBlockTime > SINCE_REWIND_MS ? this.sinceBlockTime - SINCE_REWIND_MS : 0, nowMs - CHAIN_LOOKBACK_MS);
   const records = this.listGroups();
   const admins = new Set(records.map((record) => record.adminAddress).filter(Boolean));
-  const members = new Set(records.flatMap((record) => (record.members || []).map((member) => member.address)).filter(Boolean));
+  const members = new Set(records.flatMap((record) => [
+    ...(record.members || []),
+    ...(record.formerMembers || []).filter((entry) => nowMs < entry.recordedAt + FORMER_MEMBER_LANE_MS),
+  ].map((member) => member.address)).filter(Boolean));
   for (const admin of admins) members.delete(admin);
   for (const address of [...admins, ...members]) {
     if (switched()) return;
@@ -1872,6 +2055,55 @@ GroupManager.prototype.rewindGroupCursors = async function rewindGroupCursors(to
     }
   });
   return summary;
+};
+
+// --- Message retention (iOS GroupStore.applyRetentionInBackground) --------------------------------
+const IN_FLIGHT_STATUSES = new Set(["draft", "building", "signing", "broadcasting", "pending"]);
+
+/** Deletes this account's group messages older than `cutoffMs`, with their reactions and edits, the
+ *  same cutoff the 1:1 sweep uses. Null ("Keep forever") deletes nothing and lifts the floor. The
+ *  groups and the seen ids stay (see GROUP_SEEN_MSG_KEY). The app holds the message store in memory,
+ *  so it's read and written through the app's own functions. Returns how many messages went. */
+GroupManager.prototype.applyGroupRetention = function applyGroupRetention(cutoffMs, { loadMessages, saveMessages }) {
+  const wallet = this.walletAddress;
+  const cutoff = Number(cutoffMs) > 0 ? Number(cutoffMs) : null;
+  this._retentionFloor = { wallet, cutoffMs: cutoff };
+  if (!wallet || !cutoff) return 0;
+  const expired = (row) => {
+    if (IN_FLIGHT_STATUSES.has(String(row?.status || ""))) return false;
+    const at = Number(row?.createdAt || 0);
+    return Number.isFinite(at) && at > 0 && at < cutoff;
+  };
+  const all = loadMessages();
+  const gone = new Map();
+  let removed = 0;
+  for (const [groupId, list] of Object.entries(all?.[wallet] || {})) {
+    if (!Array.isArray(list)) continue;
+    const kept = list.filter((row) => !expired(row));
+    if (kept.length === list.length) continue;
+    const keys = new Set();
+    for (const row of list) if (expired(row)) for (const key of [row.txId, row.msgIdHex, row.id]) if (key) keys.add(key);
+    gone.set(groupId, keys);
+    removed += list.length - kept.length;
+    all[wallet][groupId] = kept;
+  }
+  if (removed) saveMessages(all);
+  // Keyed by what they target. A reaction has no time of its own: it goes with its message.
+  const prune = (storeKey, outlives) => {
+    const store = loadJsonMap(storeKey);
+    let changed = false;
+    for (const [groupId, targets] of Object.entries(store[wallet] || {})) {
+      for (const [target, value] of Object.entries(targets || {})) {
+        if (!gone.get(groupId)?.has(target) && outlives(value)) continue;
+        delete targets[target];
+        changed = true;
+      }
+    }
+    if (changed) saveJsonMap(storeKey, store);
+  };
+  prune(GROUP_REACTIONS_KEY, () => true);
+  prune(GROUP_EDITS_KEY, (edit) => !(Number(edit?.at) > 0 && Number(edit.at) < cutoff));
+  return removed;
 };
 
 export function createGroupManager(engine) {

@@ -31,7 +31,7 @@ import {
   fetchProfileByAssetId,
   clearKnsCache,
 } from "./kns.js";
-import { sendKaspa } from "./transactions.js";
+import { sendKaspa, SEND_OUTCOME_UNKNOWN } from "./transactions.js";
 import { checkedUtxoAnswer } from "./amounts.js";
 import { isScriptAddress } from "./sync.js";
 
@@ -233,6 +233,7 @@ export async function sendKnsCommitTransaction({ engine, commitAddressString, co
     feeKas: "0",
     changeAddress,
     exactAmount: true,
+    escalateOrphan: false,
     log,
   });
   const located = locateKnsCommitOutput(sendResult, commitScriptPublicKey, commitAmountSompi);
@@ -396,6 +397,115 @@ export async function buildAndSubmitKnsReveal({
 // output is never silently stranded. Cleared as soon as the reveal succeeds.
 
 const PENDING_COMMIT_KEY = "kachat-kns-pending-commit-v1";
+
+// --- reveals owed (iOS 4f8e14bb KNSRevealRecovery, KaPay 2da5f4b) ------------------------------
+// A registration's or profile edit's commit, filed BEFORE it goes out, so a crash or a lost answer
+// can't leave coins nothing knows about. The commit address is deterministic from the key and the
+// payload, so a commit whose id never came back is still found there. Spending it is the reveal.
+// Under the account's data prefix, so removing the account removes these too.
+const KNS_REVEALS_BASE_KEY = "kachat-kns-pending-reveals-v1";
+/** A commit that can't be found is dropped after this: it never landed, or its reveal did. */
+export const KNS_REVEAL_MISSING_LIFETIME_MS = 24 * 60 * 60 * 1000;
+/** Commits made just now are left to the send that made them. */
+const KNS_REVEAL_LEFT_TO_SENDER_MS = 10 * 60 * 1000;
+const KNS_REVEAL_FAILED_MESSAGE = "The first of two transactions went through, but the second didn't. KaChat will finish it the next time it opens.";
+const knsRevealsKey = (account) => `kachat-account-data-v1:${account}:${KNS_REVEALS_BASE_KEY}`;
+function readKnsReveals(account) {
+  try {
+    const parsed = JSON.parse(globalThis.localStorage.getItem(knsRevealsKey(account)) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+function writeKnsReveals(account, list) {
+  try {
+    if (list.length) globalThis.localStorage.setItem(knsRevealsKey(account), JSON.stringify(list, (_, v) => (typeof v === "bigint" ? v.toString() : v)));
+    else globalThis.localStorage.removeItem(knsRevealsKey(account));
+  } catch { /* storage full: this send still goes, without its recovery record */ }
+}
+function dropKnsReveal(account, id) {
+  writeKnsReveals(account, readKnsReveals(account).filter((record) => record.id !== id));
+}
+export function pendingKnsReveals(account) { return readKnsReveals(account); }
+
+/** Sends a commit with its reveal already filed, and finds out what the reveal is owed. A refused
+ *  commit spent nothing and is forgotten (unless an older one at this address is still owed); one
+ *  whose outcome is unknown stays filed. */
+async function commitWithRevealFiled({ engine, reveal, send }) {
+  const account = engine.address;
+  const existed = readKnsReveals(account).some((record) => record.id === reveal.commitAddressString);
+  const record = { id: reveal.commitAddressString, ...reveal, createdAt: Date.now() };
+  writeKnsReveals(account, [...readKnsReveals(account).filter((r) => r.id !== record.id), record]);
+  let commit;
+  try {
+    commit = await send();
+  } catch (error) {
+    if (error?.code !== SEND_OUTCOME_UNKNOWN && !existed) dropKnsReveal(account, record.id);
+    throw error;
+  }
+  return commit;
+}
+
+/** The reveal, whose failure leaves the commit filed for the next look. */
+async function revealOrLeaveFiled(run) {
+  try {
+    return await run();
+  } catch (error) {
+    if (error?.code === SEND_OUTCOME_UNKNOWN) throw error;
+    const wrapped = new Error(KNS_REVEAL_FAILED_MESSAGE);
+    wrapped.cause = error;
+    throw wrapped;
+  }
+}
+
+const knsRevealsResuming = new Set();
+/** Finishes this account's reveals left by an earlier run: when an account is loaded and now and
+ *  then after that. Each unspent output at a filed commit address is revealed the way the original
+ *  would have been. Nothing is dropped unless its reveal landed or its commit stays gone for a day. */
+export async function resumePendingKnsReveals({ engine, log = () => {} }) {
+  const account = engine?.address;
+  if (!engine?.kaspa || !engine?.privateKey || !account || knsRevealsResuming.has(account)) return 0;
+  if (!readKnsReveals(account).length) return 0;
+  knsRevealsResuming.add(account);
+  let finished = 0;
+  try {
+    await engine.connect();
+    for (const record of readKnsReveals(account)) {
+      if (engine.address !== account) break;
+      if (Date.now() - Number(record.createdAt || 0) < KNS_REVEAL_LEFT_TO_SENDER_MS) continue;
+      const xOnly = xOnlyPublicKeyHexFromPrivateKey(engine.privateKey);
+      const { builder, commitScriptPublicKey, commitAddressString } = buildKnsRedeemScript(engine.kaspa, xOnly, record.payloadJson);
+      if (commitAddressString !== record.commitAddressString) { dropKnsReveal(account, record.id); continue; }
+      const lookup = async (rpc) => checkedUtxoAnswer(await rpc.getUtxosByAddresses([commitAddressString]));
+      let found;
+      try { found = await engine.withRpc(lookup, { retries: 1, label: "KNS commit lookup" }); } catch { continue; } // no answer: next time
+      const wanted = BigInt(record.commitAmountSompi);
+      const owed = (Array.isArray(found?.entries) ? found.entries : []).filter((entry) => BigInt(entry?.amount ?? 0) === wanted);
+      if (!owed.length) {
+        if (Date.now() - Number(record.createdAt || 0) >= KNS_REVEAL_MISSING_LIFETIME_MS) dropKnsReveal(account, record.id);
+        continue;
+      }
+      let allIn = true;
+      for (const entry of owed) {
+        try {
+          const reveal = await buildAndSubmitKnsReveal({
+            engine, commitTxId: entry.outpoint.transactionId, commitOutputIndex: Number(entry.outpoint.index) || 0, commitAmountSompi: wanted,
+            commitScriptPublicKey, builder, revealTargetAddress: record.revealTargetAddress, revealAmountSompi: BigInt(record.revealAmountSompi), log,
+          });
+          log(`KNS reveal finished: ${reveal.txid}`);
+          finished += 1;
+        } catch (error) {
+          if (isAlreadyRevealedError(error)) continue;
+          allIn = false;
+          log(`KNS reveal still waiting: ${error?.message || error}`);
+        }
+      }
+      if (allIn) dropKnsReveal(account, record.id);
+    }
+  } finally {
+    knsRevealsResuming.delete(account);
+  }
+  return finished;
+}
 
 function savePendingCommit(record) {
   try { localStorage.setItem(PENDING_COMMIT_KEY, JSON.stringify(record, (_, v) => typeof v === "bigint" ? v.toString() : v)); } catch {}
@@ -583,7 +693,11 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
   const revealAmountSompi = engine.kaspa.kaspaToSompi(String(revealAmountKas));
 
   onStatus({ status: "committing", commitAmountKas, redeemScriptHex });
-  const commit = await sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, commitScriptPublicKey, commitAmountSompi, log });
+  const commit = await commitWithRevealFiled({
+    engine,
+    reveal: { kind: "domain", label: normalizedLabel, payloadJson, commitAddressString, commitAmountSompi, revealTargetAddress, revealAmountSompi },
+    send: () => sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, commitScriptPublicKey, commitAmountSompi, log }),
+  });
   savePendingCommit({
     kind: "domain",
     label: normalizedLabel,
@@ -599,7 +713,7 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
   onStatus({ status: "committed", commitTxid: commit.txid });
 
   onStatus({ status: "revealing" });
-  const reveal = await buildAndSubmitKnsReveal({
+  const reveal = await revealOrLeaveFiled(() => buildAndSubmitKnsReveal({
     engine,
     commitTxId: commit.txid,
     commitOutputIndex: commit.outputIndex,
@@ -609,7 +723,8 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
     revealTargetAddress,
     revealAmountSompi,
     log,
-  });
+  }));
+  dropKnsReveal(engine.address, commitAddressString);
   clearPendingKnsCommit();
   onStatus({ status: "revealed", revealTxid: reveal.txid });
 
@@ -940,7 +1055,11 @@ export async function submitProfileField({ engine, assetId, key, value, onStatus
   const revealTargetAddress = engine.address;
 
   onStatus({ status: "committing", key });
-  const commit = await sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, commitScriptPublicKey, commitAmountSompi, log });
+  const commit = await commitWithRevealFiled({
+    engine,
+    reveal: { kind: "profile", assetId, key, payloadJson, commitAddressString, commitAmountSompi, revealTargetAddress, revealAmountSompi },
+    send: () => sendKnsCommitTransaction({ engine, commitAddressString, commitAmountKas, commitScriptPublicKey, commitAmountSompi, log }),
+  });
   savePendingCommit({
     kind: "profile",
     assetId,
@@ -957,7 +1076,7 @@ export async function submitProfileField({ engine, assetId, key, value, onStatus
   onStatus({ status: "committed", key, commitTxid: commit.txid });
 
   onStatus({ status: "revealing", key });
-  const reveal = await buildAndSubmitKnsReveal({
+  const reveal = await revealOrLeaveFiled(() => buildAndSubmitKnsReveal({
     engine,
     commitTxId: commit.txid,
     commitOutputIndex: commit.outputIndex,
@@ -967,7 +1086,8 @@ export async function submitProfileField({ engine, assetId, key, value, onStatus
     revealTargetAddress,
     revealAmountSompi,
     log,
-  });
+  }));
+  dropKnsReveal(engine.address, commitAddressString);
   clearPendingKnsCommit();
   onStatus({ status: "revealed", key, revealTxid: reveal.txid });
 

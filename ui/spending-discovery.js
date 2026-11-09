@@ -156,8 +156,9 @@ export async function deriveSpendingAddressesForAccount(engine, account, start, 
 /// false (the account was removed) nothing more is written and the probe ends past the used slot.
 /// `usedState(address)` as engine/quantum.js verifiedFreshQuantumIndex. Returns { index, address }:
 /// the slot and its address from the same account; `address` is null when it can't be derived.
-export async function probeFreshQuantumSlot({ account, deriveAt, readQMaxIndex, writeQMaxIndex, usedState, stillSaved, onSkip = null }) {
+export async function probeFreshQuantumSlot({ account, deriveAt, readQMaxIndex, writeQMaxIndex, usedState, stillSaved, onSkip = null, reservedIndex = null }) {
   const index = await verifiedFreshQuantumIndex({
+    reservedIndex,
     qMaxIndex: readQMaxIndex(),
     addressAt: (publicIndex) => deriveAt(account, publicIndex),
     usedState,

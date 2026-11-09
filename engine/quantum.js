@@ -263,10 +263,13 @@ export function freshChangeRequired({ purpose, sourceIndex, freshIndex }) {
  * `raiseBound` returning exactly `false` means the account the probe started for was removed (iOS
  * 6891935, IOS-109): nothing was written, and the probe ends on the slot past the used one.
  */
-export async function verifiedFreshQuantumIndex({ qMaxIndex, addressAt, usedState, raiseBound = () => {}, onSkip = null, limit = FRESH_QUANTUM_PROBE_LIMIT }) {
+export async function verifiedFreshQuantumIndex({ qMaxIndex, addressAt, usedState, raiseBound = () => {}, onSkip = null, limit = FRESH_QUANTUM_PROBE_LIMIT, reservedIndex = null }) {
   let bound = Math.max(-1, wholeOr(qMaxIndex, -1));
   let index = nextFreshQuantumIndex(bound);
   for (let i = 0; i < limit; i += 1) {
+    // The slot the Receive QR already points at (warmed before it's on the list) stays its own
+    // (KaPay 2da5f4b): change there would share an address with someone paying it.
+    if (index === reservedIndex) index += 1;
     let address = null;
     try { address = await addressAt(index); } catch { address = null; }
     if (!address) return index;
