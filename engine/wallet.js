@@ -108,30 +108,70 @@ export function importMnemonic(kaspa, phrase, passphrase = "", { passphraseForm 
 //   - kaspaLegacy972: m/44'/972/0'/0'/{i}' — KDX / Kaspanet web wallet. 972 is
 //     deliberately NOT hardened (KasWare's hdPath string "m/44'/972/0'" has no
 //     apostrophe on 972), while the change level and final index ARE hardened.
+//   - chainge: m/44'/111111'/0'/0' — a single hardened leaf. Chainge wallets
+//     have exactly ONE address per seed, so only index 0 exists.
 //   - oneKey: the standard m/44'/111111'/0'/0/{i} key, then a BIP340
 //     taproot-style tweak — negate the private key if its compressed public
 //     key has an odd Y, then add taggedHash("TapTweak", xOnlyPubkey) mod n.
 //
+// Import no longer asks which wallet the words came from: it checks every
+// family (iOS da467165 findImportAccounts). The order below is iOS's
+// WalletSourceFamily.allCases, which breaks ties in that search.
+//
 // The spending chain always stays on KaChat's own m/44'/111111'/1' branch
 // regardless of this choice, matching iOS.
 
-export const WALLET_SOURCE_FAMILIES = ["kaspaStandard", "kaspaLegacy972", "oneKey"];
+export const WALLET_SOURCE_FAMILIES = ["kaspaStandard", "kaspaLegacy972", "chainge", "oneKey"];
 
 export function normalizeSourceFamily(family) {
   return WALLET_SOURCE_FAMILIES.includes(family) ? family : "kaspaStandard";
 }
 
+/** False for single-address families (Chainge), where only index 0 exists (iOS supportsIndexScan). */
+export function sourceFamilySupportsIndexScan(family) {
+  return normalizeSourceFamily(family) !== "chainge";
+}
+
 export function identityDerivationPath(family, index = 0) {
   const i = Math.max(0, Math.floor(Number(index) || 0));
-  if (normalizeSourceFamily(family) === "kaspaLegacy972") return `m/44'/972/0'/0'/${i}'`;
+  const clean = normalizeSourceFamily(family);
+  if (clean === "kaspaLegacy972") return `m/44'/972/0'/0'/${i}'`;
+  if (clean === "chainge") {
+    if (i !== 0) throw new Error("A Chainge wallet has a single address.");
+    return "m/44'/111111'/0'/0'";
+  }
   return `m/44'/111111'/0'/0/${i}`;
 }
 
 export function sourceFamilyPathDescription(family) {
   switch (normalizeSourceFamily(family)) {
     case "kaspaLegacy972": return "m/44'/972/0'";
+    case "chainge": return "m/44'/111111'/0'/0'";
     case "oneKey": return "m/44'/111111'/0' (OneKey)";
     default: return "m/44'/111111'/0'";
+  }
+}
+
+/** How import names a wallet type (iOS WalletSourceFamily.displayName). Standard covers KaChat,
+ *  KasWare, Kaspium, Kastle, Core Golang CLI, OKX and Ledger, which all use the same addresses. */
+export function sourceFamilyDisplayName(family) {
+  switch (normalizeSourceFamily(family)) {
+    case "kaspaLegacy972": return "KDX / Kaspanet Web";
+    case "chainge": return "Chainge";
+    case "oneKey": return "OneKey";
+    default: return "Standard Kaspa Wallet";
+  }
+}
+
+/** How many addresses import's search checks per wallet type (iOS importSearchDepth): the standard
+ *  chain keeps the depth of one page of the chatting address picker; the others only have to be
+ *  recognised. */
+export function sourceFamilyImportSearchDepth(family) {
+  switch (normalizeSourceFamily(family)) {
+    case "kaspaLegacy972":
+    case "oneKey": return 20;
+    case "chainge": return 1;
+    default: return 50;
   }
 }
 
@@ -227,6 +267,7 @@ export async function deriveIdentityAddressRange(kaspa, phrase, passphrase = "",
   const master = new kaspa.XPrv(seedFromPhrase(kaspa, cleanPhrase, passphrase, passphraseForm));
   const results = [];
   for (let index = first; index < first + total; index += 1) {
+    if (index > 0 && !sourceFamilySupportsIndexScan(cleanFamily)) break; // Chainge: #0 only
     try {
       let privateKeyHex = master.derivePath(identityDerivationPath(cleanFamily, index)).toPrivateKey().toString();
       if (cleanFamily === "oneKey") privateKeyHex = await oneKeyTweakPrivateKeyHex(kaspa, privateKeyHex);

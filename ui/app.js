@@ -12,7 +12,7 @@ import { isHiddenPlaceholder, isHiddenPlaceholderMessage, newestVisibleMessage, 
 import { accountGuard, accountScopedValue, accountStillSaved } from "./account-guard.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
-import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm } from "../engine/wallet.js";
+import { addressFromPrivateKey, passphraseFormForRecord, passphraseIsNfkd, normalizePassphraseForm, WALLET_SOURCE_FAMILIES, sourceFamilyDisplayName, sourceFamilyImportSearchDepth, sourceFamilySupportsIndexScan } from "../engine/wallet.js";
 import { QUANTUM_INDEX_BASE, QUANTUM_SCAN_FLOOR, QUANTUM_SCAN_LIMIT, QUANTUM_CHANGE_UNAVAILABLE, KIP22_SIGNATURE_SCRIPT_SIZE, isQuantumIndex, chainLocalIndex, addressNumber, spendingIndexTitle, visibilityPagerRange, spendingChainSummaries, spendingStateFromRecord, spendingRecordFromState, revealedSpendingIndices, spendingChangeIndex, freshChangeRequired, quantumSpentFromHistory } from "../engine/quantum.js";
 import { createGroupManager } from "../engine/group-store.js";
 import { sompiFromUserText, kasTextFromSompi, kasToSompi, fiatTextFloorFromSompi, checkedUtxoAnswer, kasExact8Text } from "../engine/amounts.js";
@@ -129,7 +129,7 @@ import kachatLogoUrl from "./assets/kachat-logo.png";
 import { confirmText, promptText, confirmDialog, chooseDialog, alertDialog, promptDialog, PROMPT_EXTRA, infoSheet, userFacingError, ACTION_TILE_ICONS } from "./dialogs.js";
 import { onContextGesture, onDoubleGesture, isTouchDevice, releaseTypingFocus } from "./touch.js";
 import { attachRowSwipes, chatRowSwipeActions } from "./row-swipe.js";
-import { IMPORT_ADDRESS_SEARCH_DEPTH, IMPORT_ADDRESS_SEARCH_TIMEOUT_MS, raceImportSearch, foundChattingAddresses, firstFundedAddress, rediscoveredGroupIsRead, pastedWordsInvalidMessage } from "./account-import.js";
+import { IMPORT_ADDRESS_SEARCH_TIMEOUT_MS, raceImportSearch, rankImportAccounts, importChoiceKey, visibleImportRows, importFundsHint, rediscoveredGroupIsRead, pastedWordsInvalidMessage } from "./account-import.js";
 import { attachPinnedSearch } from "./pinned-search.js";
 import { edgeBackWouldClaim } from "./edge-back.js";
 import { startAppUpdateChecks } from "./app-update.js";
@@ -13262,7 +13262,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 276;
+const APP_BUILD = 277;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -28349,10 +28349,23 @@ const continueWithPassphraseBtn = document.querySelector("[data-create-passphras
 // go and read about it first. Same three screens, same copy, as iOS. Only import has all three:
 // creating opens on the entry screen, since "Advanced: Create with a Passphrase" has already
 // answered the question (iOS d1844582).
+// Import also has `found` (iOS da467165): No to the passphrase opens Your Account, the wallet the
+// words were found in. It shows the same address preview as the entry screen, moved there.
+let importPassphraseScreen = "question";
 function showPassphraseScreen(flow, screen) {
   document.querySelectorAll(`[data-${flow}-passphrase-screen]`).forEach((el) => {
     el.hidden = el.dataset[`${flow}PassphraseScreen`] !== screen;
   });
+  if (flow !== "import") return;
+  importPassphraseScreen = screen;
+  const preview = document.querySelector('[data-passphrase-preview="import"]');
+  const slot = document.querySelector(`[data-import-preview-slot="${screen === "found" ? "found" : "entry"}"]`);
+  if (preview && slot && preview.parentElement !== slot) slot.appendChild(preview);
+  // iOS: the passphrase screens are titled "Passphrase", Your Account "Import Account".
+  const title = document.querySelector("[data-import-title]");
+  if (title && !document.querySelector('[data-import-step="passphrase"]')?.hidden) {
+    title.textContent = screen === "found" ? "Import Account" : "Passphrase";
+  }
 }
 const recoveryModal = document.querySelector("[data-recovery-modal]");
 const recoveryPhraseBox = document.querySelector("[data-recovery-phrase]");
@@ -28394,11 +28407,14 @@ function setImportSearchIncomplete(nodes, incomplete) {
   if (nodes?.incomplete) nodes.incomplete.hidden = !incomplete;
 }
 
-// On import the chatting address isn't known yet: the preview checks the first addresses on the
-// identity chain, picks the first with funds, and lets the user pick another (iOS 836b62bc
-// PassphraseAddressPreview.selectedIndex). What's picked here is what commitImport imports onto.
+// On import the account isn't known yet: the preview searches every wallet type for these words,
+// picks the likeliest account, and lets the user pick another (iOS da467165
+// PassphraseAddressPreview.selection). What's picked here is what commitImport imports onto.
 let importFoundAddresses = [];
-let importChattingIndex = 0;
+// Address #0 of every wallet type, for words the search can't place (iOS everyWalletType).
+let importEveryWalletType = [];
+let importShowsEveryWalletType = false;
+let importChoice = { family: "kaspaStandard", index: 0 };
 // That search is running: Import waits for it, or it would import onto #0 while the funds sit on
 // another address (iOS 3942a5b7 isSearchingAddresses). Held from the first keystroke, not only
 // once the lookup starts: an Import clicked in the pause would otherwise go to #0.
@@ -28406,41 +28422,101 @@ let importAddressSearching = false;
 function setImportAddressSearching(searching) {
   importAddressSearching = Boolean(searching);
   updateImportPassphraseSubmitEnabled();
+  renderImportFoundAddresses(passphrasePreviewNodes("import"));
 }
+
+function defaultImportChoice() { return { family: "kaspaStandard", index: 0 }; }
 
 function clearImportFoundAddresses(nodes) {
   importFoundAddresses = [];
-  importChattingIndex = 0;
+  importEveryWalletType = [];
+  importShowsEveryWalletType = false;
+  importChoice = defaultImportChoice();
   if (nodes?.found) { nodes.found.hidden = true; nodes.found.innerHTML = ""; }
 }
 
 function renderImportFoundAddresses(nodes) {
-  if (!nodes.found) return;
-  nodes.found.hidden = importFoundAddresses.length < 2;
-  nodes.found.innerHTML = nodes.found.hidden ? "" : `
-    <p class="passphrase-found-hint">We picked the first address with funds. Tap another if that's not the one you chat from.</p>
-    ${importFoundAddresses.map(({ index, address, sompi }) => `
-      <button type="button" class="passphrase-found-row${index === importChattingIndex ? " selected" : ""}" data-passphrase-found="${index}" aria-pressed="${index === importChattingIndex}">
+  if (!nodes?.found) return;
+  const rows = visibleImportRows(importFoundAddresses, importEveryWalletType, importShowsEveryWalletType);
+  const showsRows = importFoundAddresses.length > 1 || importShowsEveryWalletType;
+  const offersEvery = !importAddressSearching && importEveryWalletType.length > 0 && !importShowsEveryWalletType;
+  nodes.found.hidden = !showsRows && !offersEvery;
+  if (nodes.found.hidden) { nodes.found.innerHTML = ""; return; }
+  const selected = importChoiceKey(importChoice);
+  const list = showsRows ? `
+    <p class="passphrase-found-hint">We picked the most likely account. Tap another if that's not the one you use.</p>
+    ${rows.map((entry) => {
+      const key = importChoiceKey(entry);
+      const on = key === selected;
+      const amount = entry.sompi > 0
+        ? `<span class="passphrase-found-balance has-funds">${escapeHtml(formatSompiPlain(BigInt(Math.round(entry.sompi))))} ${KAS_UNIT}</span>`
+        : entry.hasHistory ? '<span class="passphrase-found-balance">Has history</span>' : "";
+      return `
+      <button type="button" class="passphrase-found-row${on ? " selected" : ""}" data-passphrase-found="${escapeHtml(key)}" aria-pressed="${on}">
         <span class="passphrase-found-check" aria-hidden="true"></span>
-        <span class="passphrase-found-copy"><strong>Address #${index}</strong><small>${escapeHtml(address.slice(0, 14))}...${escapeHtml(address.slice(-6))}</small></span>
-        <span class="passphrase-found-balance${sompi > 0 ? " has-funds" : ""}">${escapeHtml(formatSompiPlain(BigInt(Math.round(sompi))))} ${KAS_UNIT}</span>
-      </button>`).join("")}`;
+        <span class="passphrase-found-copy"><strong>${escapeHtml(sourceFamilyDisplayName(entry.family))}</strong><span class="passphrase-found-index">Address #${entry.index}</span><small>${escapeHtml(entry.address.slice(0, 14))}...${escapeHtml(entry.address.slice(-6))}</small></span>
+        ${amount}
+      </button>`;
+    }).join("")}` : "";
+  nodes.found.innerHTML = list + (offersEvery ? '<button type="button" class="linklike-button passphrase-every-type" data-import-every-wallet-type>See Every Wallet Type</button>' : "");
 }
 
 function selectImportFoundAddress(nodes, found) {
-  importChattingIndex = found.index;
+  importChoice = { family: found.family, index: found.index };
   nodes.address.textContent = found.address;
   delete nodes.address.dataset.pending;
-  renderPassphrasePreviewBalance(nodes, "import", { sompi: BigInt(Math.round(found.sompi)) });
+  renderPassphrasePreviewBalance(nodes, "import", { sompi: BigInt(Math.round(found.sompi || 0)), hasHistory: Boolean(found.hasHistory) });
   renderImportFoundAddresses(nodes);
 }
 
 document.querySelector('[data-passphrase-preview="import"]')?.addEventListener("click", (event) => {
+  const nodes = passphrasePreviewNodes("import");
+  if (event.target.closest("[data-import-every-wallet-type]")) {
+    importShowsEveryWalletType = true;
+    renderImportFoundAddresses(nodes);
+    return;
+  }
   const row = event.target.closest("[data-passphrase-found]");
-  if (!row) return;
-  const found = importFoundAddresses.find((entry) => entry.index === Number(row.dataset.passphraseFound));
-  if (found) selectImportFoundAddress(passphrasePreviewNodes("import"), found);
+  if (!row || importAccountModal?.dataset.busy === "1") return;
+  const rows = visibleImportRows(importFoundAddresses, importEveryWalletType, importShowsEveryWalletType);
+  const found = rows.find((entry) => importChoiceKey(entry) === row.dataset.passphraseFound);
+  if (found) selectImportFoundAddress(nodes, found);
 });
+
+/**
+ * Import's search (iOS da467165 findImportAccounts): every wallet type's addresses in one balance
+ * call, plus each type's address #0 on Kaspa REST, so an emptied wallet or a chat identity still
+ * counts. Ranked by rankImportAccounts. Throws when the balances couldn't be checked.
+ */
+async function findImportAccounts(phrase, passphrase) {
+  const candidates = [];
+  for (const family of WALLET_SOURCE_FAMILIES) {
+    const range = await engine.deriveIdentityAddressRange(phrase, passphrase, { family, start: 0, count: sourceFamilyImportSearchDepth(family) });
+    for (const entry of range) candidates.push({ family, index: entry.index, address: entry.address });
+  }
+  if (!candidates.length) throw new Error("no addresses to check");
+  const atZero = candidates.filter((entry) => entry.index === 0).map((entry) => entry.address);
+  const [balances, history] = await Promise.all([
+    spendingBalancesBatchSompi(candidates.map((entry) => entry.address)),
+    // A failed probe counts as no history: this only ranks what import shows first, and every
+    // wallet type stays one click away.
+    Promise.all(atZero.map(async (address) => ((await spendingAddressHasHistory(address, { timeoutMs: 8000 })) === true ? address : null))),
+  ]);
+  return rankImportAccounts(candidates, balances, new Set(history.filter(Boolean)), WALLET_SOURCE_FAMILIES);
+}
+
+/** Address #0 of every wallet type these words could be: the rows See Every Wallet Type offers.
+ *  Needs no network (iOS importAddressesAtZero). */
+async function importAddressesAtZero(phrase, passphrase) {
+  const rows = [];
+  for (const family of WALLET_SOURCE_FAMILIES) {
+    try {
+      const [entry] = await engine.deriveIdentityAddressRange(phrase, passphrase, { family, start: 0, count: 1 });
+      if (entry) rows.push({ family, index: 0, address: entry.address, sompi: 0, hasHistory: false });
+    } catch { /* that type can't be derived here: leave it out */ }
+  }
+  return rows;
+}
 
 /** The seed words the flow is about to commit, or "" when there are none to derive from. */
 function passphrasePreviewPhrase(flow) {
@@ -28448,9 +28524,10 @@ function passphrasePreviewPhrase(flow) {
   return pendingImport?.recoveryPhrase || "";
 }
 
-function passphrasePreviewFamily(flow) {
-  if (flow === "create") return "kaspaStandard";
-  return pendingImport?.family || "kaspaStandard";
+// The address shown first is the standard wallet's #0, on create and import alike: import's search
+// then moves it to the wallet type it finds (iOS da467165).
+function passphrasePreviewFamily() {
+  return "kaspaStandard";
 }
 
 let passphrasePreviewTimers = { create: null, import: null };
@@ -28464,7 +28541,8 @@ function schedulePassphrasePreview(flow) {
   if (!phrase) { if (flow === "import") setImportAddressSearching(false); return; }
 
   const input = flow === "create" ? createPassphraseInput : importPassphraseInput;
-  const passphrase = input?.value || "";
+  // Your Account (No to the passphrase) searches the words on their own.
+  const passphrase = flow === "import" && importPassphraseScreen === "found" ? "" : (input?.value || "");
   nodes.note.textContent = passphrase
     ? "A different passphrase gives a different address, and a different account."
     : "This is the account your 12 or 24 words open on their own.";
@@ -28496,28 +28574,29 @@ function schedulePassphrasePreview(flow) {
       await new Promise((resolve) => { setTimeout(resolve, 450); });
       if (token !== passphrasePreviewTokens[flow]) return;
       if (flow === "import") {
-        const family = passphrasePreviewFamily(flow);
+        importEveryWalletType = await importAddressesAtZero(phrase, passphrase);
+        if (token !== passphrasePreviewTokens[flow]) return;
         // A slow or unreachable node lets Import go after 12 s, onto #0, and says so; an answer that
         // comes later is ignored (KaPay 1652437, KaPlay 4922804, KaPost 33095ac).
-        const outcome = await raceImportSearch((async () => {
-          const range = await engine.deriveIdentityAddressRange(phrase, passphrase, { family, start: 0, count: IMPORT_ADDRESS_SEARCH_DEPTH });
-          const balances = token === passphrasePreviewTokens[flow] ? await spendingBalancesBatchSompi(range.map((entry) => entry.address)) : new Map();
-          return { range, balances };
-        })(), IMPORT_ADDRESS_SEARCH_TIMEOUT_MS);
+        const outcome = await raceImportSearch(findImportAccounts(phrase, passphrase), IMPORT_ADDRESS_SEARCH_TIMEOUT_MS);
         if (token !== passphrasePreviewTokens[flow]) return;
         if (outcome.timedOut) {
           importFoundAddresses = [];
-          importChattingIndex = 0;
+          importChoice = defaultImportChoice();
           renderPassphrasePreviewBalance(nodes, flow, { failed: true });
           setImportSearchIncomplete(nodes, true);
           appendEngineLog("Import: the funds search didn't finish in time; Import uses address #0.");
           return;
         }
-        const { range, balances } = outcome.value;
-        importFoundAddresses = foundChattingAddresses(range, balances);
-        const first = firstFundedAddress(importFoundAddresses);
-        if (!first) throw new Error("no addresses to check");
-        selectImportFoundAddress(nodes, first);
+        importFoundAddresses = outcome.value;
+        const first = importFoundAddresses[0];
+        if (first) selectImportFoundAddress(nodes, first);
+        else {
+          // Nothing has funds or history: the standard wallet's #0, already on screen.
+          importChoice = defaultImportChoice();
+          renderPassphrasePreviewBalance(nodes, flow, { sompi: 0n });
+          renderImportFoundAddresses(nodes);
+        }
         return;
       }
       const byAddress = await spendingBalancesBatchSompi([address]);
@@ -28527,7 +28606,7 @@ function schedulePassphrasePreview(flow) {
       if (token !== passphrasePreviewTokens[flow]) return;
       if (nodes.address.dataset.pending) nodes.address.textContent = "Could not derive an address from these words.";
       // the search itself failed: Import goes to #0, and the screen says so (KaPay 1652437)
-      else if (flow === "import") { importFoundAddresses = []; importChattingIndex = 0; setImportSearchIncomplete(nodes, true); }
+      else if (flow === "import") { importFoundAddresses = []; importChoice = defaultImportChoice(); setImportSearchIncomplete(nodes, true); }
       renderPassphrasePreviewBalance(nodes, flow, { failed: true });
       appendEngineLog(`Passphrase preview failed: ${error.message}`);
     } finally {
@@ -28540,7 +28619,7 @@ function schedulePassphrasePreview(flow) {
 // The balance is only the chatting address's: funds can also sit on the account's other addresses,
 // so an empty one suggests a wrong passphrase rather than proving it. Someone importing is told what
 // it suggests (iOS d063b897 PassphraseOptionView.previewBalanceRow).
-function renderPassphrasePreviewBalance(nodes, flow, { sompi = null, failed = false } = {}) {
+function renderPassphrasePreviewBalance(nodes, flow, { sompi = null, failed = false, hasHistory = false } = {}) {
   if (!nodes.balance) return;
   nodes.balance.classList.toggle("has-funds", sompi != null && sompi > 0n);
   if (sompi != null) nodes.balance.textContent = `${formatSompiPlain(sompi)} ${KAS_UNIT}`;
@@ -28549,10 +28628,13 @@ function renderPassphrasePreviewBalance(nodes, flow, { sompi = null, failed = fa
   if (!nodes.verdict) return;
   nodes.verdict.hidden = flow !== "import" || sompi == null;
   if (nodes.verdict.hidden) return;
-  nodes.verdict.classList.toggle("has-funds", sompi > 0n);
-  nodes.verdict.textContent = sompi > 0n
-    ? "This address holds funds, so this looks like the right account."
-    : "No funds on this address. If you expected funds here, check your passphrase.";
+  // iOS da467165 fundsHint: history counts too, and with no passphrase an empty address is just
+  // empty, not a sign of a wrong passphrase.
+  const passphrase = importPassphraseScreen === "found" ? "" : String(importPassphraseInput?.value || "");
+  const hint = importFundsHint({ sompi: Number(sompi), hasHistory, passphrase });
+  nodes.verdict.classList.toggle("has-funds", hint.tone === "funds");
+  nodes.verdict.classList.toggle("muted", hint.tone === "muted");
+  nodes.verdict.textContent = hint.text;
 }
 
 function resetPassphrasePreview(flow) {
@@ -29259,13 +29341,21 @@ function chattingPickerOnlyName(entry) {
 
 function renderChattingPickerFooter() {
   if (!chattingPickerFooterEl) return;
+  // A single-address wallet type (Chainge) has nothing further to scan (iOS ChattingAddressPickerView).
+  const scansFurther = sourceFamilySupportsIndexScan(activeAccountSourceFamily());
   if (chattingPickerScanning) {
     const from = escapeHtml(String(chattingPickerScanned + 1));
     const to = escapeHtml(String(chattingPickerScanned + CHATTING_PICKER_BATCH));
-    chattingPickerFooterEl.innerHTML = `<span>Scanning addresses ${from} to ${to}...</span>`;
+    chattingPickerFooterEl.innerHTML = scansFurther
+      ? `<span>Scanning addresses ${from} to ${to}...</span>`
+      : "<span>Checking this wallet's address...</span>";
     return;
   }
   if (!chattingPickerScanned) { chattingPickerFooterEl.replaceChildren(); return; }
+  if (!scansFurther) {
+    chattingPickerFooterEl.innerHTML = "<span>This wallet type has a single address, so there is nothing further to scan.</span>";
+    return;
+  }
   chattingPickerFooterEl.innerHTML = `<span>Scanned the first ${escapeHtml(String(chattingPickerScanned))} addresses.</span>`
     + `<button type="button" class="chatting-picker-scan-more" data-chatting-picker-scan-more>Scan Further</button>`;
 }
@@ -29796,92 +29886,11 @@ document.querySelector("[data-import-passphrase-back]")?.addEventListener("click
 });
 let pendingImport = null;
 
-// Source-wallet chooser (iOS ImportSourceWalletView port): shown FIRST, before
-// seed entry. The selection maps a wallet name to its identity derivation-path
-// family — KaChat derives the chatting identity where that wallet actually
-// kept the user's funds and KNS domains. The spending chain always stays on
-// KaChat's own m/44'/111111'/1' branch regardless of this choice.
-// Per-wallet icons drawn after the SF Symbols iOS uses (ImportSourceWalletView.options).
-const importSourceIcon = (paths) => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
-const IMPORT_SOURCE_ICONS = {
-  chats: importSourceIcon('<path d="M3 6.5A2.5 2.5 0 0 1 5.5 4h8A2.5 2.5 0 0 1 16 6.5v3a2.5 2.5 0 0 1-2.5 2.5H8l-3.5 3v-3.2A2.5 2.5 0 0 1 3 9.5Z"/><path d="M18.5 8.5A2.5 2.5 0 0 1 21 11v3a2.5 2.5 0 0 1-1.5 2.3V19l-3-2.5H12a2.5 2.5 0 0 1-2.4-1.8"/>'),
-  puzzle: importSourceIcon('<path d="M10 4a2 2 0 0 1 4 0v1h4v4h-1a2 2 0 0 0 0 4h1v5H5v-5h1a2 2 0 0 0 0-4H5V5h5Z"/>'),
-  iphone: importSourceIcon('<rect x="7" y="2.5" width="10" height="19" rx="2.2"/><path d="M11 18.5h2"/>'),
-  shield: importSourceIcon('<path d="M12 3l7 2.8v5.4c0 4.5-3 8.2-7 9.8-4-1.6-7-5.3-7-9.8V5.8z"/>'),
-  desktop: importSourceIcon('<rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/>'),
-  terminal: importSourceIcon('<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 2.5-3 2.5M12 15h5"/>'),
-  grid: importSourceIcon('<rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/>'),
-  key: importSourceIcon('<circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M16 7l2 2M14 9l2 2"/>'),
-  drive: importSourceIcon('<rect x="3" y="12" width="18" height="7" rx="2"/><path d="M5 12l2.5-6.5h9L19 12M17 15.5h.01"/>'),
-};
-const IMPORT_SOURCE_WALLETS = [
-  { name: "KaChat", family: "kaspaStandard", isDefault: true, icon: "chats" },
-  { name: "KasWare Wallet", family: "kaspaStandard", icon: "puzzle" },
-  { name: "Kaspium Wallet", family: "kaspaStandard", icon: "iphone" },
-  // Kastle derives m/44'/111111'/{account}'/0/{index}; account 0 is
-  // byte-identical to the standard family.
-  { name: "Kastle Wallet", family: "kaspaStandard", icon: "shield" },
-  { name: "KDX Wallet", family: "kaspaLegacy972", icon: "desktop" },
-  { name: "Core Golang Cli Wallet", family: "kaspaStandard", icon: "terminal" },
-  { name: "OKX Wallet", family: "kaspaStandard", icon: "grid" },
-  { name: "OneKey Wallet", family: "oneKey", icon: "key" },
-  { name: "Ledger Wallet", family: "kaspaStandard", icon: "drive" },
-];
-let importSourceSelection = 0;
-
-function importSourcePathDescription(family) {
-  switch (family) {
-    case "kaspaLegacy972": return "m/44'/972/0'";
-    case "oneKey": return "m/44'/111111'/0' (OneKey)";
-    default: return "m/44'/111111'/0'";
-  }
-}
-
-function renderImportSourceList() {
-  const listEl = document.querySelector("[data-import-source-list]");
-  if (!listEl) return;
-  listEl.replaceChildren();
-  IMPORT_SOURCE_WALLETS.forEach((option, index) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = `import-source-row${index === importSourceSelection ? " selected" : ""}`;
-    const mark = document.createElement("span");
-    mark.className = "import-source-mark";
-    mark.textContent = index === importSourceSelection ? "●" : "○";
-    const icon = document.createElement("span");
-    icon.className = "import-source-icon";
-    icon.innerHTML = IMPORT_SOURCE_ICONS[option.icon] || "";
-    const copy = document.createElement("span");
-    copy.className = "import-source-copy";
-    const title = document.createElement("strong");
-    title.textContent = option.name;
-    if (option.isDefault) {
-      const badge = document.createElement("em");
-      badge.className = "import-source-default";
-      badge.textContent = "Default";
-      title.append(" ", badge);
-    }
-    const path = document.createElement("small");
-    path.textContent = importSourcePathDescription(option.family);
-    copy.append(title, path);
-    row.append(mark, icon, copy);
-    row.addEventListener("click", () => {
-      importSourceSelection = index;
-      renderImportSourceList();
-    });
-    listEl.appendChild(row);
-  });
-}
-
-function selectedImportSourceFamily() {
-  return IMPORT_SOURCE_WALLETS[importSourceSelection]?.family || "kaspaStandard";
-}
-
 function showImportStep(step) {
   document.querySelectorAll("[data-import-step]").forEach((el) => { el.hidden = el.dataset.importStep !== step; });
   // iOS PassphraseOptionView is titled "Passphrase"; every other step "Import Account".
   const title = document.querySelector("[data-import-title]");
-  if (title) title.textContent = step === "passphrase" ? "Passphrase" : "Import Account";
+  if (title) title.textContent = step === "passphrase" && importPassphraseScreen !== "found" ? "Passphrase" : "Import Account";
   // The name and length steps carry iOS's large title, as Create Account's do; the rest stay inline.
   const flow = importAccountModal?.querySelector(".import-account-flow");
   if (flow) flow.dataset.importAt = step;
@@ -29891,7 +29900,6 @@ function showImportError(message) {
 }
 function openImportAccountModal() {
   pendingImport = null;
-  importSourceSelection = 0;
   if (importAccountError) { importAccountError.hidden = true; importAccountError.textContent = ""; }
   if (importPassphraseError) importPassphraseError.hidden = true;
   // Neither a name nor a length is chosen for you (iOS dd0aab1, as Create Account).
@@ -29902,9 +29910,9 @@ function openImportAccountModal() {
   importWordCount = 24;
   resetImportSeedGrid();
   if (importPassphraseInput) { importPassphraseInput.value = ""; importPassphraseInput.type = "password"; }
-  renderImportSourceList();
-  showImportStep("source");
+  showImportStep("name");
   if (importAccountModal) importAccountModal.hidden = false;
+  queueMicrotask(() => importNameInput?.focus());
 }
 function closeImportAccountModal() {
   if (importAccountModal) importAccountModal.hidden = true;
@@ -29914,8 +29922,8 @@ function closeImportAccountModal() {
 document.querySelectorAll("[data-close-import-account]").forEach((button) => button.addEventListener("click", closeImportAccountModal));
 importAccountModal?.addEventListener("click", (event) => { if (event.target === importAccountModal) closeImportAccountModal(); });
 
-// Import Account, iOS dd0aab1: source -> name (Create Account's screen) -> seed length -> words ->
-// the optional passphrase.
+// Import Account, iOS dd0aab1 and da467165: name (Create Account's screen) -> seed length -> words
+// -> the passphrase question, then Your Account (No) or the passphrase (Yes).
 const importNameNextBtn = document.querySelector("[data-import-name-next]");
 function updateImportNameNextEnabled() {
   if (importNameNextBtn) importNameNextBtn.disabled = !String(importNameInput?.value || "").trim();
@@ -29929,12 +29937,10 @@ function importNameNext() {
   showImportStep("length");
   queueMicrotask(() => document.querySelector("[data-import-word-count]")?.focus());
 }
-document.querySelector("[data-import-source-continue]")?.addEventListener("click", importShowNameStep);
 importNameNextBtn?.addEventListener("click", importNameNext);
 importNameInput?.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); importNameNext(); }
 });
-document.querySelector("[data-import-name-back]")?.addEventListener("click", () => showImportStep("source"));
 document.querySelector("[data-import-length-back]")?.addEventListener("click", importShowNameStep);
 document.querySelector("[data-import-length-next]")?.addEventListener("click", () => {
   if (importChosenLength !== 12 && importChosenLength !== 24) return;
@@ -30093,7 +30099,7 @@ importContinueBtn?.addEventListener("click", async () => {
     // passphrase step rather than after it.
     try { new engine.kaspa.Mnemonic(phrase); }
     catch { showImportError("These words are invalid. Double-check the words - the last word encodes a checksum, so one wrong word fails validation."); return; }
-    pendingImport = { name, recoveryPhrase: phrase, family: selectedImportSourceFamily() };
+    pendingImport = { name, recoveryPhrase: phrase };
     if (importPassphraseInput) { importPassphraseInput.value = ""; importPassphraseInput.type = "password"; }
     if (importPassphraseError) importPassphraseError.hidden = true;
     setPassphraseEye(importPassphraseToggle, false);
@@ -30126,13 +30132,25 @@ function updateImportPassphraseSubmitEnabled() {
   if (importAccountModal?.dataset.busy !== "1") importWithPassphraseBtn.disabled = !typed || importAddressSearching;
   // While that search runs, a way past it: Import on #0 now (KaPay 1652437 "Skip the Search").
   if (importSkipSearchBtn) importSkipSearchBtn.hidden = !finding || importAccountModal?.dataset.busy === "1";
+  // Your Account's Import waits for the search the same way (iOS da467165 foundScreen).
+  if (importFoundSubmitBtn) {
+    const searching = importAddressSearching;
+    if (importFoundSubmitBtn.dataset.finding !== String(searching)) {
+      importFoundSubmitBtn.dataset.finding = String(searching);
+      importFoundSubmitBtn.innerHTML = searching ? '<span class="sk-spinner" aria-hidden="true"></span>Finding your address...' : "Import";
+    }
+    if (importAccountModal?.dataset.busy !== "1") importFoundSubmitBtn.disabled = searching;
+  }
+  if (importFoundSkipSearchBtn) importFoundSkipSearchBtn.hidden = !importAddressSearching || importAccountModal?.dataset.busy === "1";
 }
+const importFoundSubmitBtn = document.querySelector("[data-import-found-submit]");
+const importFoundSkipSearchBtn = document.querySelector("[data-import-found-skip-search]");
 const importSkipSearchBtn = document.querySelector("[data-import-passphrase-skip-search]");
 importSkipSearchBtn?.addEventListener("click", () => {
   if (importAccountModal?.dataset.busy === "1") return;
   const pass = String(importPassphraseInput?.value || "");
   if (!pass) return;
-  importChattingIndex = 0;
+  importChoice = defaultImportChoice();
   void commitImport(pass);
 });
 importPassphraseInput?.addEventListener("input", updateImportPassphraseSubmitEnabled);
@@ -30150,13 +30168,14 @@ async function commitImport(passphrase) {
   if (!pendingImport) return;
   // iOS: Yes, No and "What is a passphrase?" (and Back) are all off while it imports.
   // The passphrase field too: nothing changes the account once it is being made (iOS 3942a5b7).
-  const buttons = [importWithPassphraseBtn, importSkipPassphraseBtn, importPassphraseInput, ...document.querySelectorAll("[data-import-passphrase-yes], [data-import-passphrase-explain], [data-import-passphrase-entry-explain], [data-import-passphrase-question-back], [data-import-passphrase-back]")];
+  const buttons = [importWithPassphraseBtn, importSkipPassphraseBtn, importPassphraseInput, importFoundSubmitBtn, ...document.querySelectorAll("[data-import-passphrase-yes], [data-import-passphrase-explain], [data-import-passphrase-entry-explain], [data-import-passphrase-question-back], [data-import-passphrase-back], [data-import-found-back], [data-passphrase-found], [data-import-every-wallet-type]")];
   buttons.forEach((b) => { if (b) b.disabled = true; });
   if (importAccountModal) importAccountModal.dataset.busy = "1";
   if (importPassphraseError) importPassphraseError.hidden = true;
   try {
-    // Only the passphrase screen looks for a funded address; No imports onto #0 (iOS 836b62bc).
-    const imported = await importAndEnterAccount({ ...pendingImport, passphrase, chattingIndex: passphrase ? importChattingIndex : 0 });
+    // With or without a passphrase, the wallet type and address the search found or the user
+    // picked (iOS da467165 importChoice).
+    const imported = await importAndEnterAccount({ ...pendingImport, passphrase, family: importChoice.family, chattingIndex: importChoice.index });
     pendingImport = null;
     // Whoever imported it has its seed, so nothing is owed, and the six months start (iOS d063b897,
     // 836b62bc).
@@ -30193,7 +30212,31 @@ importWithPassphraseBtn?.addEventListener("click", () => {
   }
   void commitImport(pass);
 });
-importSkipPassphraseBtn?.addEventListener("click", () => void commitImport(""));
+// No: Your Account, where the search finds the wallet these words belong to (iOS da467165). Held
+// from here, not only once the search starts: Import must not be clickable before it has run.
+importSkipPassphraseBtn?.addEventListener("click", () => {
+  if (importAccountModal?.dataset.busy === "1") return;
+  if (importPassphraseInput) importPassphraseInput.value = "";
+  if (importPassphraseError) importPassphraseError.hidden = true;
+  showPassphraseScreen("import", "found");
+  resetPassphrasePreview("import");
+  setImportAddressSearching(true);
+  schedulePassphrasePreview("import");
+});
+importFoundSubmitBtn?.addEventListener("click", () => {
+  if (importAddressSearching) return; // the account isn't picked yet
+  void commitImport("");
+});
+importFoundSkipSearchBtn?.addEventListener("click", () => {
+  if (importAccountModal?.dataset.busy === "1") return;
+  importChoice = defaultImportChoice();
+  void commitImport("");
+});
+document.querySelector("[data-import-found-back]")?.addEventListener("click", () => {
+  if (importAccountModal?.dataset.busy === "1") return;
+  resetPassphrasePreview("import");
+  showPassphraseScreen("import", "question");
+});
 
 function activeSavedAccountRecord() {
   const address = String(engine.address || readActiveAccountAddress() || "").trim();

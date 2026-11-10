@@ -1801,25 +1801,14 @@
         <button class="modal-close" type="button" data-close-import-account aria-label="Close">×</button>
       </div>
 
-      <div data-import-step="source" hidden>
-        <span class="import-source-header-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M3 9.5h18M15.5 14h2.5"/></svg></span>
-        <h3 class="passphrase-question-title import-source-title">Where are your 12 or 24 words from?</h3>
-        <p class="field-hint">Different wallets store your Kaspa on different address paths. Pick where these words come from so KaChat finds your funds and domains.</p>
-        <div class="import-source-list" data-import-source-list></div>
-        <div class="modal-actions">
-          <button class="secondary-button" type="button" data-close-import-account>Cancel</button>
-          <button class="primary-button" type="button" data-import-source-continue>Continue</button>
-        </div>
-      </div>
-
-      <!-- iOS dd0aab1: after the source, the same name screen as Create Account, then the seed
-           length (the same two buttons), then the words, then the passphrase. -->
+      <!-- iOS da467165: no "Where are your words from?" list. Name, then the seed length, the words, and
+           the passphrase question; the search finds which wallet type the words belong to. -->
       <div data-import-step="name" hidden>
         <h3 class="create-step-title">Create a name for your wallet</h3>
         <p class="create-step-note">This name is only stored on this device, to tell your wallets apart. No one else will ever see it.</p>
         <input class="field-input create-name-input" data-import-name type="text" value="" maxlength="48" placeholder="Enter account name" autocomplete="off" aria-label="Account name" />
         <div class="modal-actions">
-          <button class="secondary-button" type="button" data-import-name-back>Back</button>
+          <button class="secondary-button" type="button" data-close-import-account>Cancel</button>
           <button class="primary-button" type="button" data-import-name-next disabled>Next</button>
         </div>
       </div>
@@ -1878,6 +1867,7 @@
           <input class="field-input" type="password" data-import-passphrase placeholder="Passphrase" aria-label="Passphrase" autocomplete="off" />
           <button type="button" class="passphrase-eye" data-import-passphrase-toggle aria-label="Show passphrase"></button>
         </span>
+        <div data-import-preview-slot="entry">
         <div class="passphrase-address-preview" data-passphrase-preview="import">
           <p class="passphrase-preview-label">Your chatting address</p>
           <p class="passphrase-preview-address" data-passphrase-preview-address>Checking...</p>
@@ -1891,6 +1881,7 @@
           </div>
           <p class="passphrase-preview-note" data-passphrase-preview-note>This is the account your 12 or 24 words open on their own.</p>
         </div>
+        </div>
         <p class="field-error" data-import-passphrase-error hidden></p>
         <div class="modal-actions passphrase-actions">
           <button class="primary-button full" type="button" data-import-passphrase-submit>Import</button>
@@ -1899,6 +1890,20 @@
           <!-- The entry screen links the explainer too; its Back returns here (iOS 3942a5b7). -->
           <button class="linklike-button full" type="button" data-import-passphrase-entry-explain>What is a passphrase?</button>
           <button class="secondary-button full" type="button" data-import-passphrase-back>Back</button>
+        </div>
+      </div>
+
+      <!-- No passphrase (iOS da467165 foundScreen): the wallet these words were found in. The address
+           preview above moves here while this screen shows. -->
+      <div data-import-passphrase-screen="found" hidden>
+        <h3 class="passphrase-entry-title">Your Account</h3>
+        <p class="field-hint">KaChat checks your words against every kind of Kaspa wallet, so you don't need to know which one they came from.</p>
+        <div data-import-preview-slot="found"></div>
+        <p class="field-error" data-import-found-error hidden></p>
+        <div class="modal-actions passphrase-actions">
+          <button class="primary-button full" type="button" data-import-found-submit>Import</button>
+          <button class="linklike-button full" type="button" data-import-found-skip-search hidden>Skip the Search: Import on Address #0</button>
+          <button class="secondary-button full" type="button" data-import-found-back>Back</button>
         </div>
       </div>
 

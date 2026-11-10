@@ -1,31 +1,59 @@
-// An import's funded-address search and rediscovered groups (KaChat-iPhone 836b62bc, 7916f5cd), and
+// An import's search across wallet types and rediscovered groups (KaChat-iPhone da467165, 7916f5cd), and
 // what Backup status does on an import. No network. Run from the repo root:
 //
 //   node tools/test-account-import.mjs
 
 import assert from "node:assert/strict";
-import { IMPORT_ADDRESS_SEARCH_DEPTH, foundChattingAddresses, firstFundedAddress, rediscoveredGroupIsRead, pastedWordsInvalidMessage } from "../ui/account-import.js";
+import { rankImportAccounts, importChoiceKey, visibleImportRows, importFundsHint, rediscoveredGroupIsRead, pastedWordsInvalidMessage } from "../ui/account-import.js";
+import { WALLET_SOURCE_FAMILIES, sourceFamilyImportSearchDepth, sourceFamilyDisplayName, sourceFamilySupportsIndexScan } from "../engine/wallet.js";
 import { createAccountBackupStatus, addCalendarMonths, HYGIENE_MONTHS } from "../ui/account-backup-status.js";
 
-assert.equal(IMPORT_ADDRESS_SEARCH_DEPTH, 50);
+// Every wallet type, in iOS's order (WalletSourceFamily.allCases), and how deep each is searched.
+assert.deepEqual(WALLET_SOURCE_FAMILIES, ["kaspaStandard", "kaspaLegacy972", "chainge", "oneKey"]);
+assert.deepEqual(WALLET_SOURCE_FAMILIES.map(sourceFamilyImportSearchDepth), [50, 20, 1, 20]);
+assert.deepEqual(WALLET_SOURCE_FAMILIES.map(sourceFamilyDisplayName), ["Standard Kaspa Wallet", "KDX / Kaspanet Web", "Chainge", "OneKey"]);
+assert.deepEqual(WALLET_SOURCE_FAMILIES.map(sourceFamilySupportsIndexScan), [true, true, false, true]);
 
-const derived = [{ index: 7, address: "g" }, { index: 0, address: "a" }, { index: 3, address: "d" }, { index: 1, address: "b" }];
+const candidates = [
+  { family: "kaspaStandard", index: 0, address: "s0" }, { family: "kaspaStandard", index: 3, address: "s3" },
+  { family: "kaspaStandard", index: 7, address: "s7" }, { family: "kaspaLegacy972", index: 0, address: "k0" },
+  { family: "kaspaLegacy972", index: 2, address: "k2" }, { family: "chainge", index: 0, address: "c0" },
+  { family: "oneKey", index: 0, address: "o0" },
+];
+const rank = (balances, history = []) => rankImportAccounts(candidates, new Map(balances), new Set(history), WALLET_SOURCE_FAMILIES);
 
-// Nothing funded: only #0, which is what gets imported.
-let found = foundChattingAddresses(derived, new Map());
-assert.deepEqual(found, [{ index: 0, address: "a", sompi: 0 }]);
-assert.equal(firstFundedAddress(found).index, 0);
+// Nothing has funds or history: empty, and Import uses the standard wallet's #0.
+assert.deepEqual(rank([]), []);
 
-// #0 is always listed, then the funded ones in index order; the first with funds is picked.
-found = foundChattingAddresses(derived, new Map([["g", 700], ["d", 300]]));
-assert.deepEqual(found.map((entry) => entry.index), [0, 3, 7]);
-assert.equal(firstFundedAddress(found).index, 3);
+// Only addresses with funds or history are kept; the type holding the most comes first, each
+// type's addresses in index order.
+let found = rank([["s7", 100], ["k2", 500], ["k0", 1]]);
+assert.deepEqual(found.map(importChoiceKey), ["kaspaLegacy972-0", "kaspaLegacy972-2", "kaspaStandard-7"]);
+assert.equal(found[0].sompi, 1);
 
-// #0 holding funds wins, even with others.
-found = foundChattingAddresses(derived, new Map([["a", 5], ["g", 700]]));
-assert.equal(firstFundedAddress(found).index, 0);
+// History alone counts (an emptied wallet, a chat identity), shown without a balance.
+found = rank([], ["o0"]);
+assert.deepEqual(found, [{ family: "oneKey", index: 0, address: "o0", sompi: 0, hasHistory: true }]);
 
-assert.equal(firstFundedAddress([]), null);
+// A tie goes to the earlier type, so the standard wallet wins when nothing tells them apart.
+found = rank([], ["c0", "s0"]);
+assert.deepEqual(found.map(importChoiceKey), ["kaspaStandard-0", "chainge-0"]);
+found = rank([["s3", 10], ["c0", 10]]);
+assert.deepEqual(found.map(importChoiceKey), ["kaspaStandard-3", "chainge-0"]);
+
+// See Every Wallet Type adds each type's #0 not already found, after what was found.
+const every = WALLET_SOURCE_FAMILIES.map((family) => ({ family, index: 0, address: `${family}#0`, sompi: 0, hasHistory: false }));
+found = rank([["s3", 10]]);
+assert.deepEqual(visibleImportRows(found, every, false).map(importChoiceKey), ["kaspaStandard-3"]);
+assert.deepEqual(visibleImportRows(found, every, true).map(importChoiceKey), ["kaspaStandard-3", "kaspaStandard-0", "kaspaLegacy972-0", "chainge-0", "oneKey-0"]);
+assert.deepEqual(visibleImportRows(rank([], ["c0"]), every, true).map(importChoiceKey), ["chainge-0", "kaspaStandard-0", "kaspaLegacy972-0", "oneKey-0"]);
+assert.equal(importChoiceKey({}), "kaspaStandard-0");
+
+// The line under the balance (iOS fundsHint).
+assert.equal(importFundsHint({ sompi: 5, hasHistory: false, passphrase: "" }).tone, "funds");
+assert.match(importFundsHint({ sompi: 0, hasHistory: true, passphrase: "x" }).text, /has history, so this looks like the right account/);
+assert.deepEqual(importFundsHint({ sompi: 0, hasHistory: false, passphrase: "" }), { tone: "muted", text: "No funds or history on this address." });
+assert.equal(importFundsHint({ sompi: 0, hasHistory: false, passphrase: "x" }).tone, "warn");
 
 // Before the import: history. After: news. Unknown times change nothing.
 assert.equal(rediscoveredGroupIsRead({ inviteAtMs: 100, importedAtMs: 200 }), true);

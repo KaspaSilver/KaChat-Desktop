@@ -116,13 +116,16 @@ test("the funds search lets go after 12 s, and a later answer doesn't count", as
 test("the import screen: Import on #0 after the time, Search Again, and Skip while it searches", () => {
   const preview = between("function schedulePassphrasePreview(", "// The balance is only the chatting address's");
   assert.match(preview, /raceImportSearch\(/);
-  assert.match(preview, /if \(outcome\.timedOut\) \{\n\s*importFoundAddresses = \[\];\n\s*importChattingIndex = 0;/);
+  assert.match(preview, /if \(outcome\.timedOut\) \{\n\s*importFoundAddresses = \[\];\n\s*importChoice = defaultImportChoice\(\);/);
   assert.match(preview, /setImportSearchIncomplete\(nodes, true\)/);
   assert.match(html, /data-passphrase-search-incomplete hidden>[\s\S]*didn't finish, so Import uses address #0\.[\s\S]*data-passphrase-search-again>Search Again</);
   assert.match(html, /data-import-passphrase-skip-search hidden>Skip the Search: Import on Address #0</);
   const enable = between("function updateImportPassphraseSubmitEnabled(", "importPassphraseInput?.addEventListener(\"input\"");
   assert.match(enable, /importSkipSearchBtn\.hidden = !finding/);
-  assert.match(enable, /importChattingIndex = 0;\n\s*void commitImport\(pass\);/);
+  assert.match(enable, /importChoice = defaultImportChoice\(\);\n\s*void commitImport\(pass\);/);
+  // Your Account (No to the passphrase) waits for the search too, with its own Skip.
+  assert.match(enable, /importFoundSubmitBtn\.disabled = searching/);
+  assert.match(html, /data-import-found-skip-search hidden>Skip the Search: Import on Address #0</);
 });
 
 // --- Every removal path erases the same data (iOS d23e6f7a / KaPay 1652437 removeLocalData) -----

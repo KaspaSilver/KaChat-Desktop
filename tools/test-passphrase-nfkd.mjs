@@ -74,6 +74,7 @@ const oldCodeAddress = (passphrase, path) => addressOf(oldCodeKeyAt(passphrase, 
 const IDENTITY_0 = "m/44'/111111'/0'/0/0";
 const SPENDING = (i) => `m/44'/111111'/1'/0/${i}`;
 const LEGACY972_0 = "m/44'/972/0'/0'/0'";
+const CHAINGE_0 = "m/44'/111111'/0'/0'"; // iOS identityBaseNode .chainge + its single 0' leaf
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -141,7 +142,7 @@ test("importMnemonic: a \"raw\" account still derives the old address", () => {
 });
 
 test("importMnemonicWithFamily: all families, both forms, against the reference", async () => {
-  for (const [family, path] of [["kaspaStandard", IDENTITY_0], ["kaspaLegacy972", LEGACY972_0], ["oneKey", IDENTITY_0]]) {
+  for (const [family, path] of [["kaspaStandard", IDENTITY_0], ["kaspaLegacy972", LEGACY972_0], ["chainge", CHAINGE_0], ["oneKey", IDENTITY_0]]) {
     const tweak = async (k) => (family === "oneKey" ? oneKeyTweakPrivateKeyHex(kaspa, k) : k);
     const nfc = await importMnemonicWithFamily(kaspa, PHRASE, GRUSSE_NFC, { family });
     const nfkd = await importMnemonicWithFamily(kaspa, PHRASE, GRUSSE_NFC.normalize("NFKD"), { family });
@@ -155,6 +156,18 @@ test("importMnemonicWithFamily: all families, both forms, against the reference"
     assert.equal(asciiStd.address, asciiRaw.address, `${family}: ASCII same either way`);
     assert.equal(asciiStd.privateKeyHex, await tweak(oldCodeKeyAt("TREZOR", path)), `${family}: ASCII unchanged from old code`);
   }
+});
+
+test("Chainge has a single address (iOS supportsIndexScan)", async () => {
+  const range = await deriveIdentityAddressRange(kaspa, PHRASE, "", { family: "chainge", start: 0, count: 50 });
+  assert.equal(range.length, 1);
+  assert.equal(range[0].index, 0);
+  assert.equal(range[0].address, (await importMnemonicWithFamily(kaspa, PHRASE, "", { family: "chainge" })).address);
+  assert.deepEqual(await deriveIdentityAddressRange(kaspa, PHRASE, "", { family: "chainge", start: 50, count: 50 }), []);
+  await assert.rejects(importMnemonicWithFamily(kaspa, PHRASE, "", { family: "chainge", index: 1 }), /single address/);
+  // and it is not any other family's #0
+  const others = await Promise.all(["kaspaStandard", "kaspaLegacy972", "oneKey"].map((family) => importMnemonicWithFamily(kaspa, PHRASE, "", { family })));
+  assert.ok(others.every((w) => w.address !== range[0].address));
 });
 
 test("deriveIdentityAddressRange: standard and raw, against single derivations", async () => {

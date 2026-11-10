@@ -1,10 +1,6 @@
 // What an import works out before and after it lands, without a DOM, for
 // tools/test-account-import.mjs.
 
-/** The same depth as one page of the chatting address picker (iOS 836b62bc
- *  PassphraseAddressPreview.searchDepth). */
-export const IMPORT_ADDRESS_SEARCH_DEPTH = 50;
-
 /** How long Import waits for that search before letting go and importing onto #0 (KaPay 1652437,
  *  KaPlay 4922804, KaPost 33095ac PassphraseAddressPreview.searchTimeoutNanoseconds). */
 export const IMPORT_ADDRESS_SEARCH_TIMEOUT_MS = 12_000;
@@ -22,21 +18,55 @@ export function raceImportSearch(search, timeoutMs = IMPORT_ADDRESS_SEARCH_TIMEO
 }
 
 /**
- * Address #0 plus every other address on the identity chain holding funds, in index order
- * (iOS WalletManager.findChattingAddresses).
- * @param {{ index: number, address: string }[]} derived
+ * Import's search (iOS da467165 WalletManager.findImportAccounts): of every wallet type's addresses,
+ * the ones with funds, plus any with transaction history (a chat identity or an emptied wallet holds
+ * no coins). The wallet type holding the most comes first, each type's addresses in index order, so
+ * the first entry is the likeliest account. Ties go to the earlier type in `familyOrder`, so the
+ * standard wallet wins when nothing tells them apart. Empty when nothing has any activity.
+ * @param {{ family: string, index: number, address: string }[]} candidates
  * @param {Map<string, number>} balanceByAddress in sompi
+ * @param {Set<string>} withHistory addresses with at least one transaction
+ * @param {string[]} familyOrder
  */
-export function foundChattingAddresses(derived, balanceByAddress) {
-  return [...derived]
-    .sort((a, b) => a.index - b.index)
-    .map(({ index, address }) => ({ index, address, sompi: Math.max(0, Number(balanceByAddress.get(address)) || 0) }))
-    .filter((entry) => entry.index === 0 || entry.sompi > 0);
+export function rankImportAccounts(candidates, balanceByAddress, withHistory, familyOrder) {
+  const totals = new Map();
+  const active = [];
+  for (const { family, index, address } of candidates) {
+    const sompi = Math.max(0, Number(balanceByAddress.get(address)) || 0);
+    const hasHistory = withHistory.has(address);
+    if (sompi <= 0 && !hasHistory) continue;
+    totals.set(family, (totals.get(family) || 0) + sompi);
+    active.push({ family, index, address, sompi, hasHistory });
+  }
+  const rank = (family) => { const at = familyOrder.indexOf(family); return at < 0 ? familyOrder.length : at; };
+  return active.sort((lhs, rhs) => {
+    if (lhs.family === rhs.family) return lhs.index - rhs.index;
+    const left = totals.get(lhs.family) || 0;
+    const right = totals.get(rhs.family) || 0;
+    if (left !== right) return right - left;
+    return rank(lhs.family) - rank(rhs.family);
+  });
 }
 
-/** The first address with funds, or the first address when none has any. Null for no addresses. */
-export function firstFundedAddress(found) {
-  return found.find((entry) => entry.sompi > 0) || found[0] || null;
+/** Which wallet type and address an entry is, for comparing a pick (iOS ImportAccountChoice). */
+export function importChoiceKey({ family = "kaspaStandard", index = 0 } = {}) {
+  return `${family}-${Math.max(0, Math.floor(Number(index) || 0))}`;
+}
+
+/** The rows the found list shows: what the search found, then, once See Every Wallet Type is
+ *  open, each type's address #0 that isn't already there (iOS visibleAddressRows). */
+export function visibleImportRows(found, everyWalletType, showsEveryWalletType) {
+  if (!showsEveryWalletType) return found;
+  const seen = new Set(found.map(importChoiceKey));
+  return [...found, ...everyWalletType.filter((entry) => !seen.has(importChoiceKey(entry)))];
+}
+
+/** The line under the balance on import (iOS fundsHint): what this address suggests. */
+export function importFundsHint({ sompi, hasHistory, passphrase }) {
+  if (sompi > 0) return { tone: "funds", text: "This address holds funds, so this looks like the right account." };
+  if (hasHistory) return { tone: "funds", text: "This address has history, so this looks like the right account." };
+  if (!passphrase) return { tone: "muted", text: "No funds or history on this address." };
+  return { tone: "warn", text: "No funds on this address. If you expected funds here, check your passphrase." };
 }
 
 /**
