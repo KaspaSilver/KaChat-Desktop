@@ -13259,7 +13259,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 279;
+const APP_BUILD = 280;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -19213,10 +19213,13 @@ function renderMessages(conversationEntry) {
     // A failed payment is not retried from the thread (iOS): it is sent again from Send KAS.
     const retryable = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED
       && message.messageType !== "payment" && !bubble.classList.contains("has-payment-card") && chessRetryFits(conversationEntry, message);
-    // A note's parts show one status; Retry resends only the failed ones, in order (iOS).
-    const deliveryIcon = partCluster
-      ? createDeliveryStatusIcon({ ...message, status: oneToOneClusterStatus(partCluster) }, {
-        onRetry: message.direction === "outgoing" && partCluster.status === "failed" ? () => retryOneToOneParts(conversationEntry.id, partCluster) : null,
+    // A note's parts show one status; Retry resends only the failed ones, in order (iOS). Looked up
+    // here, not taken from the body's branch above: that one is block-scoped, and reading it here
+    // threw for every plain message, leaving the whole 1:1 thread empty (Build 278).
+    const statusCluster = partsInfo.clusters.get(message.id);
+    const deliveryIcon = statusCluster
+      ? createDeliveryStatusIcon({ ...message, status: oneToOneClusterStatus(statusCluster) }, {
+        onRetry: message.direction === "outgoing" && statusCluster.status === "failed" ? () => retryOneToOneParts(conversationEntry.id, statusCluster) : null,
       })
       : createDeliveryStatusIcon(message, { onRetry: retryable ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null });
     const typeCapsule = isPendingHandshakeRequest ? null : messageTypeCapsule(message, { hasPaymentCard: bubble.classList.contains("has-payment-card") });

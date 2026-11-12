@@ -15019,8 +15019,11 @@ html.keyboard-open .chat-funding-gate { gap: 8px; margin-top: 8px; padding: 12px
   box-shadow: 0 4px 16px var(--shadow, rgba(0,0,0,.45));
   opacity: 1;
 }
-.conversation-header .back-button { font-size: 0; color: var(--text); }
-.conversation-header .back-button::before { content: ""; width: 12px; height: 12px; border-left: 2.6px solid currentColor; border-bottom: 2.6px solid currentColor; transform: translateX(2px) rotate(45deg); border-radius: 1px; }
+/* Flex, not grid: the button's hidden "‹" text was a second grid row, which pushed the chevron
+   ~8px above the circle's middle. The chevron is the left half of a turned square, so it moves
+   4px right to look centred. */
+.conversation-header .back-button { font-size: 0; color: var(--text); display: flex; align-items: center; justify-content: center; }
+.conversation-header .back-button::before { content: ""; flex: 0 0 auto; width: 12px; height: 12px; border-left: 2.6px solid currentColor; border-bottom: 2.6px solid currentColor; transform: translateX(4px) rotate(45deg); border-radius: 1px; }
 .conversation-header .conversation-call-button { color: var(--kaspa-ink); }
 .conversation-header .conversation-call-button svg { width: 21px; height: 21px; }
 .conversation-header .back-button:hover,
