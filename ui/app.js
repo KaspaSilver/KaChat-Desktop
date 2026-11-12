@@ -13283,7 +13283,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 284;
+const APP_BUILD = 285;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -28519,6 +28519,9 @@ function autoGrowComposer() {
   if (!composerInputField) return;
   composerInputField.style.height = "auto";
   composerInputField.style.height = `${Math.min(composerInputField.scrollHeight, 132)}px`;
+  // A scroll bar only once the text is taller than the box can grow: Windows and Linux draw one,
+  // arrows and all, on a box that has nothing to scroll (owner, 2026-11-12).
+  composerInputField.style.overflowY = composerInputField.scrollHeight > 132 ? "auto" : "hidden";
 }
 composerInputField?.addEventListener("input", autoGrowComposer);
 wireComposerPayPreview(document.querySelector("[data-composer-pay-preview]"), composerInputField, () => scheduleFeeEstimate());
@@ -35762,6 +35765,7 @@ function autoGrowGroupComposer() {
   if (!groupComposerInput) return;
   groupComposerInput.style.height = "auto";
   groupComposerInput.style.height = `${Math.min(groupComposerInput.scrollHeight, 132)}px`;
+  groupComposerInput.style.overflowY = groupComposerInput.scrollHeight > 132 ? "auto" : "hidden";
 }
 
 function startGroupReply(message) {

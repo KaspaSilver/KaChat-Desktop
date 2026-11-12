@@ -15463,3 +15463,7 @@ body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--bac
   body .sidebar-tabbar .sidebar-tab > span:last-child,
   body.chats-tab .sidebar-tabbar .sidebar-tab > span:last-child { font-size: 10.5px; max-width: 100%; letter-spacing: -0.1px; }
 }
+/* Message boxes show no scroll bar until their text outgrows them (owner, 2026-11-12): Windows and
+   Linux drew one, arrows and all, on an empty box. The auto-grow code turns it back on past the
+   box's tallest. */
+textarea.composer-input { overflow-y: hidden; }

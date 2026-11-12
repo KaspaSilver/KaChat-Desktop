@@ -3258,6 +3258,7 @@ function autoGrowReply() {
   if (!replyInput) return;
   replyInput.style.height = "auto";
   replyInput.style.height = `${Math.min(replyInput.scrollHeight, REPLY_MAX_HEIGHT_PX)}px`;
+  replyInput.style.overflowY = replyInput.scrollHeight > REPLY_MAX_HEIGHT_PX ? "auto" : "hidden";
 }
 
 // The zero-balance gate lives on the create-post button (iOS createPostButton) and on the
