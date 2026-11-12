@@ -1056,7 +1056,7 @@ test("removing an account revokes the app password its stored login holds; a sea
   storeAccount(WALLET_B, { autoBackup: false, appPassword: undefined, appPasswordSealed: { v: 1, iv: "aXY=", ct: "Y3Q=" } });
   startModule();
   const logins = nextcloud.storedNextcloudLoginsFor(WALLET_A);
-  assert.deepEqual(logins, [{ server: "https://cloud.example.test", username: "sam", appPassword: "app-pass" }]);
+  assert.deepEqual(logins, [{ server: "https://cloud.example.test", username: "sam", appPassword: "app-pass", direct: false }]);
   assert.deepEqual(nextcloud.storedNextcloudLoginsFor(WALLET_B), [], "no password to revoke with");
   assert.deepEqual(nextcloud.storedNextcloudLoginsFor(""), []);
   dav.revokes = [];

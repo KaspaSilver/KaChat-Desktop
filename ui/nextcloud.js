@@ -111,15 +111,25 @@ let pickerSharingPath = null;
 // State
 // ---------------------------------------------------------------------------
 
-// Off on testnet, and on a site KaChat hosts: there every request, the app password included,
-// would pass through that site's relay (see nextcloud-availability.js). Off means exactly what
-// testnet always meant here: nothing syncs, restores, uploads or rings, and every option hides as
-// if disconnected.
-const NC_OFF = nextcloudOffReason({ testnet: IS_TESTNET, hostname: typeof location !== "undefined" ? location.hostname : "" });
+// Where this page runs (nextcloud-availability.js): testnet, a site KaChat hosts, or a copy the
+// person runs themselves.
+const NC_SITE = nextcloudOffReason({ testnet: IS_TESTNET, hostname: typeof location !== "undefined" ? location.hostname : "" });
+// Off on testnet only. Off means nothing syncs, restores, uploads or rings, and every option hides
+// as if disconnected.
+const NC_OFF = NC_SITE === "testnet" ? "testnet" : null;
+// On a site KaChat hosts (desktop.kachat.app) the relay is a server someone else runs, so the
+// login never goes through it (owner, 2026-11-12): KaChat talks to the person's Nextcloud
+// directly, which works when their Nextcloud allows this site (CORS - Kaspa Quick Start sets that
+// up). Nothing on this page ever reaches Nextcloud through the relay.
+const DIRECT_ONLY = NC_SITE === "hosted";
 
-/** Why Nextcloud is off on this page ("testnet" | "hosted"), or null when it can be used. */
+/** Why Nextcloud is off on this page ("testnet"), or null when it can be used. */
 export function nextcloudUnavailableReason() {
   return NC_OFF;
+}
+/** True on a site KaChat hosts: Nextcloud only ever directly, never through the site's relay. */
+export function nextcloudDirectOnly() {
+  return DIRECT_ONLY;
 }
 
 function loadState() {
@@ -134,7 +144,18 @@ function loadState() {
   // Locked (or a sealed password that does not open): nothing may run, and nothing is ever sent
   // without the real password, so `nc` stays null; Settings shows the connection from ncLocked.
   if (account && (account.locked || !account.appPassword)) { nc = null; ncLocked = account; return; }
+  // A login saved on this site back when it went through the relay is never used here: only one
+  // connected directly is. Settings offers to remove it, or to connect again directly.
+  if (account && DIRECT_ONLY && !account.direct) { nc = null; return; }
   nc = account;
+}
+/** A login saved on this site before connections went direct, which is never used here. */
+function storedRelayLoginOnHostedSite() {
+  if (!DIRECT_ONLY || nc) return false;
+  try {
+    const raw = JSON.parse(localStorage.getItem(deps.accountScopedKey(NC_KEY)) || "null");
+    return Boolean(raw && raw.server && !raw.direct);
+  } catch { return false; }
 }
 
 /** Writes the connection (the app password sealed when an app password is set). A write the
@@ -183,12 +204,16 @@ function authHeader(account = nc) {
   return "Basic " + btoa(`${account.username}:${account.appPassword}`);
 }
 
-/** All API traffic goes through the dev server's same-origin /nc-proxy passthrough (see
- *  vite.config.mjs) — the browser never makes a cross-origin request, so stock Nextcloud's
- *  missing CORS headers on WebDAV/OCS no longer matter. Public /s/TOKEN share links are NOT
- *  proxied; recipients open those on the real server. */
-function apiBase(server = nc?.server) {
-  return `${import.meta.env.BASE_URL}nc-proxy/${encodeURIComponent(String(server || "").replace(/\/+$/, ""))}`;
+/** The base URL requests to this Nextcloud go to. Directly to the server when the connection is
+ *  direct (always on a site KaChat hosts): the server's own CORS headers let this page read the
+ *  answers, and nothing passes through KaChat's relay. Otherwise through this copy's same-origin
+ *  /nc-proxy passthrough (vite.config.mjs), for a stock Nextcloud that sends no CORS headers - only
+ *  on a copy the person runs themselves, where that relay is their own machine. Public /s/TOKEN
+ *  share links are NOT proxied; recipients open those on the real server. */
+function apiBase(server = nc?.server, direct = nc?.direct) {
+  const clean = String(server || "").replace(/\/+$/, "");
+  if (DIRECT_ONLY || direct) return clean;
+  return `${import.meta.env.BASE_URL}nc-proxy/${encodeURIComponent(clean)}`;
 }
 
 /** fetch() for an apiBase() URL. Every relayed call names the Nextcloud it is for in
@@ -198,10 +223,18 @@ function ncFetch(url, init = {}) {
   const headers = new Headers(init.headers || {});
   const encoded = /nc-proxy\/([^/?#]+)/.exec(String(url))?.[1];
   try { if (encoded) headers.set("x-kachat-nextcloud-origin", new URL(decodeURIComponent(encoded)).origin); } catch { /* not a relay URL */ }
+  // Direct: the app password in the Authorization header is the only credential. No cookies go
+  // with it (a Nextcloud session cookie would also need the CSRF token, and isn't ours to send).
+  if (!encoded) return fetch(url, { ...init, headers, mode: "cors", credentials: "omit" });
   return fetch(url, { ...init, headers });
 }
 
+/** What a direct connection that failed at the network level most likely means. */
+const DIRECT_REFUSED_MESSAGE = "KaChat couldn't connect to this Nextcloud directly. Check the server address. If it's right, the server doesn't allow this website yet: its admin needs to allow https://desktop.kachat.app (Kaspa Quick Start's Nextcloud does this for you). Your login never goes through KaChat's servers.";
+
 function corsHint(error) {
+  // Direct (a site KaChat hosts): a TypeError is the server unreachable or not allowing this site.
+  if (error instanceof TypeError && DIRECT_ONLY) return DIRECT_REFUSED_MESSAGE;
   // With the same-origin proxy a TypeError means the dev server itself (or the network) is
   // unreachable, not CORS.
   if (error instanceof TypeError) {
@@ -224,8 +257,21 @@ async function tooManyRequestsText(response) {
     : "Nextcloud is slowing down sign-ins from this connection after too many attempts. Wait a few minutes, check the app password, and try again.";
 }
 
-async function verifyCredentials(server, username, appPassword) {
-  const response = await ncFetch(`${apiBase(server)}/ocs/v2.php/cloud/user?format=json`, {
+/** Connects the way this page may: directly first (the only way on a site KaChat hosts), else - on a
+ *  copy the person runs themselves - through its own relay. `{ userId, direct }`. A direct attempt
+ *  that the server answered (a wrong password, say) is that answer; only one that never got an
+ *  answer (unreachable, or no CORS for this page) falls back to the relay. */
+async function connectRoute(server, username, appPassword) {
+  try {
+    return { userId: await verifyCredentials(server, username, appPassword, { direct: true }), direct: true };
+  } catch (error) {
+    if (!(error instanceof TypeError) || DIRECT_ONLY) throw error;
+  }
+  return { userId: await verifyCredentials(server, username, appPassword, { direct: false }), direct: false };
+}
+
+async function verifyCredentials(server, username, appPassword, { direct = nc?.direct } = {}) {
+  const response = await ncFetch(`${apiBase(server, direct)}/ocs/v2.php/cloud/user?format=json`, {
     headers: {
       Authorization: "Basic " + btoa(`${username}:${appPassword}`),
       "OCS-APIRequest": "true",
@@ -250,7 +296,7 @@ function davUser() {
 async function ensureDavUser() {
   if (!nc || nc.userId) return;
   try {
-    const id = await verifyCredentials(nc.server, nc.username, nc.appPassword);
+    const id = await verifyCredentials(nc.server, nc.username, nc.appPassword, { direct: nc.direct });
     if (id) { nc.userId = id; saveState(); }
   } catch { /* the request that follows reports its own error */ }
 }
@@ -796,7 +842,7 @@ function noteRejectedLogin(error) {
 export async function revokeAppPassword(account) {
   if (!account?.server || !account?.appPassword) return;
   try {
-    const response = await ncFetch(`${apiBase(account.server)}/ocs/v2.php/core/apppassword`, {
+    const response = await ncFetch(`${apiBase(account.server, account.direct)}/ocs/v2.php/core/apppassword`, {
       method: "DELETE",
       headers: { Authorization: authHeader(account), "OCS-APIRequest": "true" },
     });
@@ -812,11 +858,12 @@ export async function revokeAppPassword(account) {
  * data is erased, so every removal path - Settings' Delete Account, the sign-in screen's Delete -
  * can revoke the app password, signed in or not, as Disconnect does. Only a login whose password
  * can be read: in plaintext, or sealed with a vault that is open now; a sealed one whose account's
- * password wasn't entered is erased without a revoke. None on a site KaChat hosts, where the
- * request would pass through that site's relay.
+ * password wasn't entered is erased without a revoke. On a site KaChat hosts the revoke goes
+ * straight to the server (never the relay), so a login whose server doesn't allow this site is
+ * erased without one.
  */
 export function storedNextcloudLoginsFor(address) {
-  if (!deps || NC_OFF === "hosted" || !address) return [];
+  if (!deps || NC_OFF || !address) return [];
   const seen = new Set();
   const out = [];
   for (const encoded of new Set([address, reencodeAddress(address, "kaspa"), reencodeAddress(address, "kaspatest")].filter(Boolean))) {
@@ -826,7 +873,7 @@ export function storedNextcloudLoginsFor(address) {
     const id = `${account.server}\u0000${account.username}\u0000${account.appPassword}`;
     if (seen.has(id)) continue;
     seen.add(id);
-    out.push({ server: account.server, username: account.username, appPassword: account.appPassword });
+    out.push({ server: account.server, username: account.username, appPassword: account.appPassword, direct: Boolean(account.direct) });
   }
   return out;
 }
@@ -1353,35 +1400,6 @@ function refreshConnectFormState() {
 
 function renderSettings() {
   if (!settingsEl) return;
-  if (NC_OFF === "hosted") {
-    // A login saved here before Nextcloud moved to self-run copies is never used again; it can be
-    // removed from this browser.
-    const stored = Boolean(localStorage.getItem(deps.accountScopedKey(NC_KEY)));
-    settingsEl.innerHTML = `
-      <div class="settings-list-card nc-hosted-off">
-        <div class="settings-page-form">
-          <strong>Nextcloud works when you run KaChat and Nextcloud with <a href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer">Kaspa Quick Start</a>.</strong>
-          <p class="nc-hosted-copy">On this website your Nextcloud login would pass through the website's server. To keep it between you and your Nextcloud, install <a href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer">Kaspa Quick Start</a>, switch on KaChat-Desktop and Nextcloud in its control panel, and open KaChat from the address it gives you (like http://localhost:5173). Nextcloud is available there.</p>
-        </div>
-        <a class="settings-list-row" href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer" data-nc-quick-start>
-          <span class="settings-row-copy"><strong>Get Kaspa Quick Start</strong></span>
-          <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
-        </a>
-      </div>
-      <p class="settings-group-footer">Backups, sync, media and calls through Nextcloud are off on this website. Files friends share with you still open, straight from their Nextcloud.</p>
-      ${stored ? `<div class="settings-list-card danger-list-card">
-        <button class="settings-list-row danger-row" type="button" data-nc-forget-hosted><span class="settings-row-copy"><strong>Remove Saved Nextcloud Login</strong></span></button>
-      </div>
-      <p class="settings-group-footer">A Nextcloud login saved in this browser earlier is no longer used. Removing it deletes it from this browser. Nothing changes on your Nextcloud server.</p>` : ""}`;
-    settingsEl.querySelector("[data-nc-forget-hosted]")?.addEventListener("click", async () => {
-      const ok = await confirmDialog({ title: "Remove Saved Login", message: "The Nextcloud login saved in this browser is deleted. Nothing changes on your Nextcloud server.", confirmLabel: "Remove", destructive: true });
-      if (!ok) return;
-      clearStoredState();
-      renderSettings();
-    });
-    updateComposerButton();
-    return;
-  }
   if (NC_OFF === "testnet") {
     settingsEl.innerHTML = `
       <div class="settings-list-card nc-testnet-off">
@@ -1411,6 +1429,7 @@ function renderSettings() {
     return;
   }
   if (!nc) {
+    const legacy = storedRelayLoginOnHostedSite();
     settingsEl.innerHTML = `
       <p class="settings-group-label">Server</p>
       <div class="settings-list-card nc-connect-card">
@@ -1420,7 +1439,18 @@ function renderSettings() {
         <label class="field-label">App password<span class="password-field-wrap"><input class="field-input" type="password" data-nc-password autocomplete="off" /><button class="password-eye-btn" type="button" data-eye-toggle aria-label="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.3 12.3C4.4 7.7 8 5.2 12 5.2s7.6 2.5 9.7 7.1a.9.9 0 0 1 0 .8c-2.1 4.6-5.7 7.1-9.7 7.1s-7.6-2.5-9.7-7.1a.9.9 0 0 1 0-.8Z"/><circle cx="12" cy="12.7" r="3.1"/></svg></button></span></label>
         <p class="field-error" data-nc-connect-error hidden></p>
         <button class="primary-button full" type="button" data-nc-connect disabled>Connect</button>
-      </div>`;
+      </div>
+      ${DIRECT_ONLY ? `<p class="settings-group-footer">On this website KaChat connects straight to your Nextcloud, so your login never passes through KaChat's servers. Your Nextcloud has to allow https://desktop.kachat.app; <a href="${KASPA_QUICK_START_URL}" target="_blank" rel="noopener noreferrer">Kaspa Quick Start</a>'s Nextcloud does this for you.</p>` : ""}
+      ${legacy ? `<div class="settings-list-card danger-list-card">
+        <button class="settings-list-row danger-row" type="button" data-nc-forget-hosted><span class="settings-row-copy"><strong>Remove Saved Nextcloud Login</strong></span></button>
+      </div>
+      <p class="settings-group-footer">A Nextcloud login saved in this browser earlier went through KaChat's relay, so it isn't used any more. Remove it, then connect again above. Nothing changes on your Nextcloud server.</p>` : ""}`;
+    settingsEl.querySelector("[data-nc-forget-hosted]")?.addEventListener("click", async () => {
+      const ok = await confirmDialog({ title: "Remove Saved Login", message: "The Nextcloud login saved in this browser is deleted. Nothing changes on your Nextcloud server.", confirmLabel: "Remove", destructive: true });
+      if (!ok) return;
+      clearStoredState();
+      renderSettings();
+    });
     updateComposerButton();
     return;
   }
@@ -1432,6 +1462,7 @@ function renderSettings() {
     <div class="settings-list-card">
       <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Server</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(host)}</span></div>
       <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Username</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.username)}</span></div>
+      <div class="settings-list-row settings-info-row"><span class="settings-row-copy"><strong>Connection</strong></span><span class="settings-dropdown-caption">${nc.direct || DIRECT_ONLY ? "Direct" : "Through this computer"}</span></div>
     </div>
     <div class="settings-list-card">
       <button class="settings-list-row" type="button" data-nc-pick-start><span class="settings-row-copy"><strong>Start Folder</strong></span><span class="settings-dropdown-caption">${deps.escapeHtml(nc.startFolder || "All Files")}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
@@ -1784,10 +1815,10 @@ function wireSettings() {
       button.disabled = true;
       button.textContent = "Connecting…";
       try {
-        const userId = await verifyCredentials(server, username, appPassword);
+        const { userId, direct } = await connectRoute(server, username, appPassword);
         // Automatic Sync starts off (the owner's call, 2026-10-13; iOS bde94b0 switched it on at
         // connect): the person picks the folder first.
-        nc = { server, username, userId: userId || null, appPassword, startFolder: null, backupFolder: null, autoBackup: false, lastAutoBackup: 0 };
+        nc = { server, username, userId: userId || null, appPassword, direct, startFolder: null, backupFolder: null, autoBackup: false, lastAutoBackup: 0 };
         try { saveState({ strict: true }); }
         catch (error) { nc = null; throw error; } // locked meanwhile: not connected, nothing stored
         ncLocked = null;

@@ -80,7 +80,7 @@ import {
   createStepFlow, createFeeEditorStep, keypadHtml, wireKeypad, applyKeypadKey, stepChipHtml, stepQuestionHtml, reviewRowHtml, reviewAddressHtml,
 } from "./send-steps.js";
 import "./send-steps.css";
-import { initNextcloud, noteContactActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, deleteRemoteNextcloudBackup, nextcloudUnavailableReason, storedNextcloudLoginsFor, revokeNextcloudLogins } from "./nextcloud.js";
+import { initNextcloud, noteContactActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, deleteRemoteNextcloudBackup, nextcloudUnavailableReason, nextcloudDirectOnly, storedNextcloudLoginsFor, revokeNextcloudLogins } from "./nextcloud.js";
 // Kaspa Hub > ChangeNOW Swap (iOS SwapView), back on Desktop (owner, 2026-10-22).
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope, openEncryptedArchive } from "./backup-crypto.js";
@@ -3426,7 +3426,7 @@ async function nextcloudShareInfo(downloadUrl) {
   // On a site KaChat hosts the relay is that site's server, so the share link never goes through
   // it: no answer here, and the media below loads straight from the sender's Nextcloud (a media
   // element needs no CORS). Only a removed share then shows as a file card, not "no longer shared".
-  if (nextcloudUnavailableReason() === "hosted") return null;
+  if (nextcloudDirectOnly()) return null;
   try {
     if (!(await isProxyAvailable())) return null;
     const response = await fetch(proxiedUrl(downloadUrl), { headers: { Range: "bytes=0-1" }, cache: "no-store" });
@@ -13317,7 +13317,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 286;
+const APP_BUILD = 287;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
