@@ -13,7 +13,7 @@
   <!-- Too-old browsers (no WebAssembly / modern JS, e.g. iOS 10) get a clear message, not a blank layout. -->
   <script src="/browser-check.js"></script>
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=396" />
+  <link rel="stylesheet" href="./ui/styles.css?v=399" />
   <meta name="theme-color" content="#000000" />
   <link rel="manifest" href="manifest.json" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
@@ -177,8 +177,8 @@
               <path d="M9.65 8.15h6.1a3.75 3.75 0 0 1 3.75 3.75v1.95a3.75 3.75 0 0 1-3.75 3.75h-2.7L9.5 20.1v-2.5"/>
             </svg>
           </div>
-          <h1>Select a chat</h1>
-          <p>Choose a conversation on the left</p>
+          <h1 data-detail-empty-title>Select a chat</h1>
+          <p data-detail-empty-hint>Choose a conversation on the left</p>
         </div>
 
           <div class="broadcast-room" data-broadcast-room hidden>
@@ -523,16 +523,13 @@
              both and never nowhere. Tiles are rendered by applyDockLayout(). -->
         <div class="profile-screen hub-screen" data-app-tab-screen="hub" hidden>
           <div class="kaposts-header">
-            <h1 class="kaposts-title">Kaspa Hub</h1>
-            <button class="kaposts-icon-button" type="button" data-open-customize-dock aria-label="Customize Dock" title="Customize Dock">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h5.4M12.6 7H21M3 12h9.4M16.6 12H21M3 17h6.4M13.6 17H21"/><circle cx="10.5" cy="7" r="2.1"/><circle cx="14.5" cy="12" r="2.1"/><circle cx="11.5" cy="17" r="2.1"/></svg>
-            </button>
+            <h1 class="kaposts-title">More</h1>
           </div>
           <div class="hub-grid" data-hub-grid></div>
           <div class="hub-empty" data-hub-empty hidden>
             <img src="./ui/assets/kaspa-logo.png" alt="" class="hub-empty-logo" />
             <h3>Nothing here right now</h3>
-            <p>KaPost, Public Chats, ChangeNOW Swap and Kaspa Websites appear here when they are not in your dock. Manage them in Settings &gt; Customization &gt; Customize Dock.</p>
+            <p>Everything else is in the bar below.</p>
           </div>
         </div>
 
@@ -936,6 +933,12 @@
         <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24"><path d="M4.3 4.5h9.1a3.8 3.8 0 0 1 3.8 3.8v2.7a3.8 3.8 0 0 1-3.8 3.8H8.7l-4.45 3.05.02-3.44A3.78 3.78 0 0 1 .5 10.65V8.3a3.8 3.8 0 0 1 3.8-3.8Z"/><path d="M9.65 8.15h6.1a3.75 3.75 0 0 1 3.75 3.75v1.95a3.75 3.75 0 0 1-3.75 3.75h-2.7L9.5 20.1v-2.5"/></svg><svg class="tab-glyph-filled" viewBox="0 0 24 24"><defs><mask id="kc-dock-cut-chats" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24"><rect width="24" height="24" fill="#fff"/><path d="M5.6 8.4h6.6a4.6 4.6 0 0 1 4.6 4.6v1.4a4.6 4.6 0 0 1-4.6 4.6H8.1l-3.9 2.9.7-3A4.6 4.6 0 0 1 1 14.4V13a4.6 4.6 0 0 1 4.6-4.6Z" fill="#000" stroke="#000" stroke-width="2.6" stroke-linejoin="round"/></mask></defs><path mask="url(#kc-dock-cut-chats)" d="M13 3.2h5.6A4.4 4.4 0 0 1 23 7.6v1.6a4.4 4.4 0 0 1-3.1 4.2l.5 2.6-3.2-2.4H13a4.4 4.4 0 0 1-4.4-4.4V7.6A4.4 4.4 0 0 1 13 3.2Z"/><path d="M5.6 8.4h6.6a4.6 4.6 0 0 1 4.6 4.6v1.4a4.6 4.6 0 0 1-4.6 4.6H8.1l-3.9 2.9.7-3A4.6 4.6 0 0 1 1 14.4V13a4.6 4.6 0 0 1 4.6-4.6Z"/></svg></span>
         <span>Chats</span>
       </button>
+      <button class="sidebar-tab" type="button" data-app-tab="broadcasts">
+        <!-- bubble.left.and.text.bubble.right (KaPosts-iPhone KaPostsTabView .publicChats): Public
+             Chats is its own screen again (owner, 2026-11-12). -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.8 3.8h9.4a2.8 2.8 0 0 1 2.8 2.8v4.1a2.8 2.8 0 0 1-2.8 2.8H8.4l-3.6 2.6v-2.6h-1a2.8 2.8 0 0 1-2.8-2.8V6.6a2.8 2.8 0 0 1 2.8-2.8Z"/><path d="M5.4 7.4h6.4M5.4 10.2h4.2"/><path d="M18.6 9.2h1.6a2.8 2.8 0 0 1 2.8 2.8v3.9a2.8 2.8 0 0 1-2.8 2.8h-.8v2.5l-3.5-2.5h-3.4a2.8 2.8 0 0 1-2.8-2.8v-.6"/></svg></span>
+        <span>Public Chats</span>
+      </button>
       <button class="sidebar-tab" type="button" data-app-tab="kaposts" hidden>
         <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M16.862 4.487l1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897l12.682-12.68Z"/><path d="M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10"/></svg><svg class="tab-glyph-filled tab-glyph-stroked" viewBox="0 0 24 24"><path d="M11 4.6H6.9A2.9 2.9 0 0 0 4 7.5v10.6A2.9 2.9 0 0 0 6.9 21h10.6a2.9 2.9 0 0 0 2.9-2.9V14"/><path d="M18.5 3a2 2 0 0 1 2.8 2.8l-8.6 8.6-3.8 1 1-3.8Z"/></svg></span>
         <span>KaPost</span>
@@ -981,8 +984,10 @@
         <span>Settings</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="hub">
-        <span class="sidebar-tab-icon" aria-hidden="true"><img class="sidebar-tab-logo" src="./ui/assets/kaspa-logo.png" alt="" width="24" height="24" /></span>
-        <span>Kaspa Hub</span>
+        <!-- Phones only (owner, 2026-11-12): the bottom bar holds five, and More holds the rest. On a
+             computer the left dock holds every screen and there is no More. -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="4.8" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="19.2" cy="12" r="2.2"/></svg></span>
+        <span>More</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="profile">
         <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.25"/><circle cx="12" cy="8.35" r="3.35"/><path d="M5.8 18.75c1.2-3.15 3.35-4.7 6.2-4.7s5 1.55 6.2 4.7"/></svg><svg class="tab-glyph-filled" viewBox="0 0 24 24"><defs><mask id="kc-dock-cut-profile" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24"><rect width="24" height="24" fill="#fff"/><circle cx="12" cy="9.3" r="3.7" fill="#000"/><path d="M5.1 19.2c1.5-2.8 3.9-4.2 6.9-4.2s5.4 1.4 6.9 4.2V24H5.1Z" fill="#000"/></mask></defs><circle mask="url(#kc-dock-cut-profile)" cx="12" cy="12" r="10"/></svg></span>
@@ -1085,11 +1090,6 @@
               </label>
               <!-- iOS SettingsView customizationPage: pickers, Customize Dock, then Show Fee Estimate
                    (default on). No Show Setup Guides switch: the guides are always shown. -->
-              <button class="settings-list-row" type="button" data-settings-open-subscreen="dock">
-                <span class="settings-row-icon settings-row-icon-plain" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.5" cy="6.5" r=".9"/><circle cx="4.5" cy="12" r=".9"/><circle cx="4.5" cy="17.5" r=".9"/></svg></span>
-                <span class="settings-row-copy"><strong>Customize Dock</strong></span>
-                <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
-              </button>
               <div class="settings-toggle-row" data-fee-estimate-row><span><strong>Show Fee Estimate</strong></span><label class="switch-control"><input type="checkbox" data-pref-estimate-fees checked><span></span></label></div>
               <!-- iOS 94ed3a35 KachatEndingsToggle: display only, on by default. -->
               <div class="settings-toggle-row"><span><strong>Show .kachat Endings</strong></span><label class="switch-control"><input type="checkbox" data-pref-kachat-endings checked><span></span></label></div>

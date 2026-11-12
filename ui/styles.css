@@ -14699,12 +14699,8 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 /* The Kaspa Hub tab's Kaspa mark is drawn as a template, as iOS's tab bar draws it
    (dockKaspaLogo, .alwaysTemplate): the same colour as the symbols beside it, the accent when
    selected - not the mark's own teal on every tab. */
-.sidebar-tabbar .sidebar-tab[data-app-tab="hub"] .sidebar-tab-icon {
-  background-color: currentColor !important;
-  -webkit-mask: url("./assets/kaspa-logo.png") center / 23px 23px no-repeat;
-  mask: url("./assets/kaspa-logo.png") center / 23px 23px no-repeat;
-}
-.sidebar-tabbar .sidebar-tab[data-app-tab="hub"] .sidebar-tab-logo { opacity: 0; }
+/* (Kaspa Hub's masked Kaspa mark is gone with the Hub: the phones' More is three dots, 2026-11-12.) */
+.sidebar-tabbar .sidebar-tab[data-app-tab="hub"] .sidebar-tab-icon svg { fill: currentColor; stroke: none; }
 /* A picture is the whole avatar (iOS KNSAvatarView: the image OR the fallback glyph, clipped to a
    circle, nothing behind it): no tinted circle and no glyph under a picture, so a transparent PNG
    shows what is behind the avatar, as on iOS - not the person glyph through its holes. */
@@ -15382,3 +15378,90 @@ body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--bac
 .voice-recording-ring { flex: 0 0 auto; width: 20px; height: 20px; transform: rotate(-90deg); }
 .voice-recording-ring circle { fill: none; stroke: rgba(127,127,127,.3); stroke-width: 3; }
 .voice-recording-ring .voice-recording-ring-fill { stroke: var(--ios-red, #ff3b30); stroke-linecap: round; transition: stroke-dashoffset 1s linear; }
+/* ==== The left dock (owner, 2026-11-12) =======================================================
+   On a computer the dock is a column down the left side holding every screen (icon over name, as
+   the bottom dock had them), grouped by the iOS app each comes from, with Profile and Settings at
+   the bottom. The app sits to its right; there is no floating pill and nothing reserves a strip
+   at the bottom any more. Phones and narrow windows keep the bottom bar above. */
+@media (min-width: 860px) {
+  :root { --rail-w: 88px; --rail-item-h: 52px; --dock-inset: 0px; }
+  .kachat-shell { margin-left: var(--rail-w); width: calc(100% - var(--rail-w)); }
+
+  body .sidebar-tabbar,
+  body.chats-tab .sidebar-tabbar {
+    position: fixed;
+    top: 0; bottom: 0; left: 0; right: auto;
+    transform: none;
+    z-index: 410;
+    width: var(--rail-w);
+    max-width: none;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 2px;
+    padding: calc(12px + var(--safe-top, 0px)) 6px calc(12px + env(safe-area-inset-bottom, 0px));
+    border: 0;
+    border-right: 1px solid var(--bar-separator, var(--line));
+    border-radius: 0;
+    background: var(--bar-bg);
+    box-shadow: none;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+  }
+  body .sidebar-tabbar::-webkit-scrollbar { display: none; }
+  body .sidebar-tabbar .sidebar-tab,
+  body.chats-tab .sidebar-tabbar .sidebar-tab {
+    position: relative;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-width: 0;
+    width: 100%;
+    height: var(--rail-item-h);
+    padding: 4px 2px;
+    border-radius: 14px;
+  }
+  body .sidebar-tabbar .sidebar-tab > span:last-child,
+  body.chats-tab .sidebar-tabbar .sidebar-tab > span:last-child {
+    font-size: 11px; line-height: 13px; font-weight: 500;
+    max-width: 100%; white-space: nowrap; text-align: center; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* The .kachat wordmark is wider than a glyph: scaled to fit the column. */
+  body .sidebar-tabbar .kachat-wordmark-icon { width: auto; }
+  body .sidebar-tabbar .kachat-wordmark-icon svg { width: 44px; height: auto; }
+  body .sidebar-tabbar .sidebar-tab-badge { top: 4px; right: auto; left: calc(50% + 6px); }
+  /* A thin line where the next iOS app's screens start: KaPost, KaPay, KaPlay, the extras. */
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="kaposts"],
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="wallet"],
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="chess"],
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="kachat-stats"] { margin-top: 9px; }
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="kaposts"]::before,
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="wallet"]::before,
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="chess"]::before,
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="kachat-stats"]::before {
+    content: ""; position: absolute; top: -6px; left: 18px; right: 18px; height: 1px; background: var(--line);
+  }
+  /* Profile and Settings at the bottom, and always on screen: on a short window the rest scrolls
+     under them. */
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] { margin-top: auto; }
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="profile"],
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="settings"] { position: sticky; z-index: 1; background: var(--bar-bg); box-shadow: 0 0 0 2px var(--bar-bg); }
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="settings"] { bottom: 0; }
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] { bottom: calc(var(--rail-item-h) + 2px); }
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="profile"].active,
+  body .sidebar-tabbar .sidebar-tab[data-app-tab="settings"].active { background: linear-gradient(var(--fill-secondary, rgba(255,255,255,.12)), var(--fill-secondary, rgba(255,255,255,.12))), var(--bar-bg); }
+
+  /* Settings opens in place beside the dock rather than under it. */
+  body.settings-tab .account-overlay[data-account-overlay] { left: var(--rail-w); padding-bottom: 0; }
+}
+/* Phones: five in the bottom bar, so each takes an equal share and "Public Chats" fits. */
+@media (max-width: 859px) {
+  body .sidebar-tabbar .sidebar-tab,
+  body.chats-tab .sidebar-tabbar .sidebar-tab { flex: 1 1 0; min-width: 0; padding-left: 2px; padding-right: 2px; }
+  body .sidebar-tabbar .sidebar-tab > span:last-child,
+  body.chats-tab .sidebar-tabbar .sidebar-tab > span:last-child { font-size: 10.5px; max-width: 100%; letter-spacing: -0.1px; }
+}

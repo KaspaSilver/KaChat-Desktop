@@ -5,7 +5,7 @@ import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { installGroupedAmountInputs } from "./grouped-amount.js";
 import { contractPurgePlan, contractSuppressionRecovery } from "./contract-purge.js";
-import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_DEFAULT, isPinnedToDock, normalizeDockPrefs, dockIsFull, removeFromDock, addToDock, reorderVisible } from "./dock-arrangement.js";
+import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_DEFAULT, isPinnedToDock, normalizeDockPrefs, dockIsFull, removeFromDock, addToDock, reorderVisible, RAIL_ORDER, dockLayoutFor } from "./dock-arrangement.js";
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
 import { catchUpCandidates, spendsOwnFunds } from "./address-activity.js";
 import { isHiddenPlaceholder, isHiddenPlaceholderMessage, newestVisibleMessage, upgradesPlaceholder, isCallSignal } from "./message-placeholders.js";
@@ -3752,8 +3752,6 @@ const selectedRoomNames = new Set();
 let chatRoomsLastSignature = "";
 // A public room open in the detail pane (broadcasts.js reports it); owns the pane like a chat.
 let publicRoomOpen = false;
-// Whether syncPublicChatsPane last gave the pane to a room, so closing it restores the rest once.
-let publicRoomPaneApplied = false;
 // Decoded group photos for the circles, keyed by group id + photo fingerprint.
 const chatCirclePhotoCache = new Map();
 // The circles row's last markup, so an unchanged redraw keeps its scroll and hover.
@@ -4398,7 +4396,10 @@ let activeGroupId = null;
 // since it's also used there to hide the tab bar during that specific
 // drill-down, which placeholder tabs should NOT do.
 function updateDetailActiveClass() {
-  appBody?.classList.toggle("detail-active", Boolean(activeConversationId) || Boolean(activeGroupId) || currentAppTab !== "chats" || publicRoomOpen);
+  // Chats and Public Chats each own the pane beside their list (owner, 2026-11-12).
+  const paneOpen = currentAppTab === "chats" ? Boolean(activeConversationId) || Boolean(activeGroupId)
+    : currentAppTab === "broadcasts" ? publicRoomOpen : true;
+  appBody?.classList.toggle("detail-active", paneOpen);
 }
 
 // Toggle the `.active` highlight on the currently-open chat / group row directly, without a
@@ -4415,8 +4416,8 @@ function updateActiveRowHighlight() {
 
 function setActiveConversationId(id) {
   if (id !== activeConversationId) releaseTypingFocus();
-  // A chat and a public room share the detail pane too: opening a chat closes the room.
-  if (id && publicRoomOpen) { try { closeBroadcastRoom(); } catch { /* rooms not started */ } }
+  // A public room lives on its own Public Chats screen now (owner, 2026-11-12), so opening a chat
+  // leaves it open there.
   activeConversationId = id;
   // A 1:1 thread and a group thread can't share the detail pane — opening a real 1:1
   // dismisses any open group. Torn down inline (not via closeGroupChat) so we don't
@@ -4432,10 +4433,14 @@ function setActiveConversationId(id) {
   // A group owning the detail pane counts as "open" for the collapse-to-detail layout, and
   // its pane must survive the background setActiveConversationId(null) refreshes.
   // An open public room owns it the same way (the room's own pane is shown by syncPublicChatsPane).
-  const groupOwnsDetail = !id && (Boolean(activeGroupId) || publicRoomOpen) && onChatsTab;
-  appBody?.classList.toggle("conversation-open", isOpen || groupOwnsDetail);
-  // Mirrored on <body> so the toolbar (a sibling BEFORE the app body) can react on phones.
-  document.body.classList.toggle("conversation-open", isOpen || groupOwnsDetail);
+  const groupOwnsDetail = !id && Boolean(activeGroupId) && onChatsTab;
+  // On Public Chats the open room owns the pane (syncPublicChatsPane); a background refresh here
+  // must not take that away.
+  if (currentAppTab !== "broadcasts") {
+    appBody?.classList.toggle("conversation-open", isOpen || groupOwnsDetail);
+    // Mirrored on <body> so the toolbar (a sibling BEFORE the app body) can react on phones.
+    document.body.classList.toggle("conversation-open", isOpen || groupOwnsDetail);
+  }
   // The conversation pane and its "Select a conversation" empty state belong to the CHATS
   // tab only - background refreshes call this with null while another tab (KaPosts etc.)
   // is showing, and unconditionally unhiding the empty state stacked it on top of that
@@ -12000,11 +12005,17 @@ function setActiveAppTab(tab) {
     else button.removeAttribute("aria-current");
   });
 
+  // Switching between Chats and Public Chats swaps what the one list shows; a selection made in one
+  // never carries into the other.
+  const listChanged = (currentAppTab === "broadcasts") !== (screenTab === "broadcasts");
+  if (listChanged && chatSelectionModeActive) setChatSelectionMode(false);
   currentAppTab = tab;
   toolbarBalanceScreen = screenTab;
   renderToolbarBalance();
   try { updatePublicChatsSettingsButton(); } catch { /* not ready yet */ }
-  const isChats = screenTab === "chats";
+  // Chats and Public Chats share the list column and the pane beside it (owner, 2026-11-12).
+  const isRooms = screenTab === "broadcasts";
+  const isChats = screenTab === "chats" || isRooms;
   if (appSidebar) appSidebar.hidden = !isChats;
   if (newChatFab) newChatFab.hidden = !isChats;
   // Select lives in the topbar now, which every tab shares - but it only ever acts on the chats
@@ -12014,6 +12025,7 @@ function setActiveAppTab(tab) {
   // On Chats the topbar narrows to the chats list and the conversation takes the full height
   // beside it; everywhere else there is no list, so it spans as before. CSS reads this class.
   document.body.classList.toggle("chats-tab", isChats);
+  document.body.classList.toggle("rooms-tab", isRooms);
   // The wide layout lines the toolbar up with the open screen's column (ui/styles.css).
   document.body.dataset.appTab = screenTab;
   publishDockHeight();
@@ -12035,19 +12047,17 @@ function setActiveAppTab(tab) {
     if (detailEmptyState) detailEmptyState.hidden = true;
     if (groupScreenEl) groupScreenEl.hidden = true;
   } else {
-    // Back on Chats: a group thread owns the pane if one is open, else the 1:1 does.
-    const groupOpen = Boolean(activeGroupId);
-    if (groupScreenEl) groupScreenEl.hidden = !groupOpen;
-    if (conversation) conversation.hidden = groupOpen || !activeConversationId;
-    if (detailEmptyState) detailEmptyState.hidden = groupOpen || Boolean(activeConversationId);
+    // Chats or Public Chats: the list shows that screen's rows, and syncPublicChatsPane (below)
+    // gives the pane to its open chat, group or room.
+    if (listChanged || !appSidebar?.dataset.listMode) { try { renderChats(); } catch { /* not started */ } }
   }
   updateDetailActiveClass();
   if (screenTab === "profile") refreshOwnKnsProfile();
   try { if (screenTab === "wallet") { renderProfileAccountTotal(); refreshSpendingSummaryOnShow(); warmReceiveAddressOnShow(); } } catch { /* not started */ }
   if (screenTab === "kaposts") refreshKaPostsFeed();
   else stopKaPostsPolling();
-  // The rooms are rows in the Chats list, so they stay live while Chats is up (and an
-  // open room takes the pane back). Simple Mode hides public rooms.
+  // The rooms stay live while Chats or Public Chats is up, so the Public Chats badge keeps count.
+  // Simple Mode hides public rooms.
   if (isChats && !isChildModeEnabled()) { refreshBroadcasts(); syncPublicChatsPane(); }
   else { stopBroadcastPolling(); syncPublicChatsPane(); }
   if (screenTab === "portfolio") refreshPortfolio();
@@ -12152,14 +12162,28 @@ function loadDockPrefs() {
 
 // normalizeDockPrefs (ui/dock-arrangement.js) resolves any stored pair into a legal arrangement.
 
-let dockPrefs = loadDockPrefs();
+// The left dock (owner, 2026-11-12): the arrangement follows the window, not a saved choice - every
+// screen on a computer, five and More on a phone (ui/dock-arrangement.js dockLayoutFor). The old
+// saved arrangement and its editor are left alone, unused.
+const WIDE_DOCK_QUERY = window.matchMedia("(min-width: 860px)");
+let dockPrefs = dockLayoutFor(WIDE_DOCK_QUERY.matches);
+WIDE_DOCK_QUERY.addEventListener?.("change", () => {
+  // The screen on show stays on show: a More section on a phone is its own dock item on a computer,
+  // and a computer's screen that a phone keeps under More opens there.
+  const screen = currentAppTab === "hub" ? hubSection : currentAppTab;
+  dockPrefs = dockLayoutFor(WIDE_DOCK_QUERY.matches);
+  hubSection = null;
+  applyDockLayout();
+  setActiveAppTab(screen || "chats");
+  applyDockLayout();
+});
 
 function persistDockPrefs() {
   localStorage.setItem(accountScopedKey(DOCK_PREFS_KEY), JSON.stringify(dockPrefs));
 }
 
 function reloadDockPrefsForAccount() {
-  dockPrefs = loadDockPrefs();
+  dockPrefs = dockLayoutFor(WIDE_DOCK_QUERY.matches);
   // A draft open across an account switch was the other account's: start again from this one's.
   if (dockDraft) dockDraft = { dock: [...dockPrefs.dock], hub: [...dockPrefs.hub] };
   hubSection = null;
@@ -12212,7 +12236,7 @@ function applyDockLayout() {
   // behind hidden. Without the guard the second list re-appended every visible tab, so the live
   // dock always came out in DEFAULT order and reordering in Customize Dock did nothing to it.
   const placed = new Set();
-  for (const tab of [...visible, ...DOCK_DEFAULT_ORDER]) {
+  for (const tab of [...visible, ...RAIL_ORDER, "hub"]) {
     if (placed.has(tab)) continue;
     placed.add(tab);
     const btn = tabbar.querySelector(`.sidebar-tab[data-app-tab="${tab}"]`);
@@ -12252,7 +12276,7 @@ function tabUnreadCount(tab) {
     // KaPosts has no count on its dock tab or Hub tile: its unseen notifications show only on the
     // bell inside KaPosts (owner, 2026-10-23). It stays in refreshTabBadges' list so an old badge
     // is taken off.
-    if (tab === "broadcasts") return broadcastUnreadTotal();
+    if (tab === "broadcasts") return isChildModeEnabled() ? 0 : broadcastUnreadTotal();
     if (tab === "chats") return chatsTabUnreadTotal();
   } catch {}
   return 0;
@@ -12268,23 +12292,22 @@ function chatsTabUnreadTotal() {
     return Boolean(contact?.address) && contact.relationshipState !== "declined"
       && !isChatBlocked(contact.address) && !isMessageRequest(conversationEntry);
   });
-  let rooms = 0;
-  if (!isChildModeEnabled()) { try { rooms = broadcastUnreadTotal(); } catch { rooms = 0; } }
-  return chatsTabUnreadCount({ chats, groups: totalGroupUnread(), rooms });
+  // The rooms count on Public Chats' own dock item now (owner, 2026-11-12).
+  return chatsTabUnreadCount({ chats, groups: totalGroupUnread(), rooms: 0 });
 }
 /** Recounts the Chats badge a moment after anything that moves it - a message, a read, a group's
  *  or a room's change - and redraws only when the number changed (iOS PublicChatUnreadBadge's
  *  300 ms debounce). The publisher lives on the function: renderChats runs during boot. */
 function scheduleChatsTabBadge() {
   if (!scheduleChatsTabBadge.recount) {
-    scheduleChatsTabBadge.recount = debouncedCountPublisher({ read: () => tabUnreadCount("chats"), publish: () => refreshTabBadges() });
+    scheduleChatsTabBadge.recount = debouncedCountPublisher({ read: () => `${tabUnreadCount("chats")}|${tabUnreadCount("broadcasts")}`, publish: () => refreshTabBadges() });
   }
   scheduleChatsTabBadge.recount();
 }
 function tabBadgeLabel(count) { return count > 99 ? "99+" : String(count); }
 // Dock tabs carry the same badge as the hub tiles (iOS AppTabBadge on both).
 function refreshTabBadges() {
-  for (const tab of ["profile", "kaposts", "chats"]) {
+  for (const tab of ["profile", "kaposts", "chats", "broadcasts"]) {
     const count = tabUnreadCount(tab);
     const button = document.querySelector(`.sidebar-tab[data-app-tab="${tab}"]`);
     if (button) {
@@ -13259,7 +13282,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 280;
+const APP_BUILD = 281;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -18299,6 +18322,7 @@ function updateChatsListTabBadges() {
 // The conversations currently shown in the chat list, honoring the search filter. Shared by
 // renderChats and the Select All action so both agree.
 function visibleChatConversations() {
+  if (listShowsRooms()) return [];
   const query = searchInput.value.trim().toLowerCase();
   const pinnedChatIds = new Set(chatCirclePins().filter((id) => id.startsWith("c:")));
   return sortedConversations().filter((conversationEntry) => {
@@ -18377,6 +18401,7 @@ function conversationRowHtml(conversationEntry, { selecting = false, selected = 
 /** The groups the list shows: all but those pinned up into the circles, and while searching, every
  *  match, pinned or not (iOS d1844582). */
 function visibleChatGroups() {
+  if (listShowsRooms()) return [];
   let mgr = null;
   try { mgr = getGroupManager(); } catch { mgr = null; }
   if (!mgr) return [];
@@ -18385,9 +18410,15 @@ function visibleChatGroups() {
   return mgr.listGroups().filter((g) => (query ? groupMatchesChatSearch(g, query) : !pins.has(`g:${g.groupId}`)));
 }
 
+/** The one list column shows Public Chats' rooms on that screen and chats and groups on Chats
+ *  (owner, 2026-11-12: Public Chats is its own screen, as in KaPost iOS). */
+function listShowsRooms() {
+  return currentAppTab === "broadcasts";
+}
+
 /** The public rooms in the list, by name while searching. Simple Mode hides them. */
 function visibleChatRooms() {
-  if (isChildModeEnabled()) return [];
+  if (isChildModeEnabled() || !listShowsRooms()) return [];
   let rooms = [];
   try { rooms = chatListRooms(); } catch { rooms = []; }
   const query = String(searchInput?.value || "").trim().toLowerCase();
@@ -18460,6 +18491,21 @@ function renderChats() {
   try { refreshKachatBots(); } catch { /* not started */ }
   setChatToolRowsForGroupsTab(false);
 
+  // The list's own title and search say which screen it is (Chats or Public Chats).
+  const roomsMode = listShowsRooms();
+  if (appSidebar && appSidebar.dataset.listMode !== (roomsMode ? "rooms" : "chats")) {
+    appSidebar.dataset.listMode = roomsMode ? "rooms" : "chats";
+    const title = appSidebar.querySelector(".chats-list-title");
+    if (title) title.textContent = roomsMode ? "Public Chats" : "Chats";
+    // A search typed on one screen is not the other's.
+    if (searchInput.value) { searchInput.value = ""; searchInput.dispatchEvent(new Event("input", { bubbles: true })); }
+    searchInput.placeholder = roomsMode ? "Search public chats" : "Search chats";
+    searchInput.closest("[data-search-wrap]")?.setAttribute("aria-label", roomsMode ? "Search public chats" : "Search chats");
+    const emptyTitle = document.querySelector("[data-detail-empty-title]");
+    if (emptyTitle) emptyTitle.textContent = roomsMode ? "Select a public chat" : "Select a chat";
+    const emptyHint = document.querySelector("[data-detail-empty-hint]");
+    if (emptyHint) emptyHint.textContent = roomsMode ? "Choose a room on the left" : "Choose a conversation on the left";
+  }
   const visibleConversations = visibleChatConversations();
   const visibleGroups = visibleChatGroups();
   const visibleRooms = visibleChatRooms();
@@ -18470,7 +18516,7 @@ function renderChats() {
   // People who wrote first and haven't been accepted: one row, always there, right above your
   // own chat - hidden only while searching or selecting (iOS 74bd52c). It stays with no chats
   // too: the empty state sits below it (iOS emptyStateView overlay).
-  const showsRequestsRow = !searching && !chatSelectionModeActive;
+  const showsRequestsRow = !searching && !chatSelectionModeActive && !roomsMode;
   const requestCount = showsRequestsRow ? messageRequestConversations().length + pendingGroupInvites().length : 0;
   const requestsRowHtml = showsRequestsRow ? `
         <button class="chat-row message-requests-row" type="button" data-open-message-requests>
@@ -18486,7 +18532,7 @@ function renderChats() {
   // No chats and no search: the empty state, under the circles and the requests row. A search
   // with no match shows nothing at all (iOS has no "no results" card).
   const anyPinnedGroup = chatCirclePins().some((id) => id.startsWith("g:") && getGroupManager()?.getGroup(id.slice(2)));
-  emptyState.hidden = !(noRows && !anyPinnedGroup && !searching);
+  emptyState.hidden = roomsMode || !(noRows && !anyPinnedGroup && !searching);
   chatList.hidden = !requestsRowHtml && noRows;
   if (noRows) {
     chatList.innerHTML = requestsRowHtml;
@@ -18514,7 +18560,7 @@ function renderChats() {
     }) })),
   ].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.at - a.at || a.order - b.order);
   // iOS: "{n} chat(s)" under the list.
-  const countLineHtml = `<p class="chat-list-count">${rows.length} chat${rows.length === 1 ? "" : "s"}</p>`;
+  const countLineHtml = `<p class="chat-list-count">${rows.length} ${roomsMode ? "public chat" : "chat"}${rows.length === 1 ? "" : "s"}</p>`;
   chatList.innerHTML = requestsRowHtml + rows.map((row) => row.html()).join("") + countLineHtml;
   chatRowSwipes?.refresh();
 
@@ -22535,7 +22581,7 @@ function updateChatSelectionBar() {
 /// (iOS a062577) - and not in Simple Mode, which hides public rooms.
 function updatePublicChatsSettingsButton() {
   const gear = document.querySelector("[data-public-chats-settings]");
-  if (gear) gear.hidden = !(currentAppTab === "chats" && !chatSelectionModeActive && !isChildModeEnabled());
+  if (gear) gear.hidden = !(currentAppTab === "broadcasts" && !chatSelectionModeActive && !isChildModeEnabled());
 }
 /** An in-place account switch (iOS c130dc1, ChatListView onChange(publicAddress)): the chat, group
  *  or room open in the old account closes and every selection clears, so nothing of it reopens in
@@ -22601,32 +22647,36 @@ chatSelectAll?.addEventListener("click", () => {
 // one Chats list now - from their row, a notification, a room link or the New sheet (iOS a062577).
 function syncPublicChatsPane() {
   updatePublicChatsSettingsButton();
+  // Public Chats is its own screen (owner, 2026-11-12, as KaPost iOS): its list on the left, the
+  // open room beside it. Chats keeps its chats and groups.
+  const onRooms = currentAppTab === "broadcasts";
   const onChats = currentAppTab === "chats";
   const roomEl = document.querySelector("[data-broadcast-room]");
-  if (roomEl) roomEl.hidden = !(onChats && publicRoomOpen);
+  if (roomEl) roomEl.hidden = !(onRooms && publicRoomOpen);
   // The floating + is the same on every tab: it opens the New sheet (iOS 5da8ccf).
   if (newChatFab) {
     newChatFab.title = "New";
     newChatFab.setAttribute("aria-label", "New");
   }
-  if (!onChats) return;
-  if (publicRoomOpen) {
-    publicRoomPaneApplied = true;
+  // Looked up here: the startup tab restore runs this before `groupChatScreen` is initialised.
+  const groupScreenEl = document.querySelector("[data-group-chat-screen]");
+  let paneOpen = null;
+  if (onRooms) {
     if (conversation) conversation.hidden = true;
-    if (groupChatScreen) groupChatScreen.hidden = true;
-    if (detailEmptyState) detailEmptyState.hidden = true;
-    appBody?.classList.add("conversation-open");
-    document.body.classList.add("conversation-open");
-  } else if (publicRoomPaneApplied) {
-    // The room just closed: the pane goes back to the open group or chat, or its empty state.
-    publicRoomPaneApplied = false;
+    if (groupScreenEl) groupScreenEl.hidden = true;
+    if (detailEmptyState) detailEmptyState.hidden = publicRoomOpen;
+    paneOpen = publicRoomOpen;
+  } else if (onChats) {
     const groupOpen = Boolean(activeGroupId);
     const chatOpen = Boolean(activeConversationId);
-    if (groupChatScreen) groupChatScreen.hidden = !groupOpen;
+    if (groupScreenEl) groupScreenEl.hidden = !groupOpen;
     if (conversation) conversation.hidden = groupOpen || !chatOpen;
     if (detailEmptyState) detailEmptyState.hidden = groupOpen || chatOpen;
-    appBody?.classList.toggle("conversation-open", groupOpen || chatOpen);
-    document.body.classList.toggle("conversation-open", groupOpen || chatOpen);
+    paneOpen = groupOpen || chatOpen;
+  }
+  if (paneOpen !== null) {
+    appBody?.classList.toggle("conversation-open", paneOpen);
+    document.body.classList.toggle("conversation-open", paneOpen);
   }
   updateDetailActiveClass();
 }
@@ -22651,9 +22701,8 @@ function closeOpenSheets() {
 
 function openPublicChatsTab() {
   if (isChildModeEnabled()) return false;
-  setActiveAppTab("chats");
-  if (activeGroupId) closeGroupChat();
-  if (activeConversationId) setActiveConversationId(null);
+  // Its own screen (owner, 2026-11-12): an open chat or group stays open on Chats.
+  setActiveAppTab("broadcasts");
   return true;
 }
 
@@ -22707,6 +22756,7 @@ function groupMatchesChatSearch(g, query) {
 
 /** The circles the row shows, in its order. Shared by the row, Select All and the select bar. */
 function visibleChatCircles() {
+  if (listShowsRooms()) return [];
   const items = [];
   const query = String(searchInput?.value || "").trim().toLowerCase();
   let mgr = null;
@@ -22892,8 +22942,6 @@ function openRoomFromRow(name) {
   let rooms = [];
   try { rooms = chatListRooms(); } catch { rooms = []; }
   if (rooms.find((room) => room.name === name)?.open) return;
-  if (activeGroupId) closeGroupChat();
-  if (activeConversationId) setActiveConversationId(null);
   openBroadcastRoom(name);
 }
 
@@ -22902,7 +22950,7 @@ function syncChatCirclesForSimpleMode() {
   if (isChildModeEnabled()) {
     selectedRoomNames.clear();
     try { closeBroadcastRoom(); stopBroadcastPolling(); } catch { /* rooms not started */ }
-  } else if (currentAppTab === "chats") {
+  } else if (currentAppTab === "chats" || currentAppTab === "broadcasts") {
     try { refreshBroadcasts(); } catch { /* rooms not started */ }
   }
   updatePublicChatsSettingsButton();
@@ -31980,7 +32028,7 @@ queueMicrotask(async () => {
     });
     // The rooms are rows in the Chats list: if Chats came up before the rooms started, they
     // go live now (setActiveAppTab does it on every later visit).
-    if (currentAppTab === "chats" && !isChildModeEnabled()) refreshBroadcasts();
+    if ((currentAppTab === "chats" || currentAppTab === "broadcasts") && !isChildModeEnabled()) refreshBroadcasts();
   } catch (error) { appendEngineLog(`initBroadcasts did not start: ${error?.message || error}`); }
 
   try {
@@ -33381,8 +33429,6 @@ function openGroupChat(groupId) {
   // header refresh after a Group Info action) repaints it but keeps what is being composed there.
   const switching = groupId !== activeGroupId;
   if (switching) releaseTypingFocus();
-  // A group and a public room share the detail pane: opening the group closes the room.
-  if (publicRoomOpen) { try { closeBroadcastRoom(); } catch { /* rooms not started */ } }
   markGroupOpened(groupId);
   if (switching) {
     groupFeeOverrideKas = null;
