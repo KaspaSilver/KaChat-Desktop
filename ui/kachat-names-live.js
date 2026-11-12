@@ -1134,7 +1134,7 @@ function listCard(rowsHtml, inset = 62) {
 export function kachatNameTileHtml(nameHtml, footerHtml = "") {
   return `
     <span class="kl-tile-name">${nameHtml}</span>
-    <span class="kl-tile-suffix">.kachat</span>
+    ${kachatShowsEndings() ? '<span class="kl-tile-suffix">.kachat</span>' : ""}
     ${footerHtml ? `<span class="kl-tile-footer">${footerHtml}</span>` : ""}`;
 }
 
@@ -1361,7 +1361,7 @@ function openProfileSaveSheet({ title, confirmTitle, doneTitle, makeProfile, onS
       formRow("Banner", socialSourceText(p.banner, SocialKind.banner)),
       formRow("Bio", socialSourceText(p.bio, SocialKind.bio)),
       formRow("Linktree", p.linktree ? String(p.linktree).replace(/^https:\/\//, "") : "None"),
-      formRow("Primary name", p.primaryName ? `${p.primaryName}.kachat` : "None"),
+      formRow("Primary name", p.primaryName ? kachatNameDisplay(p.primaryName) : "None"),
     ].join("") : "";
     let cost = "";
     if (st.fee != null) {
@@ -4605,10 +4605,37 @@ export function startKachatUnnamedIdentitySweep({ candidates } = {}) {
   }, UNNAMED_SWEEP_FIRST_MS);
 }
 
-/** The address's `.kachat` name ("alice.kachat"), or null. */
+/** The address's `.kachat` name ("alice.kachat"), or null. The full name, for anything that is
+ *  typed, copied or sent; what is shown goes through kachatCachedDisplayLabel. */
 export function kachatCachedLabel(address) {
   const label = kachatCachedIdentity(address)?.label;
   return label ? `${label}.kachat` : null;
+}
+
+// Settings > Customization > Show .kachat Endings (iOS 94ed3a35 KachatNameLabel), on by default:
+// off shows .kachat names bare ("alice") wherever one is displayed. Display only: copying a name,
+// a mention and anything sent keep the ending. One app setting, as on iOS.
+const SHOW_ENDINGS_KEY = "kachat-show-name-endings-v1";
+let showEndingsCache = null;
+export function kachatShowsEndings() {
+  if (showEndingsCache == null) {
+    try { showEndingsCache = localStorage.getItem(SHOW_ENDINGS_KEY) !== "0"; } catch { showEndingsCache = true; }
+  }
+  return showEndingsCache;
+}
+export function setKachatShowsEndings(on) {
+  showEndingsCache = Boolean(on);
+  try { localStorage.setItem(SHOW_ENDINGS_KEY, on ? "1" : "0"); } catch { /* this session only */ }
+}
+/** A bare .kachat name as it is shown: "alice.kachat", or "alice" with the endings off. */
+export function kachatNameDisplay(name) {
+  const bare = String(name || "").replace(/\.kachat$/i, "");
+  return kachatShowsEndings() ? `${bare}.kachat` : bare;
+}
+/** The address's .kachat name as it is shown, or null. */
+export function kachatCachedDisplayLabel(address) {
+  const label = kachatCachedIdentity(address)?.label;
+  return label ? kachatNameDisplay(label) : null;
 }
 
 /** The social profile a link shows, as far as this device knows it right now (sync); asks the
@@ -4976,7 +5003,7 @@ export function openLiveProfileEditor(owner = "profile") {
         <span>Primary name</span>
         <select class="kl-select" data-kl-profile-primary aria-label="Primary name">
           <option value="" ${form.primary ? "" : "selected"}>None</option>
-          ${activeNames.map((n) => `<option value="${esc(n)}" ${n === form.primary ? "selected" : ""}>${esc(`${n}.kachat`)}</option>`).join("")}
+          ${activeNames.map((n) => `<option value="${esc(n)}" ${n === form.primary ? "selected" : ""}>${esc(kachatNameDisplay(n))}</option>`).join("")}
         </select>
       </label>`, {
       header: ".kachat Name",

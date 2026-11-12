@@ -100,6 +100,7 @@ await test("chat voice: a failed Nextcloud upload goes on chain to the chat it w
     queueConversationMessage: (id, text) => queued.push({ id, text }),
     userFacingError: (e) => e.message,
     FileReader: FakeFileReader,
+    VoiceNotes: { longVoiceNotesSupported: () => false },
   });
   const sending = ctx.fns.sendChatVoicePreview();
   // Another chat is opened while the upload runs; then the upload fails.
@@ -109,6 +110,39 @@ await test("chat voice: a failed Nextcloud upload goes on chain to the chat it w
   assert.equal(queued.length, 1);
   assert.equal(queued[0].id, "chat-A", "not the chat open now");
   assert.match(queued[0].text, /"type":"file"/);
+});
+
+await test("chat voice: with the long-note encoder, a failed Nextcloud upload goes on chain as the parts", async () => {
+  const panel = {};
+  const upload = deferred();
+  const queued = [];
+  const partsQueued = [];
+  const ctx = sandbox([extractFunction(app, "sendChatVoicePreview"), voiceFileName], {
+    voiceRecordingPanel: panel,
+    voicePreviews: new Map([[panel, { blob: { size: 400000 }, mimeType: "audio/webm" }]]),
+    activeConversationId: "chat-A",
+    voiceViaNextcloud: true,
+    isNextcloudConnected: () => true,
+    CHAT_VOICE_MAX_BYTES: 31000,
+    chatAudioMode: true,
+    uploadNextcloudMedia: () => upload.promise,
+    queueConversationMessage: (id, text) => queued.push({ id, text }),
+    queueOneToOneParts: (id, texts) => partsQueued.push({ id, texts }),
+    userFacingError: (e) => e.message,
+    FileReader: FakeFileReader,
+    VOICE_PATHS: { oneToOne: {} },
+    VoiceNotes: {
+      longVoiceNotesSupported: () => true,
+      prepareVoiceParts: async () => ({ parts: [new Uint8Array(3), new Uint8Array(2)] }),
+      voicePartEnvelopes: (parts) => parts.map((_, i) => `part-${i + 1}`),
+    },
+  });
+  const sending = ctx.fns.sendChatVoicePreview();
+  ctx.scope.activeConversationId = "chat-B";
+  upload.reject(new Error("offline"));
+  await sending;
+  assert.equal(queued.length, 0, "never the raw recording, which no longer fits one transaction");
+  assert.deepEqual(partsQueued, [{ id: "chat-A", texts: ["part-1", "part-2"] }]);
 });
 
 // --- group voice note: its own group, its own account ---------------------------------------------
@@ -125,6 +159,7 @@ function groupVoiceCtx({ via = true } = {}) {
     sendGroupWire: async (text, options) => { wires.push({ text, options }); return true; },
     userFacingError: (e) => e.message,
     FileReader: FakeFileReader,
+    VoiceNotes: { longVoiceNotesSupported: () => false },
   });
   return { ctx, upload, wires };
 }

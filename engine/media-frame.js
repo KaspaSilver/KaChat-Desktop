@@ -9,6 +9,13 @@
 // exactly the media-file JSON the text form carried (iOS MediaFileEnvelope.json), so storage,
 // rendering, dedupe and backups see no difference. Pure: no DOM, no WASM, no network.
 // iOS: ContextualMediaFrame (KaChatCipher.swift) and the push extension's mediaFrameEnvelope.
+//
+// Since iOS 7c5c22e3 a part of a long voice note or multi-part photo carries its tag in the
+// header (`voicePart` on audio, `mediaPart` on an image), and the rebuilt JSON carries it between
+// mimeType and content. A malformed tag is dropped: the part is then a plain voice note or photo.
+// Group plaintext uses the same frame (voice and photos), inside the unchanged gcomm payload.
+
+import { partKeyForMimeType, partTagFromObject, partTagJson } from "./voice-parts.js";
 
 export const MEDIA_FRAME_MAGIC = Object.freeze([0xff, 0x4b, 0x43, 0x4d, 0x01]);
 const HEADER_START = MEDIA_FRAME_MAGIC.length + 4;
@@ -26,8 +33,9 @@ export function hasMediaFrameMagic(bytes) {
 
 /** iOS MediaFileEnvelope.json, byte for byte: fixed key order, and only `\` and `"` escaped
  *  (string interpolation, not JSONEncoder - so "/" stays "/"). */
-export function mediaFileEnvelopeJson({ name, size, mimeType, dataUrlContent }) {
-  return `{"type":"file","name":"${escapeIos(name)}","size":${size},"mimeType":"${escapeIos(mimeType)}","content":"${escapeIos(dataUrlContent)}"}`;
+export function mediaFileEnvelopeJson({ name, size, mimeType, dataUrlContent, voicePart = null, mediaPart = null }) {
+  const part = voicePart ? `,"voicePart":${partTagJson(voicePart)}` : mediaPart ? `,"mediaPart":${partTagJson(mediaPart)}` : "";
+  return `{"type":"file","name":"${escapeIos(name)}","size":${size},"mimeType":"${escapeIos(mimeType)}"${part},"content":"${escapeIos(dataUrlContent)}"}`;
 }
 
 function escapeIos(value) {
@@ -56,11 +64,15 @@ export function mediaEnvelopeFromFrame(bytes) {
   if (typeof mimeType !== "string" || !mimeType) return null;
   const raw = bytes.subarray(HEADER_START + headerLength);
   if (!raw.length) return null;
+  const key = partKeyForMimeType(mimeType);
+  const part = key ? partTagFromObject(header[key]) : null;
   return mediaFileEnvelopeJson({
     name: typeof header.name === "string" ? header.name : "file",
     size: raw.length,
     mimeType,
     dataUrlContent: `data:${mimeType};base64,${bytesToBase64(raw)}`,
+    voicePart: key === "voicePart" ? part : null,
+    mediaPart: key === "mediaPart" ? part : null,
   });
 }
 
@@ -86,11 +98,16 @@ export function mediaFrameForEnvelope(text) {
   if (!lowered.startsWith("image/") && !lowered.startsWith("audio/")) return null;
   const raw = strictBase64ToBytes(content.slice(comma + 1));
   if (!raw || !raw.length) return null;
-  const header = UTF8.encode(appleJsonString({
+  const fields = {
     mimeType,
     name: typeof object.name === "string" ? object.name : "file",
     size: raw.length,
-  }));
+  };
+  // A valid part tag rides in the header, keys sorted as JSONSerialization(.sortedKeys) writes.
+  const key = partKeyForMimeType(mimeType);
+  const part = key ? partTagFromObject(object[key]) : null;
+  if (part) fields[key] = { count: part.count, id: part.id, index: part.index };
+  const header = UTF8.encode(appleJsonString(sortedObject(fields)));
   if (header.length > 0xffffffff) return null;
   const frame = new Uint8Array(HEADER_START + header.length + raw.length);
   frame.set(MEDIA_FRAME_MAGIC, 0);
@@ -106,8 +123,11 @@ export function mediaFrameForEnvelope(text) {
 
 /** Bytes of the frame a media-file JSON of `rawBytes` file bytes would make (for the composer's
  *  fee estimate): magic + length + header + raw. */
-export function mediaFrameByteLength({ rawBytes, name = "file", mimeType }) {
-  const header = UTF8.encode(appleJsonString({ mimeType: String(mimeType || ""), name: String(name), size: Number(rawBytes) || 0 }));
+export function mediaFrameByteLength({ rawBytes, name = "file", mimeType, part = null }) {
+  const fields = { mimeType: String(mimeType || ""), name: String(name), size: Number(rawBytes) || 0 };
+  const key = part ? partKeyForMimeType(mimeType) : null;
+  if (key) fields[key] = { count: part.count, id: part.id, index: part.index };
+  const header = UTF8.encode(appleJsonString(sortedObject(fields)));
   return HEADER_START + header.length + (Number(rawBytes) || 0);
 }
 
@@ -116,6 +136,12 @@ export function mediaFrameByteLength({ rawBytes, name = "file", mimeType }) {
 // controls, raw UTF-8 for the rest) except that Foundation also escapes "/" as "\/".
 function appleJsonString(object) {
   return JSON.stringify(object).replace(/\//g, "\\/");
+}
+
+function sortedObject(object) {
+  const out = {};
+  for (const key of Object.keys(object).sort()) out[key] = object[key];
+  return out;
 }
 
 function strictBase64ToBytes(value) {

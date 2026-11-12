@@ -2,7 +2,6 @@ import { confirmDialog } from "./dialogs.js";
 import { IS_TESTNET, reencodeAddress } from "../engine/network.js";
 import { cssUrlValue } from "./css-url.js";
 import { readNextcloudAccount, writeNextcloudAccount, onKeyVaultStateChanged } from "./key-vault.js";
-import { talkCallsFromCapabilities } from "./talk.js";
 import { nextcloudOffReason, KASPA_QUICK_START_URL } from "./nextcloud-availability.js";
 import {
   addressBookHasBackupData, addressBookHoldsWallet, addressBookWalletAddress, mergeSharedContactsFile, sharedContactsFileJson,
@@ -1927,44 +1926,10 @@ export function isNextcloudConnected() {
   return Boolean(nc);
 }
 
-/** The connected account, for the call service: server origin, login and app password. */
+/** The connected account: server origin, login and app password. */
 export function nextcloudAccount() {
   if (!nc?.server || !nc?.username || !nc?.appPassword) return null;
   return { server: String(nc.server).replace(/\/+$/, ""), username: nc.username, appPassword: nc.appPassword };
-}
-
-/** Whether this Nextcloud can host a KaChat call: Talk installed with calls enabled, read from
- *  the server's capabilities (spreed.features incl. conversation-v4 and signaling-v3, and
- *  config.call.enabled) - iOS NextcloudService.talkCallsAvailable. A "yes" is remembered for
- *  the session; anything else asks the server again, so a call about to start (or a request to
- *  host one) re-checks Talk when it isn't known to be there. A probe that couldn't reach the
- *  server changes nothing (iOS 88aa3c1): it used to answer "no Talk", and a Desktop with Talk
- *  then asked the other side to host. */
-let talkProbe = null; // { server, at, value }
-export async function nextcloudTalkCallsAvailable({ force = false } = {}) {
-  const account = nextcloudAccount();
-  if (!account) return false;
-  const known = talkProbe && talkProbe.server === account.server ? talkProbe : null;
-  if (!force && known?.value && Date.now() - known.at < 6 * 3600_000) return true;
-  let value = null;
-  try {
-    const response = await ncFetch(`${apiBase(account.server)}/ocs/v2.php/cloud/capabilities?format=json`, {
-      headers: {
-        Authorization: "Basic " + btoa(`${account.username}:${account.appPassword}`),
-        "OCS-APIRequest": "true",
-        Accept: "application/json",
-      },
-      cache: "no-store",
-    });
-    if (response.ok) value = talkCallsFromCapabilities(await response.json());
-  } catch { value = null; }
-  if (value == null) {
-    deps?.appendEngineLog?.(`[Nextcloud] Talk check could not reach the server - keeping ${Boolean(known?.value)}`);
-    return Boolean(known?.value);
-  }
-  if (known?.value !== value) deps?.appendEngineLog?.(`[Nextcloud] Talk calls ${value ? "available" : "not available"}`);
-  talkProbe = { server: account.server, at: Date.now(), value };
-  return value;
 }
 
 export function resetNextcloudForAccount() {

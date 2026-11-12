@@ -8,7 +8,7 @@ import { contractPurgePlan, contractSuppressionRecovery } from "./contract-purge
 import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_DEFAULT, isPinnedToDock, normalizeDockPrefs, dockIsFull, removeFromDock, addToDock, reorderVisible } from "./dock-arrangement.js";
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
 import { catchUpCandidates, spendsOwnFunds } from "./address-activity.js";
-import { isHiddenPlaceholder, isHiddenPlaceholderMessage, newestVisibleMessage, upgradesPlaceholder } from "./message-placeholders.js";
+import { isHiddenPlaceholder, isHiddenPlaceholderMessage, newestVisibleMessage, upgradesPlaceholder, isCallSignal } from "./message-placeholders.js";
 import { accountGuard, accountScopedValue, accountStillSaved } from "./account-guard.js";
 import { NETWORK, IS_TESTNET, ADDRESS_PREFIX, KAS_UNIT, kasLabel, preferredNetwork, setPreferredNetwork, isNetworkAddress, isOnActiveNetwork, toActiveNetworkAddress, canonicalAccountAddress, reencodeAddress } from "../engine/network.js";
 import { otherNetworkReason } from "../engine/network.js";
@@ -23,6 +23,9 @@ import { parsePaymentPoolEnvelope, validPaymentNotice, encodePaymentNotice, paym
 import { isScriptAddress, isKachatContractTransaction, legacyWireAliases, transactionBelongsInHistory, restPaymentSompiTo, restPaymentSender, fetchHeldPaymentRows, strangerPaymentStep } from "../engine/sync.js";
 import { KASIA_PROTOCOL } from "../engine/kasia-protocol.js";
 import { mediaFrameByteLength, mediaFrameForEnvelope } from "../engine/media-frame.js";
+import { groupParts, unreadUnits, isLaterPart, sniffPartTag, VOICE_PATHS, voicePartSizes, PHOTO_TIERS, photoEstimatedFeeSompi, photoTierMaxBytes } from "../engine/voice-parts.js";
+import * as VoiceNotes from "./voice-notes.js";
+import { loadPhotoSource, prepareJpegForTiers } from "./photo-tiers.js";
 import { initKaPosts, refreshKaPostsFeed, resetKaPostsForAccount, openKaPostFromNotification, kaPostsFollowingAddresses, stopKaPostsPolling, peekKaPostLinkPreview, resolveKaPostLinkPreview, canOfferTextTranslation, textTranslationState, translatedTextFor, showOriginalText, showTranslatedText, readerLanguageName, translateText, onTranslationChange, showKaPostsActionToast } from "./kaposts.js";
 import { kapostsFiatFieldText, kapostsKasFieldText, kapostsTipFieldAmount, kapostsSwitchTipText, kapostsDefaultTipSompi } from "./kaposts-format.js";
 import { fetchFollowListAll, requesterPubkeyFor, kaspaAddressFromPubkey, KAPOSTS_PROTOCOL, KACHAT_MARKER as KAPOSTS_MARKER, utf8ToBase64 as kapostsUtf8ToBase64, buildKaPostTipPayload } from "../engine/kaposts.js";
@@ -32,7 +35,7 @@ import { parseBotChallengeLink, botChallengeFromLaunchSearch } from "../engine/c
 import { initKachatNamesRuntime, kachatNames, kachatNamesUiEnabled, kachatNamesLaunched, kachatProfiles } from "./kachat-names-runtime.js";
 import { PHOTO_UNLOCK_DELAY_MS, photosUnlockTime, photosAreHidden } from "./photo-unlock.js";
 import { createProfileRescans } from "./profile-rescan.js";
-import { kachatHeroProfile, kachatCachedOwnedNameCount, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames, startKachatUnnamedIdentitySweep } from "./kachat-names-live.js";
+import { kachatHeroProfile, kachatCachedOwnedNameCount, onKachatSocialChange, kachatImageSrc, kachatCachedIdentity, kachatCachedLabel, kachatCachedDisplayLabel, kachatNameDisplay, kachatShowsEndings, setKachatShowsEndings, kachatCachedAvatarUrl, kachatCachedProfilePieces, onKachatIdentityChange, kachatRetryImage, kachatOwnersOfNames, kachatHeldNamesOf, kachatRescanProfile, kachatOwnedNameCount, onKachatRegistryChange, kachatClearProfileCache, kachatExpiredNames, startKachatUnnamedIdentitySweep } from "./kachat-names-live.js";
 import { startKachatNamesNotifier, openKachatNameFromNotification as openKachatNameFromBell, removeKachatNameReminders } from "./kachat-names-notifier.js";
 import { initKachatMarket, showKachatMarket, hideKachatMarket, openKachatProfileEditor, openKachatSetupGuide, KACHAT_WORDMARK_SVG, kachatAddressDomainsHtml, renderKachatLiveDomainsTab, openKachatMarketSheet } from "./kachat-market.js";
 import { initKachatStats, showKachatStats, hideKachatStats } from "./kachat-stats.js";
@@ -77,8 +80,7 @@ import {
   createStepFlow, createFeeEditorStep, keypadHtml, wireKeypad, applyKeypadKey, stepChipHtml, stepQuestionHtml, reviewRowHtml, reviewAddressHtml,
 } from "./send-steps.js";
 import "./send-steps.css";
-import { initNextcloud, noteContactActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, nextcloudAccount, nextcloudTalkCallsAvailable, deleteRemoteNextcloudBackup, nextcloudUnavailableReason, storedNextcloudLoginsFor, revokeNextcloudLogins } from "./nextcloud.js";
-import * as Calls from "./calls.js";
+import { initNextcloud, noteContactActivity, resetNextcloudForAccount, uploadNextcloudMedia, isNextcloudConnected, openNextcloudMediaPicker, deleteRemoteNextcloudBackup, nextcloudUnavailableReason, storedNextcloudLoginsFor, revokeNextcloudLogins } from "./nextcloud.js";
 // Kaspa Hub > ChangeNOW Swap (iOS SwapView), back on Desktop (owner, 2026-10-22).
 import { initSwaps, refreshSwaps, resetSwapsForAccount } from "./swaps.js";
 import { sealBackupEnvelope, openBackupEnvelope, openEncryptedArchive } from "./backup-crypto.js";
@@ -335,12 +337,6 @@ function effectiveNotifyMode(address) {
 /// toggle is what turns notifications off entirely.
 function defaultIncomingNotifyMode() {
   return (accountShellPrefs.notificationSound ?? true) === false ? "noSound" : "sound";
-}
-function contactCallsEnabled(address) {
-  return contactPrefsStore()[address]?.calls === true;
-}
-function setContactCallsEnabled(address, enabled) {
-  setContactPref(address, "calls", enabled ? true : undefined);
 }
 function setContactPref(address, key, value) {
   if (!address) return;
@@ -4111,7 +4107,6 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
   const mode = effectiveNotifyMode(contact?.address);
   if (mode === "off") return;
   if (parseReactionEnvelope(message.text)) return; // reactions aren't standalone messages
-  if (Calls.parseCallEnvelope(message.text)) return; // a call rings on its own screen, not as a banner
   // Payment-pool envelopes are silent (iOS 6333dd3), except a payment_notice for a payment to our
   // chatting address, which reads "Received payment": no amount, as it is only what the sender
   // claims until the chain says (iOS 927322b NotificationService, XP-023 / IOS-080).
@@ -4566,7 +4561,7 @@ function displayNameForAddress(contact) {
   // name, else the stored default (their short address) - KNS is never consulted there.
   // Every network since iOS 7227d69 (mainnet has no registry yet, so its .kachat label is null there).
   const storedName = isPlaceholderContactName(contact) ? "" : contact.name;
-  if (kachatNamesUiEnabled()) return kachatCachedLabel(contact.address) || storedName || defaultAliasFor(contact.address);
+  if (kachatNamesUiEnabled()) return kachatCachedDisplayLabel(contact.address) || storedName || defaultAliasFor(contact.address);
   return knsDomainForAddress(contact.address) || storedName || defaultAliasFor(contact.address);
 }
 
@@ -4584,7 +4579,7 @@ function identityNameForAddress(address) {
 /// Who an address is on chain: its .kachat name (else its KNS domain where .kachat names are not
 /// the identity), else the short address (iOS ContactsManager.identityName).
 function onChainNameForAddress(address) {
-  if (kachatNamesUiEnabled()) return kachatCachedLabel(address) || defaultAliasFor(address);
+  if (kachatNamesUiEnabled()) return kachatCachedDisplayLabel(address) || defaultAliasFor(address);
   return knsDomainForAddress(address) || defaultAliasFor(address);
 }
 
@@ -6016,7 +6011,6 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { resetColdStorageForAccount(); } catch { /* not yet initialized */ }
   try { resetSwapsForAccount(); } catch { /* not yet initialized */ }
   try { resetNextcloudForAccount(); } catch { /* not yet initialized */ }
-  try { Calls.resetCallsForAccount(); } catch { /* not yet initialized */ }
   // The Address Book is per wallet: its screens go back to the list (the store reads the new
   // wallet's book on its next read).
   try { resetAddressBookForAccount(); } catch { /* not yet initialized */ }
@@ -6340,12 +6334,14 @@ function deleteSelectedMessages() {
   const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
   if (!conversationEntry) return;
   const count = selectedMessageIds.size;
-  const removed = (conversationEntry.messages || []).filter((message) => selectedMessageIds.has(message.id));
+  // A long voice note or multi-part photo goes with all its parts (iOS).
+  const doomed = expandOneToOnePartIds(conversationEntry, [...selectedMessageIds]);
+  const removed = (conversationEntry.messages || []).filter((message) => doomed.has(message.id));
   conversationEntry.hiddenMessageKeys = [...new Set([
     ...(conversationEntry.hiddenMessageKeys || []),
     ...removed.flatMap((message) => [message.id, message.txid].filter(Boolean).map(String)),
   ])];
-  conversationEntry.messages = (conversationEntry.messages || []).filter((message) => !selectedMessageIds.has(message.id));
+  conversationEntry.messages = (conversationEntry.messages || []).filter((message) => !doomed.has(message.id));
   const last = lastMessageFor(conversationEntry);
   conversationEntry.lastActivityAt = last?.createdAt || conversationEntry.createdAt;
   conversationEntry.updatedAt = Date.now();
@@ -6419,8 +6415,6 @@ function displayTextForMessage(message) {
   if (!message) return "";
   if (parseEditEnvelope(message.text)) return "Edited a message";
   if (message.edit?.text != null) message = { ...message, text: messageContent(message) };
-  const callEnv = Calls.parseCallEnvelope(message.text);
-  if (callEnv) return Calls.callHistoryLine(callEnv, message.direction === "outgoing").text;
   // Per-envelope-kind wording ("♟️ Played e2 → e4", "♟️ Lost on time", …) rather than one
   // generic "Chess" for everything — matches iOS's formatNotificationBody.
   const chessPreview = Chess.chessPreviewText(message.text, message.direction === "outgoing");
@@ -6510,8 +6504,6 @@ function chatListPreviewText(message) {
     const control = chessEnv.kind === "invite" ? Chess.chessTimeControlLabel(Chess.chessTimeControlFromInvite(chessEnv)) : null;
     return control ? `♟️ Chess game - ${control}` : "♟️ Chess game";
   }
-  const callEnv = Calls.parseCallEnvelope(unwrapped);
-  if (callEnv) return Calls.callPreviewText(callEnv, message.direction === "outgoing");
   const fileMime = sniffInlineFileMime(unwrapped);
   if (fileMime != null) {
     if (fileMime.startsWith("image/")) return "Photo";
@@ -7109,7 +7101,12 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
       // Backfill (restore / first sweep / anything older than this session) arrives silently;
       // only live messages notify and count as unread.
       const live = !catchUp && isLiveMessageTime(message.createdAt);
-      if (live) { maybeNotifyIncoming(conversationEntry, contact, message); liveAdded += 1; }
+      // A later part of a long voice note or multi-part photo is not news of its own: only the
+      // first part to arrive counts and rings (iOS VoicePartGrouping.isLaterPart).
+      if (live && !isLaterPart(message, conversationEntry.messages || [], ONE_TO_ONE_PART_ACCESSORS)) {
+        maybeNotifyIncoming(conversationEntry, contact, message);
+        liveAdded += 1;
+      }
       added += 1;
     }
   }
@@ -8612,7 +8609,7 @@ function refreshKachatIdentity() {
       refreshKachatIdentity.label = label;
       if (changed) {
         const nameEl = document.querySelector("[data-profile-hero-name]");
-        if (nameEl) nameEl.textContent = label ? `${label}.kachat` : defaultAliasFor(address);
+        if (nameEl) nameEl.textContent = label ? kachatNameDisplay(label) : defaultAliasFor(address);
       }
       return kachatHeroProfile(address);
     })
@@ -8760,7 +8757,7 @@ function updateProfileHero(info, profileInfo) {
   // your oldest held name; KACHAT_NAMES.md section 7, iOS f7c371a) is your name on the hero (iOS 5df42b4).
   const kachatLabel = refreshKachatIdentity.address === engine.address ? refreshKachatIdentity.label : "";
   const displayName = kachatLabel
-    ? `${kachatLabel}.kachat`
+    ? kachatNameDisplay(kachatLabel)
     : domain
       ? (domain.toLowerCase().endsWith(".kas") ? domain.slice(0, -4) : domain)
       : defaultAliasFor(engine.address || ""); // iOS Contact.generateDefaultAlias
@@ -13262,7 +13259,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 277;
+const APP_BUILD = 278;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -17846,7 +17843,7 @@ function createChatEffectiveAddress() {
 function resolutionCardName(address, domain = null, onLabel = null) {
   if (domain) return domain;
   if (kachatNamesUiEnabled()) {
-    const label = kachatCachedLabel(address);
+    const label = kachatCachedDisplayLabel(address);
     if (label) return label;
     if (typeof onLabel === "function") {
       const pending = resolutionCardName.pending || (resolutionCardName.pending = new Map());
@@ -18790,13 +18787,72 @@ function extendMessageWindow(area, key, rerender) {
   area.scrollTop = area.scrollHeight - distanceFromBottom;
 }
 
+// --- Long voice notes and multi-part photos in 1:1 (iOS 7c5c22e3) ---
+function oneToOnePartStatus(message) {
+  if (message.direction === "incoming") return "sent";
+  if (message.status === MESSAGE_STATUSES.FAILED) return "failed";
+  if (message.status === MESSAGE_STATUS_UNCONFIRMED) return "warning";
+  if (message.status === MESSAGE_STATUSES.CONFIRMED) return "sent";
+  return "pending";
+}
+const ONE_TO_ONE_PART_ACCESSORS = {
+  content: (m) => messageContent(m),
+  // One chat, two people: who sent it is the owner.
+  owner: (m) => (m.direction === "outgoing" ? "me" : "them"),
+  key: (m) => m.id,
+  status: oneToOnePartStatus,
+};
+const oneToOnePartsMemo = new WeakMap(); // messages array -> grouping
+/** The thread's part groups, worked out once per messages array. */
+function oneToOnePartsFor(conversationEntry, messages = null) {
+  const list = messages || (conversationEntry.messages || []).filter((m) => !isHiddenPlaceholderMessage(m));
+  const memo = oneToOnePartsMemo.get(list);
+  if (memo) return memo;
+  const result = groupParts(list, ONE_TO_ONE_PART_ACCESSORS);
+  oneToOnePartsMemo.set(list, result);
+  if (messages && conversationEntry) lastOneToOneParts.set(conversationEntry.id, result);
+  return result;
+}
+const lastOneToOneParts = new Map(); // conversation id -> the last render's grouping
+function oneToOneClusterStatus(cluster) {
+  const anchorStatus = cluster.anchor.status;
+  if (cluster.status === "failed") return MESSAGE_STATUSES.FAILED;
+  if (cluster.status === "pending") return [MESSAGE_STATUSES.FAILED, MESSAGE_STATUSES.CONFIRMED, MESSAGE_STATUS_UNCONFIRMED].includes(anchorStatus) ? MESSAGE_STATUSES.PENDING : anchorStatus;
+  if (cluster.status === "warning") return MESSAGE_STATUS_UNCONFIRMED;
+  return MESSAGE_STATUSES.CONFIRMED;
+}
+/** The ids a selection of `ids` stands for: a note's bubble selects every part of it. */
+function expandOneToOnePartIds(conversationEntry, ids) {
+  const parts = lastOneToOneParts.get(conversationEntry.id) || oneToOnePartsFor(conversationEntry);
+  const out = new Set(ids);
+  for (const id of ids) {
+    const cluster = parts.clusters.get(id);
+    if (cluster) for (const member of cluster.members) out.add(member.id);
+  }
+  return out;
+}
+/** Sends `messageIds` one after another, each spending the change of the one before; when one
+ *  fails, the ones after it are marked Failed for the next Retry (iOS failRemainingParts). */
+async function sendOneToOnePartsInOrder(conversationId, messageIds) {
+  for (let i = 0; i < messageIds.length; i += 1) {
+    await runEngineSendPipeline(conversationId, messageIds[i]);
+    const entry = state.conversations.find((c) => c.id === conversationId);
+    const sent = entry?.messages.find((m) => m.id === messageIds[i]);
+    if (!sent || sent.status === MESSAGE_STATUSES.FAILED) {
+      for (const later of messageIds.slice(i + 1)) updateMessageStatus(conversationId, later, { status: MESSAGE_STATUSES.FAILED });
+      return false;
+    }
+  }
+  return true;
+}
+function retryOneToOneParts(conversationId, cluster) {
+  const failed = cluster.parts.filter((m) => m.direction === "outgoing" && m.status === MESSAGE_STATUSES.FAILED).map((m) => m.id);
+  if (!failed.length) return;
+  for (const id of failed) updateMessageStatus(conversationId, id, { status: MESSAGE_STATUSES.PENDING });
+  sendOneToOnePartsInOrder(conversationId, failed);
+}
+
 function renderMessages(conversationEntry) {
-  // The call button is for someone else: the self-chat has nobody to ring, nor a bot's chat, nor a
-  // Message Request until it's accepted (iOS d1844582).
-  const callButton = document.querySelector("[data-open-call]");
-  const callAddress = contactForConversation(conversationEntry)?.address;
-  // Not while selecting messages, where the bar is Cancel and the trash (iOS).
-  if (callButton) callButton.hidden = !conversationEntry || messageSelectionMode || callAddress === engine.address || isKachatBot(callAddress) || isMessageRequest(conversationEntry);
   // The header's name and bio were written just before this; re-measure so the thread's top inset
   // matches whatever height they came out at.
   syncChatHeaderInsets();
@@ -18804,13 +18860,16 @@ function renderMessages(conversationEntry) {
   // Cross-device placeholders never render: they carry no readable content (an outgoing tx
   // from another device whose text never synced into an archive this device has seen). Messages
   // this account can't decrypt ("[Encrypted message]") are hidden the same way (iOS c130dc1).
-  const messages = (conversationEntry.messages || [])
+  const visibleMessages = (conversationEntry.messages || [])
     .filter((m) => !isHiddenPlaceholderMessage(m))
     // Invisible control envelopes (reactions, payment-pool envelopes) are applied or dropped
     // at ingest, never shown as bubbles. Filter them at render too, so any that slipped into storage
     // before interception existed — or via a history restore that didn't intercept — don't leak as
     // raw JSON.
     .filter((m) => !parseReactionEnvelope(m?.text) && !isPaymentPoolEnvelope(m?.text) && !parseEditEnvelope(m?.text));
+  // A long voice note's or multi-part photo's later parts: drawn as one bubble at the first.
+  const partsInfo = oneToOnePartsFor(conversationEntry, visibleMessages);
+  const messages = partsInfo.hidden.size ? visibleMessages.filter((m) => !partsInfo.hidden.has(m.id)) : visibleMessages;
   // The thread re-renders constantly (sync polls, link previews resolving,
   // reactions). Capture the scroll state BEFORE the rebuild so a user reading
   // older history isn't yanked back to the bottom by every background render:
@@ -18915,7 +18974,6 @@ function renderMessages(conversationEntry) {
     }
 
     const chessEnv = Chess.parseChessEnvelope(Chess.unwrapReplyText(message.text));
-    const callEnv = Calls.parseCallEnvelope(message.text);
     const isPendingHandshakeRequest = false;
     if (isPendingHandshakeRequest) {
       bubble.classList.add("handshake-request-bubble");
@@ -18928,15 +18986,6 @@ function renderMessages(conversationEntry) {
           <button type="button" class="primary-button" data-accept-handshake>Accept</button>
           <button type="button" class="secondary-button" data-decline-handshake>Decline</button>
         </div>`;
-    } else if (callEnv) {
-      // A call leaves its history line and nothing else - not even a preview of the server the
-      // invite names (iOS f0c0fab).
-      const line = Calls.callHistoryLine(callEnv, message.direction === "outgoing");
-      const card = document.createElement("div");
-      card.className = `message-call-line${line.icon === "phone-down" ? " down" : ""}`;
-      card.innerHTML = `${Calls.callIconSvg(line.icon)}<span></span>`;
-      card.querySelector("span").textContent = line.text;
-      bubble.append(card);
     } else if (chessEnv) {
       // iOS chessBubble: an invite is always its invite bubble; of the rest, the game's latest
       // message is the live board and earlier ones a one-line log entry.
@@ -19029,7 +19078,21 @@ function renderMessages(conversationEntry) {
       replyQuoteEl = quote;
     }
 
-    if (imageEnvelope) {
+    const partCluster = partsInfo.clusters.get(message.id);
+    if (partCluster) {
+      if (partCluster.kind === "photo" && message.direction === "incoming" && photosAreHidden(photosUnlockAt)) {
+        bubble.append(buildHiddenPhotoTile(peerName));
+      } else {
+        if (partCluster.kind === "photo") bubble.classList.add("photo-bubble");
+        bubble.append(VoiceNotes.buildPartsBody(partCluster, {
+          contentOf: (m) => messageContent(m),
+          buildVoicePlayer,
+          outgoing: message.direction !== "incoming",
+          onPhotoOpen: (url) => openPhotoPreview(url, "Photo"),
+          onReady: () => scheduleActiveThreadRerender(),
+        }));
+      }
+    } else if (imageEnvelope) {
       const heldBackPhoto = message.direction === "incoming" && photosAreHidden(photosUnlockAt);
       if (heldBackPhoto) {
         bubble.append(buildHiddenPhotoTile(peerName));
@@ -19148,7 +19211,12 @@ function renderMessages(conversationEntry) {
     // A failed payment is not retried from the thread (iOS): it is sent again from Send KAS.
     const retryable = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED
       && message.messageType !== "payment" && !bubble.classList.contains("has-payment-card") && chessRetryFits(conversationEntry, message);
-    const deliveryIcon = createDeliveryStatusIcon(message, { onRetry: retryable ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null });
+    // A note's parts show one status; Retry resends only the failed ones, in order (iOS).
+    const deliveryIcon = partCluster
+      ? createDeliveryStatusIcon({ ...message, status: oneToOneClusterStatus(partCluster) }, {
+        onRetry: message.direction === "outgoing" && partCluster.status === "failed" ? () => retryOneToOneParts(conversationEntry.id, partCluster) : null,
+      })
+      : createDeliveryStatusIcon(message, { onRetry: retryable ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null });
     const typeCapsule = isPendingHandshakeRequest ? null : messageTypeCapsule(message, { hasPaymentCard: bubble.classList.contains("has-payment-card") });
     const stack = document.createElement("div");
     stack.className = "message-bubble-stack";
@@ -19438,7 +19506,7 @@ function openChatInfoFor(contact, conversationEntry) {
   // custom one that would hide their .kachat name. Your own card's title is your .kachat name.
   if (kachatNamesUiEnabled() && chatInfoNameInput) {
     chatInfoNameInput.placeholder = "Name";
-    if (isSelf) chatInfoNameInput.value = kachatCachedLabel(contact.address) || displayNameForAddress(contact);
+    if (isSelf) chatInfoNameInput.value = kachatCachedDisplayLabel(contact.address) || displayNameForAddress(contact);
     else if (!contact.nameIsCustom) {
       chatInfoNameInput.value = addressBookGiven || "";
       chatInfoNameInput.placeholder = displayNameForAddress(contact);
@@ -19566,7 +19634,7 @@ function paintChatInfoKachat(contact) {
   const names = label && allNames.includes(label) ? [label, ...allNames.filter((n) => n !== label)] : allNames;
 
   if (chatInfoNameInput) {
-    if (isSelf) chatInfoNameInput.value = label ? `${label}.kachat` : displayNameForAddress(contact);
+    if (isSelf) chatInfoNameInput.value = label ? kachatNameDisplay(label) : displayNameForAddress(contact);
     else if (!contact.nameIsCustom) chatInfoNameInput.placeholder = displayNameForAddress(contact);
   }
 
@@ -19644,12 +19712,14 @@ function paintChatInfoKachat(contact) {
   const namesList = document.querySelector("[data-chat-info-kachat-names]");
   if (namesList) {
     namesList.innerHTML = names.map((name) => {
+      // Copy keeps the ending; the row shows it as Settings says (iOS 94ed3a35).
       const full = `${name}.kachat`;
+      const shown = kachatNameDisplay(name);
       const primary = name === label;
       return `
       <button type="button" class="chat-info-domain-row" data-chat-info-copy-domain="${escapeHtml(full)}" title="Copy name">
         <svg class="chat-info-domain-icon${primary ? " primary" : ""}" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 -2.2A9 9 0 1 0 17.5 19"/></svg>
-        <strong>${escapeHtml(full)}</strong>
+        <strong>${escapeHtml(shown)}</strong>
         ${primary ? `<span class="profile-domain-primary">Primary</span>` : ``}
       </button>`;
     }).join("");
@@ -20062,20 +20132,6 @@ function addContact({ name, address, relationshipState = "legacy-manual" }) {
 // wallet screen. No-op with a toast if the address is missing/invalid or is your own.
 async function openChatWithAddressForKaspa({ address, name } = {}) {
   return openChatWithAddress({ address, name, paymentMode: true });
-}
-
-// The chat contact a call needs, created only once Call goes on from Contacts (iOS d1844582
-// getOrCreateContact). A regular contact of yours, its name left to the Address Book's.
-function ensureCallContact(address) {
-  if ((state.contacts || []).some((entry) => entry.address === address)) return;
-  const createdAt = Date.now();
-  clearDeletedContactAddress(address);
-  state.contacts.push({
-    id: nowId(), name: shortAddress(address), nameIsCustom: false, address,
-    avatar: initialsFor(address), createdAt, updatedAt: createdAt,
-    relationshipState: "legacy-manual", handshakeTxid: "",
-  });
-  persistState();
 }
 
 // Open (creating if needed) the 1:1 conversation with `address`, the way iOS's KaPosts
@@ -23698,7 +23754,7 @@ function queueConversationMessage(conversationId, text, { feeOverrideKas = null 
   // Never a call message (iOS 40b1461): a call_invite/request/end sent while a reply was queued in
   // the chat went out as a reply, and the other side never saw a call. The reply stays queued for
   // the person's next text.
-  if (replyingToMessageId && !Calls.parseCallEnvelope(text)) {
+  if (replyingToMessageId) {
     const replyTarget = conversationEntry.messages.find((entry) => entry.id === replyingToMessageId);
     if (replyTarget) {
       finalText = JSON.stringify({
@@ -23739,6 +23795,39 @@ function queueConversationMessage(conversationId, text, { feeOverrideKas = null 
   return message;
 }
 
+
+/** A long voice note's or multi-part photo's parts: every part shows at once (Sending), then
+ *  they go in index order, each spending the change of the one before. A part never carries a
+ *  reply, and a reply that was queued is dropped (iOS: the next message isn't one either). */
+function queueOneToOneParts(conversationId, texts) {
+  const conversationEntry = state.conversations.find((entry) => entry.id === conversationId);
+  if (!conversationEntry) return;
+  const contact = contactForConversation(conversationEntry);
+  promoteRelationshipFromIncomingEvidence(contact, conversationEntry);
+  if (contact?.relationshipState === "incoming-request") contact.relationshipState = "established";
+  if (contact?.address) acceptChat(contact.address);
+  if (replyingToMessageId) cancelReply();
+  const start = Date.now();
+  const ids = texts.map((text, offset) => {
+    const message = createMessage({
+      conversationId: conversationEntry.id,
+      contactId: conversationEntry.contactId,
+      direction: "outgoing",
+      text,
+      sender: engine.address || null,
+      receiver: contact?.address || null,
+      status: MESSAGE_STATUSES.PENDING,
+      transport: transportMode,
+      createdAt: start + offset,
+    });
+    appendIncomingOrReactionMessage(conversationEntry, message);
+    return message.id;
+  });
+  renderMessages(conversationEntry);
+  setStatus("Queued for real Kaspa payload transaction");
+  window.setTimeout(() => sendOneToOnePartsInOrder(conversationEntry.id, ids), 0);
+  window.setTimeout(persistState, 0);
+}
 
 function closeComposerMenu() {
   if (composerPlusMenu) composerPlusMenu.hidden = true;
@@ -25199,7 +25288,8 @@ const COMPOSER_MEDIA_ROUTE_COPY = {
   },
   voice: {
     title: "Voice Message",
-    // Groups and public chats keep 10 s on chain; a 1:1 note runs to 25 s (iOS f5f6a11).
+    // "Up to 2:50" in 1:1 and rooms, "Up to 1:50" in groups (iOS 7c5c22e3), filled in by
+    // voiceChainSubtitle; without the long-note encoder the old 25 s / 10 s notes.
     chainTitle: "Record On-Chain", chainSubtitle: "Up to 10 seconds, sent on chain.",
     directChainSubtitle: "Up to 25 seconds, sent on chain.",
     nextcloudTitle: "Record via Nextcloud", nextcloudSubtitle: "Up to 5 minutes. Uploads to your Nextcloud; the chat carries the link.",
@@ -25210,13 +25300,19 @@ const NEXTCLOUD_VOICE_MAX_SECONDS = 300;
 
 /** The on-chain-or-Nextcloud question as a sheet, for the composers whose "+" is a sheet (groups)
  *  and for public chats' mic. Resolves "chain", "nextcloud", "back" or null (dismissed). */
-async function chooseMediaRouteDialog(kind, { backLabel = "Back" } = {}) {
+/** "Up to 2:50, sent on chain." for a voice note on this path (iOS "Up to %@, sent on chain."). */
+function voiceChainSubtitle(path) {
+  if (!VoiceNotes.longVoiceNotesSupported()) return null;
+  return `Up to ${VoiceNotes.formatLimit(VOICE_PATHS[path].maxSeconds)}, sent on chain.`;
+}
+async function chooseMediaRouteDialog(kind, { backLabel = "Back", voicePath = "group" } = {}) {
   const copy = COMPOSER_MEDIA_ROUTE_COPY[kind];
   if (!copy) return null;
+  const chainSubtitle = (kind === "voice" && voiceChainSubtitle(voicePath)) || copy.chainSubtitle;
   return chooseDialog({
     title: copy.title,
     options: [
-      { id: "chain", title: copy.chainTitle, subtitle: copy.chainSubtitle },
+      { id: "chain", title: copy.chainTitle, subtitle: chainSubtitle },
       { id: "nextcloud", title: copy.nextcloudTitle, subtitle: copy.nextcloudSubtitle },
       { id: "back", title: backLabel },
     ],
@@ -25238,7 +25334,7 @@ function chooseComposerMedia(kind) {
   const set = (selector, text) => { const el = composerMediaRouteMenu.querySelector(selector); if (el) el.textContent = text; };
   set("[data-media-route-title]", copy.title);
   set("[data-media-route-chain-title]", copy.chainTitle);
-  set("[data-media-route-chain-subtitle]", copy.directChainSubtitle || copy.chainSubtitle);
+  set("[data-media-route-chain-subtitle]", (kind === "voice" && voiceChainSubtitle("oneToOne")) || copy.directChainSubtitle || copy.chainSubtitle);
   set("[data-media-route-nextcloud-title]", copy.nextcloudTitle);
   set("[data-media-route-nextcloud-subtitle]", copy.nextcloudSubtitle);
   if (composerPlusMenu) composerPlusMenu.hidden = true;
@@ -26282,6 +26378,52 @@ async function attachPhotoBlob(blob) {
   }
 }
 
+// --- Photo Quality (iOS 7c5c22e3 PhotoQualitySheet) ---
+// Send on an on-chain photo asks High (up to 1 KAS), Medium (0.5) or Low (0.1). Each row shows its
+// budget until the photo has been compressed for it, then the fee that photo will cost. A photo
+// bigger than one transaction goes as tagged chunks shown as one photo once all arrive.
+function photoTierFeeText(sompi) {
+  const kas = Number(sompi) / 1e8;
+  const text = kas > 0 && kas < 0.01 ? String(Number(kas.toPrecision(2))) : String(Number(kas.toFixed(2)));
+  return `(~${text} ${KAS_UNIT})`;
+}
+/** The JPEG for the tier the person picks, or null when they cancel. */
+async function choosePhotoTier(source, { group = false } = {}) {
+  const budgets = PHOTO_TIERS.map((tier) => photoTierMaxBytes(tier.id, { group }));
+  const prepared = (async () => prepareJpegForTiers(await loadPhotoSource(source), budgets))();
+  prepared.catch(() => {});
+  const choice = chooseDialog({
+    title: "Photo Quality",
+    options: PHOTO_TIERS.map((tier) => ({ id: tier.id, title: tier.title, subtitle: photoTierFeeText(tier.budgetSompi) })),
+  });
+  prepared.then((results) => {
+    for (const tier of PHOTO_TIERS) {
+      const bytes = results[photoTierMaxBytes(tier.id, { group })];
+      const row = document.querySelector(`[data-app-dialog-choice="${tier.id}"] small`);
+      if (bytes && row) row.textContent = photoTierFeeText(photoEstimatedFeeSompi(bytes.length, { group }));
+    }
+  }).catch(() => {});
+  const picked = await choice;
+  if (!picked) return null;
+  const results = await prepared;
+  return results[photoTierMaxBytes(picked, { group })] || null;
+}
+/** Sends a photo on chain at the tier picked: one message, or tagged chunks after a check that
+ *  the balance covers them all. False when cancelled or refused. */
+async function sendTieredPhoto(source, { group = false, send, sendParts, onError }) {
+  let jpeg;
+  try { jpeg = await choosePhotoTier(source, { group }); }
+  catch (error) { onError("Couldn't load that photo. Please try a PNG, JPEG, or HEIF image."); appendEngineLog(`Photo tiers failed: ${describeThrown(error)}`); return false; }
+  if (!jpeg) return false;
+  const envelopes = VoiceNotes.photoEnvelopes(jpeg, { group });
+  if (envelopes.length === 1) { await send(envelopes[0]); return true; }
+  const perPart = PHOTO_TIERS.length ? photoEstimatedFeeSompi(jpeg.length, { group }) / 1e8 / envelopes.length : 0;
+  const shortfall = partsBalanceShortfall(envelopes.map(() => perPart));
+  if (shortfall) { onError(shortfall); return false; }
+  await sendParts(envelopes);
+  return true;
+}
+
 // Matches iOS's ChatService+Conversations.sendImage / Android's ImageMessage
 // exactly: photos are NOT a distinct wire type. This JSON string is sent as
 // the plaintext of an ordinary kchat:1:comm: COMM message, the same way a
@@ -26314,11 +26456,42 @@ const CHAT_VOICE_MAX_DURATION_SECONDS = 25;
 const CHAT_VOICE_MAX_BYTES = 31000;
 // Nextcloud-uploaded voice notes aren't payload-bound - the server carries them - so a "Record via
 // Nextcloud" note runs to the app-wide 5 minutes (iOS ComposerMediaLimits.nextcloudVoiceSeconds).
+// Since iOS 7c5c22e3 an on-chain note is 16 kbps Opus in 60 ms frames, as long as 1 KAS of fees
+// allows: 2:50 in 1:1 and 1:50 in groups, sent as tagged parts. A browser without the WebCodecs
+// Opus encoder keeps the old single-message limits above.
 function voiceMaxDurationSeconds() {
-  return voiceViaNextcloud && isNextcloudConnected() ? NEXTCLOUD_VOICE_MAX_SECONDS : CHAT_VOICE_MAX_DURATION_SECONDS;
+  if (voiceViaNextcloud && isNextcloudConnected()) return NEXTCLOUD_VOICE_MAX_SECONDS;
+  return VoiceNotes.longVoiceNotesSupported() ? VOICE_PATHS.oneToOne.maxSeconds : CHAT_VOICE_MAX_DURATION_SECONDS;
 }
 function groupVoiceMaxDurationSeconds() {
-  return groupVoiceViaNextcloud && isNextcloudConnected() ? NEXTCLOUD_VOICE_MAX_SECONDS : VOICE_MAX_DURATION_SECONDS;
+  if (groupVoiceViaNextcloud && isNextcloudConnected()) return NEXTCLOUD_VOICE_MAX_SECONDS;
+  return VoiceNotes.longVoiceNotesSupported() ? VOICE_PATHS.group.maxSeconds : VOICE_MAX_DURATION_SECONDS;
+}
+/** The bitrate a recording is captured at: the final note is re-encoded at 16 kbps, so the
+ *  capture keeps more; without the encoder it goes out as recorded, at 6 kbps. */
+function voiceCaptureBitsPerSecond() {
+  return VoiceNotes.longVoiceNotesSupported() ? 48000 : VOICE_AUDIO_BITS_PER_SECOND;
+}
+/** The fees of parts of these payload sizes (each its own transaction), asked once per size. */
+async function sumPartFeesKas(payloadSizes) {
+  const bySize = new Map();
+  for (const size of payloadSizes) bySize.set(size, (bySize.get(size) || 0) + 1);
+  let total = 0;
+  for (const [size, count] of bySize) {
+    const fee = Number(await engine.estimateMessageFee(size));
+    if (!Number.isFinite(fee)) return null;
+    total += fee * count;
+  }
+  return Number(total.toFixed(8));
+}
+/** Each part's 1:1 payload bytes for WebM parts of these sizes (frame + ECIES + base64). */
+function oneToOnePartPayloadSizes(partSizes) {
+  const count = partSizes.length;
+  return partSizes.map((size, offset) => {
+    const part = count > 1 ? { id: "0".repeat(32), index: offset + 1, count } : null;
+    const name = part ? `voice-${offset + 1}of${count}.webm` : "voice.webm";
+    return estimateCommPayloadBytesForPlaintext(mediaFrameByteLength({ rawBytes: size, name, mimeType: "audio/webm", part }));
+  });
 }
 // 6 kbps Opus, iOS's opusBitrate for 1:1 and group notes alike.
 const VOICE_AUDIO_BITS_PER_SECOND = 6000;
@@ -26347,6 +26520,15 @@ function pickVoiceMimeType() {
     if (window.MediaRecorder?.isTypeSupported?.(candidate)) return candidate;
   }
   return "";
+}
+
+/** Microphone access is off (iOS ca013fc8 MediaAccess): where to turn it on, not a bare error. A
+ *  browser asks the first time by itself; once refused, only its site settings can allow it. */
+function showMicrophoneAccessAlert() {
+  return alertDialog({
+    title: "Microphone Access Required",
+    message: "Allow microphone access for this site in your browser's settings to record voice messages.",
+  });
 }
 
 // Generic MediaRecorder wrapper shared by the 1:1 composer and the broadcast
@@ -26409,7 +26591,7 @@ function createVoiceRecorder({ maxDurationSeconds, onElapsed, onFinish }) {
     chunks = [];
     cancelled = false;
     try {
-      recorder = new MediaRecorder(stream, mimeType ? { mimeType, audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND } : undefined);
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType, audioBitsPerSecond: voiceCaptureBitsPerSecond() } : undefined);
     } catch {
       stream.getTracks().forEach((track) => track.stop());
       stream = null;
@@ -26473,10 +26655,10 @@ function renderVoicePanel(panel, state, { prefix = "voice-recording", seconds = 
     <button type="button" class="voice-recording-cancel voice-preview-trash" data-${prefix}-cancel aria-label="Discard recording"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg></button>
     <button type="button" class="voice-recording-stop" data-${prefix}-send>Send</button>`;
 }
-function setVoicePreview(panel, { blob, mimeType, seconds }, prefix) {
+function setVoicePreview(panel, { blob, mimeType, seconds, parts = null, recording = null, recordingMime = null }, prefix) {
   clearVoicePreview(panel);
   const audio = new Audio(URL.createObjectURL(blob));
-  const entry = { blob, mimeType, seconds, audio, playing: false, prefix };
+  const entry = { blob, mimeType, seconds, audio, playing: false, prefix, parts, recording, recordingMime };
   audio.addEventListener("ended", () => { entry.playing = false; renderVoicePanel(panel, "preview", { prefix, seconds: entry.seconds }); });
   audio.addEventListener("timeupdate", () => { if (entry.playing) renderVoicePanel(panel, "preview", { prefix, seconds: entry.seconds }); });
   voicePreviews.set(panel, entry);
@@ -26501,8 +26683,7 @@ const chatVoiceRecorder = createVoiceRecorder({
   onElapsed: (elapsed) => {
     const wholeSecondChanged = Math.floor(elapsed) !== Math.floor(voiceElapsedSeconds);
     voiceElapsedSeconds = elapsed;
-    const el = voiceRecordingPanel?.querySelector("[data-voice-recording-time]");
-    if (el) el.textContent = String(Math.floor(elapsed));
+    if (wholeSecondChanged && chatAudioMode && chatVoiceRecorder.isRecording()) updateRecordingClock(voiceRecordingPanel, "[data-voice-recording-time]", elapsed, voiceMaxDurationSeconds());
     // The fee follows the recording's length (iOS updateRecordingFeeEstimate).
     if (wholeSecondChanged) scheduleFeeEstimate();
   },
@@ -26516,6 +26697,9 @@ const chatVoiceRecorder = createVoiceRecorder({
 // or records. A sent voice message goes back to the text composer too.
 let chatAudioMode = false;
 let chatVoiceEncoding = false;
+// Each recording's turn: a new recording, a trash or leaving audio mode moves it on, so an encode
+// that finishes after that is dropped instead of landing in the next recording's place or chat.
+let chatVoiceGeneration = 0;
 const VOICE_TRASH_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>';
 function chatVoiceState() {
   if (chatVoiceEncoding) return "encoding";
@@ -26544,7 +26728,8 @@ function renderChatVoiceField() {
   const trash = `<button type="button" class="voice-field-trash" data-voice-recording-cancel aria-label="Discard recording">${VOICE_TRASH_SVG}</button>`;
   const voiceState = chatVoiceState();
   if (voiceState === "recording") {
-    panel.innerHTML = `<span class="composer-field-spinner" aria-hidden="true"></span><span class="voice-field-label">Recording... <span data-voice-recording-time>${Math.floor(voiceElapsedSeconds)}</span>s</span>${trash}`;
+    // A ring that fills toward the limit, "Recording... 00:10 / 02:50" (iOS 7c5c22e3).
+    panel.innerHTML = `${voiceRingHtml(voiceElapsedSeconds, voiceMaxDurationSeconds())}<span class="voice-field-label">Recording... <span data-voice-recording-time>${formatAudioDuration(voiceElapsedSeconds)}</span> / ${formatAudioDuration(voiceMaxDurationSeconds())}</span>${trash}`;
   } else if (voiceState === "encoding") {
     panel.innerHTML = `<span class="composer-field-spinner" aria-hidden="true"></span><span class="voice-field-label">Encoding…</span>${trash}`;
   } else if (voiceState === "preview") {
@@ -26562,8 +26747,27 @@ function renderChatVoiceField() {
   if (voiceState !== lastChatVoiceFeeState) { lastChatVoiceFeeState = voiceState; scheduleFeeEstimate(); }
 }
 let lastChatVoiceFeeState = "";
+/** Moves a recording's clock and ring on without rebuilding the field, so a click on its trash
+ *  is never lost to a redraw. */
+function updateRecordingClock(panel, timeSelector, elapsed, limit) {
+  const time = panel?.querySelector(timeSelector);
+  if (time) time.textContent = formatAudioDuration(elapsed);
+  const fill = panel?.querySelector(".voice-recording-ring-fill");
+  if (fill) {
+    const circumference = 2 * Math.PI * 8;
+    const progress = Math.max(0, Math.min(1, Number(elapsed) / Math.max(1, Number(limit) || 1)));
+    fill.setAttribute("stroke-dashoffset", (circumference * (1 - progress)).toFixed(2));
+  }
+}
+/** The recording ring (iOS): a red arc that fills toward the length limit. */
+function voiceRingHtml(elapsed, limit) {
+  const progress = Math.max(0, Math.min(1, Number(elapsed) / Math.max(1, Number(limit) || 1)));
+  const circumference = 2 * Math.PI * 8;
+  return `<svg class="voice-recording-ring" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8"/><circle class="voice-recording-ring-fill" cx="10" cy="10" r="8" stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${(circumference * (1 - progress)).toFixed(2)}"/></svg>`;
+}
 /** Leaves audio mode for the text composer (iOS switchMode(.message)), discarding any recording. */
 function exitChatAudioMode() {
+  chatVoiceGeneration += 1;
   if (!chatAudioMode) return;
   chatAudioMode = false;
   chatVoiceEncoding = false;
@@ -26577,6 +26781,7 @@ function exitChatAudioMode() {
 async function startVoiceRecording() {
   // A second tap while the mic prompt is up is ignored rather than opening another stream.
   if (chatVoiceRecorder.isRecording() || chatVoiceRecorder.isStarting()) return;
+  chatVoiceGeneration += 1;
   clearVoicePreview(voiceRecordingPanel);
   chatAudioMode = true;
   chatVoiceEncoding = false;
@@ -26584,8 +26789,9 @@ async function startVoiceRecording() {
   renderChatVoiceField();
   const error = await chatVoiceRecorder.start();
   if (error) {
-    // iOS: "Microphone access denied." in the Failed to Send alert; audio mode stays up.
-    showFailedToSend(error === "Microphone access was denied." ? "Microphone access denied." : error);
+    // Access off: say where to turn it on (iOS ca013fc8 mediaAccessAlert); audio mode stays up.
+    if (error === "Microphone access was denied.") showMicrophoneAccessAlert();
+    else showFailedToSend(error);
     renderChatVoiceField();
     return;
   }
@@ -26602,12 +26808,29 @@ function stopVoiceRecording(cancelled) {
 }
 
 // Stop hands the recording to the preview; Send on the preview is what actually sends it.
-let chatVoiceDiscardNext = false; // trashed while it was still encoding
 async function handleChatVoiceRecordingFinished({ blob, mimeType, cancelled }) {
   chatVoiceEncoding = false;
-  const discard = chatVoiceDiscardNext || !chatAudioMode;
-  chatVoiceDiscardNext = false;
+  const discard = !chatAudioMode;
   if (cancelled || discard || !blob || !activeConversationId) { clearVoicePreview(voiceRecordingPanel); renderChatVoiceField(); return; }
+  // On chain: encoded to the parts it goes as ("Encoding…"), and the preview plays the note as
+  // it will be heard (iOS encodeParts). Via Nextcloud the recording goes as it is.
+  if (!(voiceViaNextcloud && isNextcloudConnected()) && VoiceNotes.longVoiceNotesSupported()) {
+    const generation = chatVoiceGeneration;
+    const conversationId = activeConversationId;
+    chatVoiceEncoding = true;
+    renderChatVoiceField();
+    let prepared = null;
+    try { prepared = await VoiceNotes.prepareVoiceParts(blob, VOICE_PATHS.oneToOne); }
+    catch (error) { appendEngineLog(`Voice note encoding failed: ${describeThrown(error)}`); }
+    // Trashed or a new recording begun: that path already reset the field.
+    if (generation !== chatVoiceGeneration) return;
+    chatVoiceEncoding = false;
+    // Another chat open, or audio mode left: this one is gone.
+    if (activeConversationId !== conversationId || !chatAudioMode || !activeConversationId) { clearVoicePreview(voiceRecordingPanel); renderChatVoiceField(); return; }
+    if (!prepared) { showFailedToSend("Audio encoding failed. Please record again."); clearVoicePreview(voiceRecordingPanel); renderChatVoiceField(); return; }
+    setVoicePreview(voiceRecordingPanel, { blob: prepared.previewBlob, mimeType: "audio/wav", seconds: Math.round(prepared.seconds), parts: prepared.parts, recording: blob, recordingMime: mimeType }, "voice-recording");
+    return;
+  }
   setVoicePreview(voiceRecordingPanel, { blob, mimeType, seconds: Math.round(voiceElapsedSeconds) }, "voice-recording");
 }
 
@@ -26622,14 +26845,29 @@ function handleChatAudioSend() {
 
 async function sendChatVoicePreview() {
   const entry = voicePreviews.get(voiceRecordingPanel);
-  if (!entry || !activeConversationId) return;
+  // One send per preview: a second Send (double click, Enter-Enter) while this one waits does nothing.
+  if (!entry || entry.sending || !activeConversationId) return;
   // The chat it was recorded in: a Nextcloud upload that fails falls back to the chain seconds
   // later, by when another chat (or account) may be open - it must not go there.
   const conversationId = activeConversationId;
-  const { blob, mimeType } = entry;
+  // A long-note preview plays the joined parts; the recording itself is what Nextcloud gets.
+  const blob = entry.recording || entry.blob;
+  const mimeType = entry.recording ? entry.recordingMime : entry.mimeType;
+  const parts = entry.parts;
   // On chain a note is capped at 31 KB (iOS maxAudioBytes); the recording stays to be discarded.
   const voiceTooLargeForChain = "This voice message is too large to send on chain. Please record a shorter one.";
-  if (!(voiceViaNextcloud && isNextcloudConnected()) && blob.size > CHAT_VOICE_MAX_BYTES) { showFailedToSend(voiceTooLargeForChain); return; }
+  if (!(voiceViaNextcloud && isNextcloudConnected()) && !parts && blob.size > CHAT_VOICE_MAX_BYTES) { showFailedToSend(voiceTooLargeForChain); return; }
+  // Every part's fee first, before a single one goes out (iOS sendVoiceNoteParts).
+  if (parts?.length > 1 && !(voiceViaNextcloud && isNextcloudConnected())) {
+    entry.sending = true;
+    const sizes = oneToOnePartPayloadSizes(parts.map((part) => part.length));
+    const fees = await Promise.all(sizes.map((size) => engine.estimateMessageFee(size).catch(() => null)));
+    // Trashed, sent or another chat opened meanwhile: it no longer goes anywhere.
+    if (voicePreviews.get(voiceRecordingPanel) !== entry || !chatAudioMode || activeConversationId !== conversationId) return;
+    entry.sending = false;
+    const shortfall = partsBalanceShortfall(fees);
+    if (shortfall) { showFailedToSend(shortfall); return; }
+  }
   // Back to the text composer once it is on its way (iOS sendAudio: switchMode(.message)).
   chatAudioMode = false;
   clearVoicePreview(voiceRecordingPanel);
@@ -26651,6 +26889,19 @@ async function sendChatVoicePreview() {
       appendEngineLog(`Nextcloud voice upload failed, sending on-chain: ${userFacingError(error)}`);
       showCopyToast("Nextcloud upload failed - sending on-chain instead");
     }
+  }
+  // A Nextcloud note whose upload failed goes on chain as the long-note parts, not as the raw
+  // recording (captured above 6 kbps, it would not fit one transaction).
+  let chainParts = parts;
+  if (!chainParts && VoiceNotes.longVoiceNotesSupported()) {
+    try { chainParts = (await VoiceNotes.prepareVoiceParts(blob, VOICE_PATHS.oneToOne)).parts; }
+    catch (error) { appendEngineLog(`Voice note encoding failed: ${describeThrown(error)}`); showFailedToSend("Audio encoding failed. Please record again."); return; }
+  }
+  if (chainParts) {
+    const envelopes = VoiceNotes.voicePartEnvelopes(chainParts);
+    if (envelopes.length === 1) queueConversationMessage(conversationId, envelopes[0]);
+    else queueOneToOneParts(conversationId, envelopes);
+    return;
   }
   if (blob.size > CHAT_VOICE_MAX_BYTES) { showFailedToSend(voiceTooLargeForChain); return; }
 
@@ -26676,8 +26927,7 @@ voiceRecordingPanel?.addEventListener("click", (event) => {
   if (event.target.closest("[data-voice-recording-play]")) { toggleVoicePreviewPlayback(voiceRecordingPanel); return; }
   // The trash (iOS d1844582): back to texting, which throws the recording away.
   if (event.target.closest("[data-voice-recording-cancel]")) {
-    if (chatVoiceEncoding) chatVoiceDiscardNext = true;
-    exitChatAudioMode();
+    exitChatAudioMode(); // moves the recording's turn on, so an encode still running is dropped
     composer?.elements?.message?.focus();
   }
 });
@@ -27031,14 +27281,8 @@ function appendIncomingOrReactionMessage(conversationEntry, message) {
   // 6333dd3). Unknown {type:...} values fall through to the normal pipeline per the wire contract.
   const poolEnvelope = parsePaymentPoolEnvelope(message.text);
   if (poolEnvelope) return poolEnvelope.kind === "notice" ? handlePaymentNotice(conversationEntry, message, poolEnvelope.notice) : null;
-  // Calls ride the chat: an invite rings, a request asks this device to host, an end hangs up.
-  // The message still lands, as the call-history line every client renders.
-  const callEnvelope = Calls.parseCallEnvelope(message.text);
-  if (callEnvelope) {
-    const contact = contactForConversation(conversationEntry);
-    try { Calls.handleIncomingCallEnvelope(callEnvelope, message, contact?.address || message.sender || ""); }
-    catch (error) { appendEngineLog(`Call envelope handling failed: ${error.message}`); }
-  }
+  // KaChat has no calls (iOS 7c5c22e3): another client's call_* message is dropped on arrival.
+  if (isCallSignal(message.text)) return null;
   // A placeholder body (another device's send, a message this account can't decrypt) is kept, so
   // a later copy with real text can replace it, but it is never a visible bubble: no banner, no
   // unread - a badge nobody could clear (iOS c130dc1).
@@ -28021,6 +28265,12 @@ function composerFeeSubject() {
       if (voiceState === "idle") return null;
       if (voiceViaNextcloud && isNextcloudConnected()) return feeEstimateEnabled() ? { payloadBytes: NEXTCLOUD_LINK_PAYLOAD_BYTES, length: -1 } : null;
       const entry = voicePreviews.get(voiceRecordingPanel);
+      // Long notes: every part is its own transaction (iOS updateRecordingFeeEstimate).
+      if (entry?.parts || (!entry && VoiceNotes.longVoiceNotesSupported())) {
+        const sizes = entry?.parts ? entry.parts.map((part) => part.length) : voicePartSizes(Math.max(1, Math.floor(voiceElapsedSeconds)), VOICE_PATHS.oneToOne);
+        const partsPayloadBytes = oneToOnePartPayloadSizes(sizes);
+        return { payloadBytes: partsPayloadBytes[0], partsPayloadBytes, length: partsPayloadBytes.reduce((a, b) => a + b, 0) };
+      }
       const audioBytes = entry?.blob?.size ?? Math.ceil(voiceElapsedSeconds * VOICE_AUDIO_BITS_PER_SECOND / 8);
       // The binary media frame: the raw audio plus a small header (iOS f5f6a11).
       const frameBytes = mediaFrameByteLength({ rawBytes: audioBytes, name: "voice-message.webm", mimeType: entry?.mimeType || "audio/webm;codecs=opus" });
@@ -28065,7 +28315,7 @@ function scheduleFeeEstimate({ typing = false } = {}) {
   feeEstimateDebounceTimer = window.setTimeout(async () => {
     feeEstimateDebounceTimer = null;
     try {
-      const feeKas = await engine.estimateMessageFee(subject.payloadBytes);
+      const feeKas = subject.partsPayloadBytes?.length > 1 ? await sumPartFeesKas(subject.partsPayloadBytes) : await engine.estimateMessageFee(subject.payloadBytes);
       if (token !== feeEstimateRequestToken || !feeEstimateBanner) return;
       composerFeeEstimateKas = feeKas == null ? null : String(feeKas);
       composerFeeEstimateLength = feeKas == null ? null : length;
@@ -28163,8 +28413,18 @@ composer.addEventListener("submit", async (event) => {
       return;
     }
     if (attachment.isVideo) { clearPendingPhoto(); return; }
-    queueConversationMessage(conversationId, buildImageEnvelopeJson(attachment));
-    clearPendingPhoto();
+    // On chain: the quality first (iOS PhotoQualitySheet). Cancel keeps the photo staged.
+    setPendingPhotoSending(true);
+    try {
+      const sent = await sendTieredPhoto(attachment.originalBlob || attachment.dataUrl, {
+        send: (envelope) => queueConversationMessage(conversationId, envelope),
+        sendParts: (envelopes) => queueOneToOneParts(conversationId, envelopes),
+        onError: (message) => showFailedToSend(message),
+      });
+      if (sent && pendingPhotoAttachment === attachment) clearPendingPhoto();
+    } finally {
+      if (pendingPhotoAttachment === attachment) setPendingPhotoSending(false);
+    }
     return;
   }
 
@@ -30902,6 +31162,21 @@ function feeEstimateEnabled() {
   return (accountShellPrefs.estimateFees ?? true) !== false;
 }
 
+// Settings > Customization > Show .kachat Endings (iOS 94ed3a35): one app setting, display only.
+{
+  const endingsInput = document.querySelector("[data-pref-kachat-endings]");
+  if (endingsInput) {
+    endingsInput.checked = kachatShowsEndings();
+    endingsInput.addEventListener("change", () => {
+      setKachatShowsEndings(endingsInput.checked);
+      // Every name on screen follows at once.
+      try { renderChats(); } catch {}
+      try { if (activeConversationId) { const entry = state.conversations.find((c) => c.id === activeConversationId); if (entry) { conversationName.textContent = displayNameForAddress(contactForConversation(entry)); renderMessages(entry); } } } catch {}
+      try { if (activeGroupId) renderGroupMessages(); } catch {}
+    });
+  }
+}
+
 const prefBindings = [
   ["[data-pref-estimate-fees]", "estimateFees", true],
   ["[data-pref-hide-payment-chats]", "hidePaymentChats", false],
@@ -31632,7 +31907,7 @@ queueMicrotask(async () => {
       createVoiceRecorder,
       // Public chats' mic asks on chain or via Nextcloud while a server is connected (iOS 8b13460).
       isNextcloudConnected,
-      chooseMediaRoute: (kind) => chooseMediaRouteDialog(kind),
+      chooseMediaRoute: (kind) => chooseMediaRouteDialog(kind, { voicePath: "room" }),
       nextcloudVoiceMaxSeconds: NEXTCLOUD_VOICE_MAX_SECONDS,
       uploadNextcloudMedia,
       // Reactions: identical wire parser and fixed tapback set across all clients.
@@ -31671,6 +31946,8 @@ queueMicrotask(async () => {
       showReactionsSheet,
       showFeeEstimate: () => feeEstimateEnabled(),
       estimateFeeKas: (payloadBytes) => engine.estimateMessageFee(payloadBytes),
+      partsBalanceShortfall,
+      showMicrophoneAccessAlert,
       chattingAddress: () => engine.address || "",
       appWideBroadcastIndexer: () => String(getEndpoint("broadcastIndexer") || ""),
       drawQr: (canvas, value) => engine.drawQrFor(canvas, value, { dark: "#06110f", light: "#ffffff" }),
@@ -31682,7 +31959,7 @@ queueMicrotask(async () => {
       },
       // Testnet (iOS e52357d): a sender you haven't named reads as their .kachat name. Kept apart
       // from contactNameFor, which also names a new chat (a .kachat label is not your name for them).
-      identityNameFor: (address) => (kachatNamesUiEnabled() ? kachatCachedLabel(address) : null),
+      identityNameFor: (address) => (kachatNamesUiEnabled() ? kachatCachedDisplayLabel(address) : null),
       // Bell toggle requests OS notification permission on the spot.
       ensureNotificationPermission,
       // "Today"/"Yesterday" day pills, shared with 1:1 and group chats.
@@ -31961,11 +32238,6 @@ queueMicrotask(async () => {
       canSend: () => Boolean(engine.address),
       openSend: (address) => openSendKaspaModal({ prefillAddress: address }),
       openChat: (address) => openChatWithAddress({ address }),
-      // Call on a Contacts entry (iOS d1844582): the same sheets as a chat's call button. Nobody's
-      // chat contact until you go on past the Talk notice, so viewing an entry never adds one.
-      canCall: (address) => !isKachatBot(address),
-      callActive: () => Calls.hasActiveCall(),
-      startCall: (address) => Calls.requestCallFromHeader(address, { prepare: ensureCallContact }).catch((error) => showCopyToast(error?.message || "Could not start the call.")),
       copyText: (text) => copyTextToClipboard(text),
       showToast: showCopyToast,
       confirmDialog,
@@ -32042,73 +32314,12 @@ queueMicrotask(async () => {
     openKaPostComposer: (text) => { setActiveAppTab("kaposts"); openKaPostComposerWithText(text); },
   }); }
 
-  try {
-    Calls.initCalls({
-      engine,
-      accountScopedKey,
-      showToast: showCopyToast,
-      appendEngineLog,
-      chooseDialog,
-      confirmDialog,
-      nextcloudAccount,
-      isNextcloudConnected,
-      talkCallsAvailable: () => nextcloudTalkCallsAvailable(),
-      contactByAddress: (address) => (state.contacts || []).find((entry) => entry.address === address) || null,
-      displayNameFor: (address) => {
-        const contact = (state.contacts || []).find((entry) => entry.address === address);
-        if (kachatNamesUiEnabled()) return contact ? displayNameForAddress(contact) : identityNameForAddress(address);
-        return contact ? displayNameForAddress(contact) : shortAddress(address);
-      },
-      // Testnet (iOS e52357d, CallService.ownDisplayName): your .kachat name when you have one.
-      ownDisplayName: () => (kachatNamesUiEnabled() && engine.address && kachatCachedLabel(engine.address))
-        || String(activeAccountMetadata()?.name || "KaChat").trim() || "KaChat",
-      avatarHtmlFor: (address) => {
-        const contact = (state.contacts || []).find((entry) => entry.address === address);
-        if (!contact && addressBookPhoto(address)) return assignedPhotoSpanHtml(address, "message-avatar");
-        if (kachatNamesUiEnabled() && !contact) return kachatAvatarImgHtml(address) ? kachatAvatarSpanHtml(address, "message-avatar") : "";
-        return contact ? avatarHtmlFor(contact, "message-avatar") : "";
-      },
-      callsEnabledFor: contactCallsEnabled,
-      setCallsEnabled: setContactCallsEnabled,
-      // Call envelopes are ordinary encrypted 1:1 messages in the contact's chat.
-      sendEnvelope: async (address, json) => {
-        const contact = (state.contacts || []).find((entry) => entry.address === address);
-        let conversationEntry = contact ? (state.conversations || []).find((entry) => entry.contactId === contact.id) : null;
-        if (!conversationEntry && contact) {
-          // A call from Contacts to someone never messaged.
-          conversationEntry = createConversation({ contactId: contact.id, createdAt: Date.now() });
-          state.conversations.push(conversationEntry);
-          refreshSubscriptionAddresses({ restart: true });
-          persistState();
-          renderChats();
-        }
-        if (!conversationEntry) throw new Error("No chat with this contact.");
-        queueConversationMessage(conversationEntry.id, json);
-      },
-      // A tag per caller (a missed call replaces that caller's earlier one) and a route, so a tap
-      // that reopens a closed app still lands in the chat.
-      notify: ({ title, body, route }) => postDesktopNotification({
-        title, body,
-        tag: route?.address ? `kachat-call-${String(route.address).toLowerCase()}` : undefined,
-        key: `${route?.address || ""}|${title || ""}|${Math.floor(Date.now() / 60_000)}`,
-        route: route?.address ? { kind: "chatAddress", address: route.address } : null,
-        onClick: () => { if (route?.address) openChatWithAddress({ address: route.address }); },
-      }),
-    });
-  } catch (error) { appendEngineLog(`Calls.initCalls did not start: ${error?.message || error}`); }
   document.querySelector("[data-open-chess]")?.addEventListener("click", () => {
     const { contact, messages } = chessConversationContext();
     if (!contact?.address) return;
     const active = Chess.activeChessGame(messages, engine.address, contact.address);
     if (active) openChessGame(active.gameId);
   });
-  document.querySelector("[data-open-call]")?.addEventListener("click", () => {
-    const conversationEntry = state.conversations.find((entry) => entry.id === activeConversationId);
-    const contact = contactForConversation(conversationEntry);
-    if (!contact?.address || contact.address === engine.address) return;
-    Calls.requestCallFromHeader(contact.address).catch((error) => showCopyToast(error?.message || "Could not start the call."));
-  });
-
   try {
     initChildMode({
       escapeHtml,
@@ -33070,9 +33281,11 @@ function hideGroupFeePill() {
 // typed text. Show Fee Estimate covers text and Nextcloud links; on chain media always shows.
 function groupFeeSubjectText() {
   try {
-    if (groupVoiceRecorder || groupVoiceEncoding) {
+    if (groupVoiceBusy()) {
       if (groupVoiceViaNextcloud && isNextcloudConnected()) return feeEstimateEnabled() ? "x".repeat(NEXTCLOUD_LINK_PAYLOAD_BYTES) : "";
-      const audioBytes = Math.ceil(((Date.now() - groupVoiceStartMs) / 1000) * VOICE_AUDIO_BITS_PER_SECOND / 8);
+      if (VoiceNotes.longVoiceNotesSupported()) return { partsPayloadBytes: groupVoicePartPayloads() };
+      const preview = groupVoicePreviewEntry();
+      const audioBytes = preview?.blob?.size ?? Math.ceil(((Date.now() - groupVoiceStartMs) / 1000) * VOICE_AUDIO_BITS_PER_SECOND / 8);
       return "x".repeat(Math.ceil(audioBytes / 3) * 4 + 120);
     }
     if (groupPendingPhoto) {
@@ -33082,11 +33295,20 @@ function groupFeeSubjectText() {
   } catch { /* voice / photo sections not evaluated yet */ }
   return feeEstimateEnabled() ? String(groupComposerInput?.value || "").trim() : "";
 }
+/** The gcomm payload of each part the recording (or its preview) goes as. */
+function groupVoicePartPayloads() {
+  const preview = groupVoicePreviewEntry();
+  const sizes = preview?.parts ? preview.parts.map((part) => part.length)
+    : voicePartSizes(Math.max(1, Math.floor((Date.now() - groupVoiceStartMs) / 1000)), VOICE_PATHS.group);
+  return groupPartPayloadSizes(sizes);
+}
 function scheduleGroupFeeEstimate({ typing = false } = {}) {
-  const text = groupFeeSubjectText();
+  const subject = groupFeeSubjectText();
+  const partsPayloadBytes = typeof subject === "object" && subject ? subject.partsPayloadBytes : null;
+  const text = partsPayloadBytes ? `parts:${partsPayloadBytes.join(",")}` : subject;
   if (!activeGroupId || !text) { hideGroupFeePill(); return; }
   if (groupFeeOverrideKas != null) { renderGroupFeePill(groupFeeOverrideKas); return; }
-  const length = utf8ByteLength(text);
+  const length = partsPayloadBytes ? partsPayloadBytes.reduce((a, b) => a + b, 0) : utf8ByteLength(text);
   if (typing && !groupFeeTimer && !document.querySelector("[data-group-fee]")?.hidden
       && composerFeeEstimateIsCurrent(length, groupFeeEstimateLength, groupFeeEstimateKas)) return;
   if (groupFeeTimer) window.clearTimeout(groupFeeTimer);
@@ -33098,7 +33320,7 @@ function scheduleGroupFeeEstimate({ typing = false } = {}) {
     try {
       // The sealed group envelope carries the ciphertext plus its headers; the comm estimate
       // with headroom is close enough for a pill.
-      const feeKas = await engine.estimateMessageFee(estimateCommPayloadBytes(text) + 160);
+      const feeKas = partsPayloadBytes ? await sumPartFeesKas(partsPayloadBytes) : await engine.estimateMessageFee(estimateCommPayloadBytes(text) + 160);
       if (token !== groupFeeToken) return;
       groupFeeEstimateKas = feeKas == null ? null : String(feeKas);
       groupFeeEstimateLength = feeKas == null ? null : length;
@@ -33186,7 +33408,7 @@ function openGroupChat(groupId) {
   // Fresh composer state per group open - except the text, which is the group's draft (iOS
   // 360e5d2): what was typed comes back when the group reopens.
   if (switching) try {
-    if (groupVoiceRecorder || groupVoiceEncoding || groupVoiceStartToken) cancelGroupVoice(); // a recording belongs to its group
+    if (groupVoiceBusy() || groupVoiceStartToken) cancelGroupVoice(); // a recording belongs to its group
     cancelGroupReply(); groupDraftMentions.clear(); closeGroupMentions(); closeGroupPlusMenu(); clearGroupPendingPhoto();
     if (groupComposerInput) { groupComposerInput.value = readDraft(`group:${groupId}`); autoGrowGroupComposer(); }
   } catch { /* composer wiring not ready during boot */ }
@@ -33535,7 +33757,6 @@ function avatarHtmlForAnyAddress(address, className = "message-avatar") {
 /** What a message is, for its long-press menu (iOS: each bubble kind carries its own menu). */
 function messageMenuKind(rawText, bodyText) {
   const text = String(rawText || "");
-  if (Calls.parseCallEnvelope(text)) return { kind: "call" };
   if (Chess.parseChessEnvelope(Chess.unwrapReplyText(text))) return { kind: "chess" };
   const image = parseImageEnvelope(text);
   if (image) return { kind: "file", name: image.name || "photo.jpg", image };
@@ -33548,6 +33769,36 @@ function messageMenuKind(rawText, bodyText) {
   const urls = [...body.matchAll(URL_IN_TEXT_RE)].map((m) => m[0].replace(/[),.;:!?\]]+$/, "")).filter(Boolean);
   if (urls.length === 1 && body.trim() === urls[0] && isPreviewableUrl(urls[0])) return { kind: "link", url: urls[0] };
   return { kind: "text" };
+}
+
+/**
+ * Before a long voice note's or multi-part photo's first part goes out: whether the chatting
+ * balance covers every part's fee with the dust threshold left over for the last part's change
+ * (iOS ensureSufficientBalanceForVoiceParts). A message when it doesn't; null when it does or
+ * can't be told (the send then goes on and fails on its own).
+ */
+const PARTS_DUST_KAS = 0.2;
+function partsBalanceShortfall(feesKas) {
+  if (!feesKas?.length || feesKas.some((fee) => fee == null || fee === "")) return null;
+  const fees = feesKas.map(Number);
+  if (fees.some((fee) => !Number.isFinite(fee))) return null;
+  const total = fees.reduce((sum, fee) => sum + fee, 0);
+  const balance = Number(currentBalanceKas);
+  if (!Number.isFinite(balance)) return null;
+  if (balance <= 0) return "You have no KAS to send this with yet.";
+  if (balance >= total + PARTS_DUST_KAS) return null;
+  return `Not enough KAS: this needs about ${(total + PARTS_DUST_KAS).toFixed(2)} ${KAS_UNIT} (${fees.length} transactions) and you have ${balance.toFixed(2)} ${KAS_UNIT}.`;
+}
+
+/** A note's or photo's menu: Save uses the joined note (a WAV) and the file is "photo.jpg". */
+function partsMenuKind(kindInfo, cluster, contentOf) {
+  if (!cluster) return kindInfo;
+  const texts = cluster.parts.map(contentOf);
+  if (cluster.kind === "voice") {
+    const joinedNote = VoiceNotes.joinedVoice(texts);
+    return { kind: "voice", audio: { content: joinedNote.url || kindInfo.audio?.content || "", name: joinedNote.url ? "voice.wav" : (kindInfo.audio?.name || "voice.webm"), mimeType: joinedNote.url ? "audio/wav" : "audio/webm" } };
+  }
+  return { kind: "file", name: "photo.jpg", image: kindInfo.image };
 }
 
 /** Save Audio (iOS AudioShareSheet): the recording as a file in Downloads. */
@@ -33571,7 +33822,6 @@ function messageMenuRows({ txid, kindInfo, copyText, onReply, onSelect, onRetry,
   const retry = onRetry ? { label: "Retry Send", icon: MSG_MENU_ICONS.retry, onClick: onRetry } : null;
   const copyMessage = { label: "Copy Message", icon: MSG_MENU_ICONS.copy, onClick: () => copyTextToClipboard(copyText).then(() => showCopyToast("Message copied to clipboard.")).catch(() => {}) };
   switch (kindInfo.kind) {
-    case "call": return [explorer, reply, select];
     case "chess": return [retry, explorer];
     case "payment": return [copyMessage, explorer, reply, select];
     case "file": return [
@@ -33601,7 +33851,7 @@ function messageMenuRows({ txid, kindInfo, copyText, onReply, onSelect, onRetry,
     ];
   }
 }
-const MESSAGE_MENU_TITLES = { call: "Call", chess: "Chess", payment: "Payment", file: "File", voice: "Voice Message", kachatLink: "KaChat Link", link: "Link", text: "Message" };
+const MESSAGE_MENU_TITLES = { chess: "Chess", payment: "Payment", file: "File", voice: "Voice Message", kachatLink: "KaChat Link", link: "Link", text: "Message" };
 
 /** Right-click on a link inside a message's text (iOS LinkActionsSheet): the address, then Open
  *  Link, Copy Link and Reply. True when it handled the click. */
@@ -33635,8 +33885,9 @@ function openOneToOneMessageMenu(messageId, x, y, kindOverride = null) {
   const shown = messageContent(message);
   const bodyText = parseReplyEnvelope(shown)?.text ?? shown;
   const paymentParts = parsePaymentCardParts(message);
-  const kindInfo = kindOverride || (paymentParts || message.messageType === "payment" ? { kind: "payment" } : messageMenuKind(message.text, bodyText));
-  const failed = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.FAILED;
+  const partCluster = (lastOneToOneParts.get(conversationEntry.id) || oneToOnePartsFor(conversationEntry)).clusters.get(message.id) || null;
+  const kindInfo = partsMenuKind(kindOverride || (paymentParts || message.messageType === "payment" ? { kind: "payment" } : messageMenuKind(message.text, bodyText)), partCluster, messageContent);
+  const failed = message.direction === "outgoing" && (partCluster ? partCluster.status === "failed" : message.status === MESSAGE_STATUSES.FAILED);
   // iOS onEdit: your own ordinary message, sent, editable, not chess.
   const editable = message.direction === "outgoing" && message.status === MESSAGE_STATUSES.CONFIRMED && Boolean(message.txid)
     && kindInfo.kind === "text" && !["handshake", "payment"].includes(message.messageType) && isEditableContent(message.text);
@@ -33647,7 +33898,8 @@ function openOneToOneMessageMenu(messageId, x, y, kindOverride = null) {
     copyText,
     onReply: () => startReplyTo(message.id),
     onSelect: () => enterMessageSelection(message.id),
-    onRetry: failed && chessRetryFits(conversationEntry, message) ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null,
+    onRetry: failed && partCluster ? () => retryOneToOneParts(conversationEntry.id, partCluster)
+      : failed && chessRetryFits(conversationEntry, message) ? () => runEngineSendPipeline(conversationEntry.id, message.id) : null,
     onEdit: editable ? () => startEditMessage(message.id) : null,
     reactionCount: (conversationEntry.reactionsByTxId?.[targetTxId] || []).length,
     onReactions: () => openReactionsSheet(conversationEntry, targetTxId),
@@ -33667,13 +33919,15 @@ function openGroupMessageMenu(message, x, y, kindOverride = null) {
   const shown = groupMessageContent(activeGroupId, message);
   const plain = parseReplyEnvelope(shown)?.text ?? shown;
   const key = groupMsgKey(message);
-  const kindInfo = kindOverride || messageMenuKind(message.text, plain);
-  const failed = message.direction === "local" && message.status === MESSAGE_STATUSES.FAILED;
+  const partCluster = lastGroupParts.get(activeGroupId)?.clusters.get(key) || null;
+  const kindInfo = partsMenuKind(kindOverride || messageMenuKind(message.text, plain), partCluster, (m) => m.text);
+  const failed = message.direction === "local" && (partCluster ? partCluster.status === "failed" : message.status === MESSAGE_STATUSES.FAILED);
   const reactionRows = key ? groupReactionsFor(activeGroupId, key) : [];
   const copyText = decodeGroupMentions(plain);
   const onReply = () => startGroupReply(message);
   const onSelect = () => enterGroupSelection(key);
-  const onRetry = failed ? () => retryGroupMessage(message) : null;
+  const retryGroupId = activeGroupId;
+  const onRetry = failed ? (partCluster ? () => retryGroupParts(retryGroupId, partCluster) : () => retryGroupMessage(message)) : null;
   let items;
   if (kindInfo.kind === "text") {
     const explorer = message.txId ? { label: "View in Explorer", icon: MSG_MENU_ICONS.explorer, onClick: () => window.open(explorerTxUrl(message.txId), "_blank", "noopener,noreferrer") } : null;
@@ -33753,7 +34007,8 @@ document.querySelector("[data-group-delete-selected]")?.addEventListener("click"
     destructive: true,
   });
   if (!confirmed) return;
-  const keys = new Set(selectedGroupMessageKeys);
+  // A long voice note or multi-part photo goes with all its parts (iOS).
+  const keys = expandGroupPartKeys(activeGroupId, [...selectedGroupMessageKeys]);
   saveGroupMessages(activeGroupId, groupMessages(activeGroupId).filter((m) => !keys.has(groupMsgKey(m))));
   exitGroupSelection();
   renderGroupList();
@@ -33798,10 +34053,13 @@ function renderGroupMessages() {
   // Hidden members' messages are filtered out of the view (see the avatar menu). Reaction
   // envelopes are applied as pills at ingest, never shown as bubbles — filter any that reached
   // storage (e.g. via a group-history restore that didn't intercept) so they don't leak as raw JSON.
-  const msgs = groupMessages(activeGroupId).filter(
+  const visibleGroupMsgs = groupMessages(activeGroupId).filter(
     (m) => !(m.direction === "incoming" && isGroupMemberHidden(activeGroupId, m.senderAddress))
       && !parseReactionEnvelope(m?.text) && !parseEditEnvelope(m?.text),
   );
+  // A long voice note's or multi-part photo's parts: one bubble at the first (iOS).
+  const groupParts = groupPartsFor(activeGroupId, visibleGroupMsgs);
+  const msgs = groupParts.hidden.size ? visibleGroupMsgs.filter((m) => !groupParts.hidden.has(groupMsgKey(m))) : visibleGroupMsgs;
   // Same stick-to-bottom rule as 1:1 renderMessages: background re-renders must
   // not yank a reader who scrolled up back to the bottom.
   const isThreadSwitch = groupMessageArea.dataset.renderedGroupId !== String(activeGroupId);
@@ -33903,7 +34161,17 @@ function renderGroupMessages() {
       groupReplyQuoteEl = quote; // above the bubble, as in 1:1
     }
 
-    if (imageEnvelope) {
+    const groupPartCluster = groupParts.clusters.get(groupMsgKey(message));
+    if (groupPartCluster) {
+      if (groupPartCluster.kind === "photo") bubble.classList.add("photo-bubble");
+      bubble.append(VoiceNotes.buildPartsBody(groupPartCluster, {
+        contentOf: (m) => m.text,
+        buildVoicePlayer,
+        outgoing: message.direction !== "incoming",
+        onPhotoOpen: (url) => openPhotoPreview(url, "Photo"),
+        onReady: () => { if (activeGroupId) renderGroupMessages(); },
+      }));
+    } else if (imageEnvelope) {
       // Photo-only bubble: no chat-bubble background, just the image (timestamp overlays it).
       bubble.classList.add("photo-bubble");
       const img = document.createElement("img");
@@ -34000,7 +34268,9 @@ function renderGroupMessages() {
     if (detachedLinkCard) stack.append(detachedLinkCard);
     // Delivery status (pending / sent / failed) on your own messages, after the time - same as
     // 1:1. Group messages use direction "local", so shim it to "outgoing" for the shared icon.
-    const groupStatusIcon = !incoming && message.status
+    const groupStatusIcon = !incoming && groupPartCluster
+      ? createDeliveryStatusIcon({ ...message, direction: "outgoing", status: groupClusterStatus(groupPartCluster) }, { onRetry: () => retryGroupParts(activeGroupId, groupPartCluster) })
+      : !incoming && message.status
       ? createDeliveryStatusIcon({ ...message, direction: "outgoing" }, { onRetry: () => retryGroupMessage(message) })
       : null;
     stack.append(...buildMessageTimeLines({
@@ -34893,7 +35163,10 @@ function applyGroupSyncResult(result, { catchUp = false } = {}) {
         // is not new mail: it adds silently, exactly like the 1:1 path (pendingInitialCatchUp)
         // and like iOS's backfill floor for groups. Without this, an "all messages" group would
         // fire a banner for every historical message on the first sync.
-        const live = !catchUp && isLiveMessageTime(createdAt);
+        // Only the first part of a long voice note or multi-part photo to arrive counts and
+        // rings (iOS: unread counts the note once, one banner).
+        const laterPart = isLaterPart({ senderAddress: decoded.senderAddress, text: decoded.plaintext, txId: decoded.txId, msgIdHex: decoded.msgIdHex }, groupMessages(decoded.groupId), GROUP_PART_ACCESSORS);
+        const live = !catchUp && isLiveMessageTime(createdAt) && !laterPart;
         if (live) {
           maybeNotifyGroupIncoming(decoded.groupId, decoded.senderAddress, decoded.plaintext, decoded.txId || decoded.msgIdHex || nowId(), createdAt);
         }
@@ -35531,6 +35804,102 @@ function encodeGroupMentions(text) {
   return out;
 }
 
+// --- Long voice notes and multi-part photos in groups (iOS 7c5c22e3) ---
+// Parts belong together by (group, sender, id, count); within one group's list the sender is
+// the owner.
+function groupPartStatus(m) {
+  if (m.direction === "incoming") return "sent";
+  if (m.status === MESSAGE_STATUSES.FAILED) return "failed";
+  if (m.status === MESSAGE_STATUS_UNCONFIRMED) return "warning";
+  if (!m.status || m.status === MESSAGE_STATUSES.CONFIRMED) return "sent";
+  return "pending";
+}
+const GROUP_PART_ACCESSORS = {
+  content: (m) => m.text,
+  owner: (m) => String(m.senderAddress || "").toLowerCase(),
+  key: (m) => groupMsgKey(m),
+  status: groupPartStatus,
+};
+const groupPartsMemo = new WeakMap();
+const lastGroupParts = new Map(); // group id -> the last render's grouping
+function groupPartsFor(groupId, list) {
+  const memo = groupPartsMemo.get(list);
+  if (memo) return memo;
+  const result = groupParts(list, GROUP_PART_ACCESSORS);
+  groupPartsMemo.set(list, result);
+  lastGroupParts.set(groupId, result);
+  return result;
+}
+function groupClusterStatus(cluster) {
+  if (cluster.status === "failed") return MESSAGE_STATUSES.FAILED;
+  if (cluster.status === "pending") return MESSAGE_STATUSES.PENDING;
+  if (cluster.status === "warning") return MESSAGE_STATUS_UNCONFIRMED;
+  return MESSAGE_STATUSES.CONFIRMED;
+}
+/** The message keys a selection stands for: a note's bubble selects every part of it. */
+function expandGroupPartKeys(groupId, keys) {
+  const parts = lastGroupParts.get(groupId);
+  const out = new Set(keys);
+  if (!parts) return out;
+  for (const key of keys) {
+    const cluster = parts.clusters.get(key);
+    if (cluster) for (const member of cluster.members) out.add(groupMsgKey(member));
+  }
+  return out;
+}
+/** Sends already-listed rows (local ids) one after another, so each spends the change of the
+ *  one before; when one fails the rest are Failed for the next Retry (iOS sendGroupVoiceNoteParts). */
+async function sendGroupRowsInOrder(gid, localIds) {
+  const mgr = getGroupManager();
+  for (let i = 0; i < localIds.length; i += 1) {
+    const row = groupMessages(gid).find((m) => m.id === localIds[i]);
+    if (!row || !mgr) return false;
+    try {
+      const res = await mgr.sendGroupMessage(gid, row.text);
+      patchGroupMessage(gid, row.id, { txId: res?.txid || null, msgIdHex: res?.msgIdHex || null, status: MESSAGE_STATUSES.CONFIRMED });
+    } catch (error) {
+      const unknown = error?.code === SEND_OUTCOME_UNKNOWN;
+      patchGroupMessage(gid, row.id, unknown ? groupUnconfirmedPatch(error) : { status: MESSAGE_STATUSES.FAILED });
+      for (const later of localIds.slice(i + 1)) patchGroupMessage(gid, later, { status: MESSAGE_STATUSES.FAILED });
+      setStatus(unknown ? SEND_OUTCOME_UNKNOWN_MESSAGE : `Group send failed: ${error.message}`);
+      if (activeGroupId === gid) { setGroupSendError(userFacingError(error)); renderGroupMessages(); }
+      renderGroupList();
+      return false;
+    }
+    if (activeGroupId === gid) renderGroupMessages();
+  }
+  renderGroupList();
+  return true;
+}
+/** A note's or photo's parts: every part shows at once (Sending), then they go in order. */
+async function sendGroupParts(texts, { groupId = null } = {}) {
+  const mgr = getGroupManager();
+  const gid = groupId || activeGroupId;
+  if (!mgr || !gid || !mgr.getGroup(gid)) return false;
+  setGroupSendError(null);
+  const start = Date.now();
+  const ids = texts.map((text, offset) => {
+    const localId = nowId();
+    appendGroupMessage(gid, {
+      id: localId, senderAddress: engine.address, direction: "local",
+      text, createdAt: start + offset, txId: null, msgIdHex: null,
+      senderIsAdmin: Boolean(mgr.getGroup(gid)?.isAdmin), status: MESSAGE_STATUSES.PENDING,
+    });
+    return localId;
+  });
+  if (activeGroupId === gid) renderGroupMessages();
+  renderGroupList();
+  return sendGroupRowsInOrder(gid, ids);
+}
+function retryGroupParts(gid, cluster) {
+  if (!gid) return;
+  const failed = cluster.parts.filter((m) => m.direction !== "incoming" && m.status === MESSAGE_STATUSES.FAILED);
+  if (!failed.length) return;
+  for (const part of failed) patchGroupMessage(gid, part.id, { status: MESSAGE_STATUSES.PENDING });
+  if (activeGroupId === gid) renderGroupMessages();
+  sendGroupRowsInOrder(gid, failed.map((m) => m.id));
+}
+
 // Shared group send: appends the local echo after the tx is broadcast (so sync dedupes by
 // msgId), with a delivery-status marker.
 // Patch an existing group message in place (status/txId/msgIdHex) and persist.
@@ -35616,9 +35985,10 @@ groupComposer?.addEventListener("submit", async (event) => {
   if (!activeGroupId || !getGroupManager()) return;
   const raw = String(groupComposerInput?.value || "").trim();
   if (Number(currentBalanceKas) === 0) { syncGroupFundingGate(); return; }
-  // Recording: the send button stops it and sends it in one step (iOS recordingRow).
-  if (groupVoiceRecorder) { finishGroupVoice(true); return; }
+  // Recording: the send button stops it into the preview; on the preview it sends (iOS ca013fc8).
+  if (groupVoiceRecorder) { finishGroupVoice(); return; }
   if (groupVoiceEncoding) return;
+  if (groupVoicePreviewEntry()) { sendGroupVoicePreview(); return; }
   // A staged photo is its own message (iOS sendPendingPhoto); what was typed stays in the
   // composer under the photo row and comes back once it has gone.
   if (groupPendingPhoto) {
@@ -35630,9 +36000,30 @@ groupComposer?.addEventListener("submit", async (event) => {
     const staged = groupNextcloudStaged;
     if (staged?.phase === "uploading") return;
     if (attachment.isVideo && !(staged?.phase === "ready" && staged.url)) { clearGroupPendingPhoto(); return; }
+    if (staged?.phase === "ready" && staged.url) {
+      setGroupPendingPhotoSending(true);
+      await sendGroupWire(staged.url);
+      if (groupPendingPhoto === pending) clearGroupPendingPhoto();
+      return;
+    }
+    // On chain: the quality first, then the binary frame inside gcomm (iOS 7c5c22e3).
+    const gid = activeGroupId;
     setGroupPendingPhotoSending(true);
-    await sendGroupWire(staged?.phase === "ready" && staged.url ? staged.url : buildImageEnvelopeJson(attachment, fileName));
-    if (groupPendingPhoto === pending) clearGroupPendingPhoto();
+    let sent = false;
+    try {
+      sent = await sendTieredPhoto(attachment.originalBlob || attachment.dataUrl, {
+        group: true,
+        send: (envelope) => sendGroupWire(envelope, { groupId: gid }),
+        // The parts go on in the background, as in 1:1: the composer is free once they show.
+        sendParts: (envelopes) => { sendGroupParts(envelopes, { groupId: gid }); },
+        onError: (message) => setGroupSendError(message),
+      });
+    } finally {
+      if (groupPendingPhoto === pending) {
+        if (sent) clearGroupPendingPhoto();
+        else setGroupPendingPhotoSending(false);
+      }
+    }
     return;
   }
   if (!raw) return;
@@ -35865,14 +36256,14 @@ function setGroupPendingPhoto(attachment, fileName) {
 }
 /** iOS canAcceptImageAttachment (group): no photo pending or going, not recording. */
 function canAcceptGroupImageAttachment() {
-  return Boolean(activeGroupId) && !groupPendingPhoto && !groupPendingPhotoSending && !groupVoiceRecorder && !groupVoiceEncoding;
+  return Boolean(activeGroupId) && !groupPendingPhoto && !groupPendingPhotoSending && !groupVoiceBusy();
 }
 /** The group bar's slots (iOS composeBar/textRow): "+" with an empty field, Send otherwise; a
  *  pending photo or the recorder in the field's place. */
 function syncGroupComposerSlots() {
   try {
     if (!groupComposer) return;
-    const recording = Boolean(groupVoiceRecorder) || groupVoiceEncoding;
+    const recording = groupVoiceBusy();
     const hasPhoto = Boolean(groupPendingPhoto);
     const hasText = /\S/.test(String(groupComposerInput?.value || ""));
     groupComposer.classList.toggle("composer-field-replaced", recording || hasPhoto);
@@ -35949,30 +36340,50 @@ groupCameraInput?.addEventListener("change", () => handleGroupMediaFile(groupCam
   if (!groupPendingPhoto) groupPhotoViaNextcloud = false;
 }));
 
-// Voice send (native MediaRecorder → the same {type:"file",audio/...} envelope as 1:1). iOS
-// recordingRow: [trash][mic]"Recording... Ns" in the field and the send button beside it, which
-// stops and sends in one step - no preview. Reaching the length limit sends it the same way.
+// Group voice notes (iOS ca013fc8, as in 1:1): the button beside the bar stops the recording (as
+// does the length limit), it encodes ("Encoding…"), then "Audio ready" with a play / pause preview
+// of the note as it will be sent, and the button sends it. The trash throws it away at any stage.
 let groupVoiceEncoding = false;
+// Each recording's turn (as in 1:1): a cancel or a new recording drops an encode still running.
+let groupVoiceGeneration = 0;
+function groupVoicePreviewEntry() {
+  return groupVoicePanel ? voicePreviews.get(groupVoicePanel) || null : null;
+}
+function groupVoiceBusy() {
+  return Boolean(groupVoiceRecorder) || groupVoiceEncoding || Boolean(groupVoicePreviewEntry());
+}
 function renderGroupVoiceRow() {
   const panel = groupVoicePanel;
   if (!panel) return;
   panel.classList.remove("preview");
   const recording = Boolean(groupVoiceRecorder);
-  if (!recording && !groupVoiceEncoding) {
+  const preview = groupVoicePreviewEntry();
+  if (!recording && !groupVoiceEncoding && !preview) {
     panel.hidden = true;
     panel.innerHTML = "";
     syncGroupComposerSlots();
     return;
   }
   panel.hidden = false;
-  const secs = Math.floor((Date.now() - groupVoiceStartMs) / 1000);
-  panel.innerHTML = `<button type="button" class="voice-field-trash" data-group-voice-cancel aria-label="Discard recording">${VOICE_TRASH_SVG}</button>
-    <span class="voice-field-mic" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="13" rx="4"/><path d="M5 11a7 7 0 0 0 14 0h-2a5 5 0 0 1-10 0zM11 18h2v4h-2z"/></svg></span>
-    <span class="voice-field-label">${groupVoiceEncoding ? "Encoding…" : `Recording... <span data-group-voice-time>${secs}</span>s`}</span>`;
+  const trash = `<button type="button" class="voice-field-trash" data-group-voice-cancel aria-label="Discard recording">${VOICE_TRASH_SVG}</button>`;
+  if (preview && !recording && !groupVoiceEncoding) {
+    const playing = Boolean(preview.playing);
+    panel.innerHTML = `${trash}<button type="button" class="voice-preview-play" data-group-voice-play aria-label="${playing ? "Pause" : "Play"}">${playing
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-2.5 6h1.8v8H9.5zm3.2 0h1.8v8h-1.8z"/></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm-2 5.8 6 4.2-6 4.2z"/></svg>'}</button>
+      <span class="voice-field-label">Audio ready • ${formatAudioDuration(preview.seconds)}</span>`;
+    syncGroupComposerSlots();
+    return;
+  }
+  const secs = (Date.now() - groupVoiceStartMs) / 1000;
+  const limit = groupVoiceMaxDurationSeconds();
+  panel.innerHTML = `${trash}${groupVoiceEncoding ? '<span class="composer-field-spinner" aria-hidden="true"></span>' : voiceRingHtml(secs, limit)}
+    <span class="voice-field-label">${groupVoiceEncoding ? "Encoding…" : `Recording... <span data-group-voice-time>${formatAudioDuration(secs)}</span> / ${formatAudioDuration(limit)}`}</span>`;
   syncGroupComposerSlots();
 }
 async function startGroupVoice() {
-  if (!activeGroupId || groupVoiceRecorder || groupVoiceEncoding || groupVoiceStartToken) return;
+  if (!activeGroupId || groupVoiceBusy() || groupVoiceStartToken) return;
+  groupVoiceGeneration += 1;
   setGroupSendError(null);
   const token = {};
   groupVoiceStartToken = token;
@@ -35993,7 +36404,7 @@ async function startGroupVoice() {
   try {
     if (!stream) throw new Error("Microphone access denied");
     groupVoiceMime = pickVoiceMimeType();
-    groupVoiceRecorder = new MediaRecorder(stream, groupVoiceMime ? { mimeType: groupVoiceMime, audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND } : undefined);
+    groupVoiceRecorder = new MediaRecorder(stream, groupVoiceMime ? { mimeType: groupVoiceMime, audioBitsPerSecond: voiceCaptureBitsPerSecond() } : undefined);
     groupVoiceChunks = [];
     groupVoiceRecorder.ondataavailable = (e) => { if (e.data?.size) groupVoiceChunks.push(e.data); };
     groupVoiceRecorder.onstop = () => stream.getTracks().forEach((t) => t.stop());
@@ -36004,16 +36415,16 @@ async function startGroupVoice() {
     let lastWhole = 0;
     groupVoiceTimer = window.setInterval(() => {
       const secs = (Date.now() - groupVoiceStartMs) / 1000;
-      const el = groupVoicePanel?.querySelector("[data-group-voice-time]");
-      if (el) el.textContent = String(Math.floor(secs));
-      if (Math.floor(secs) !== lastWhole) { lastWhole = Math.floor(secs); scheduleGroupFeeEstimate(); }
-      if (secs >= groupVoiceMaxDurationSeconds()) finishGroupVoice(true);
+      if (Math.floor(secs) !== lastWhole) { lastWhole = Math.floor(secs); updateRecordingClock(groupVoicePanel, "[data-group-voice-time]", secs, groupVoiceMaxDurationSeconds()); scheduleGroupFeeEstimate(); }
+      // The limit stops the recording into the preview; it never sends by itself (iOS ca013fc8).
+      if (secs >= groupVoiceMaxDurationSeconds()) finishGroupVoice();
     }, 250);
   } catch (error) {
     // iOS PublicChatAudioRecording's failure, shown as the composer's red caption.
     stream?.getTracks().forEach((t) => t.stop());
     groupVoiceRecorder = null;
-    setGroupSendError("Microphone access denied");
+    if (!stream) showMicrophoneAccessAlert();
+    else setGroupSendError("Could not start voice recording.");
     renderGroupVoiceRow();
   }
 }
@@ -36023,38 +36434,86 @@ function cancelGroupVoice() {
   stopGroupVoiceTimer();
   try { groupVoiceRecorder?.stop(); } catch {}
   groupVoiceRecorder = null; groupVoiceChunks = [];
+  groupVoiceGeneration += 1;
   groupVoiceEncoding = false;
   groupVoiceViaNextcloud = false;
   clearVoicePreview(groupVoicePanel);
   renderGroupVoiceRow();
   scheduleGroupFeeEstimate();
 }
-// Stop and send in one step (iOS sendRecording).
-async function finishGroupVoice(send) {
+// Stop into the preview: the recording is encoded to the parts it goes as on chain, and the
+// preview plays the note as it will be heard. Via Nextcloud it goes as recorded.
+async function finishGroupVoice() {
   stopGroupVoiceTimer();
   const recorder = groupVoiceRecorder;
   groupVoiceRecorder = null;
   if (!recorder) return;
   const durationSec = Math.round((Date.now() - groupVoiceStartMs) / 1000);
   const gid = activeGroupId;
-  groupVoiceEncoding = Boolean(send);
+  const generation = groupVoiceGeneration;
+  groupVoiceEncoding = true;
   renderGroupVoiceRow();
   await new Promise((resolve) => { recorder.addEventListener("stop", resolve, { once: true }); try { recorder.stop(); } catch { resolve(); } });
-  const cancelledMeanwhile = !groupVoiceEncoding && Boolean(send);
-  groupVoiceEncoding = false;
+  // Cancelled (or a new recording begun) meanwhile: that path already reset the row.
+  if (generation !== groupVoiceGeneration) return;
   const chunks = groupVoiceChunks;
   groupVoiceChunks = [];
-  renderGroupVoiceRow();
-  if (!send || cancelledMeanwhile || !chunks.length || !activeGroupId || activeGroupId !== gid) { groupVoiceViaNextcloud = false; scheduleGroupFeeEstimate(); return; }
-  const blob = new Blob(chunks, { type: groupVoiceMime || "audio/webm" });
-  await sendGroupVoiceBlob(blob, durationSec, gid);
+  const abandoned = () => generation !== groupVoiceGeneration || !activeGroupId || activeGroupId !== gid;
+  if (abandoned() || !chunks.length) {
+    groupVoiceEncoding = false; groupVoiceViaNextcloud = false;
+    renderGroupVoiceRow(); scheduleGroupFeeEstimate(); return;
+  }
+  const mime = groupVoiceMime || "audio/webm";
+  const blob = new Blob(chunks, { type: mime });
+  let entry = { blob, mimeType: mime, seconds: durationSec };
+  if (!(groupVoiceViaNextcloud && isNextcloudConnected()) && VoiceNotes.longVoiceNotesSupported()) {
+    try {
+      const prepared = await VoiceNotes.prepareVoiceParts(blob, VOICE_PATHS.group);
+      entry = { blob: prepared.previewBlob, mimeType: "audio/wav", seconds: Math.round(prepared.seconds), parts: prepared.parts, recording: blob, recordingMime: mime };
+    } catch (error) {
+      appendEngineLog(`Group voice note encoding failed: ${describeThrown(error)}`);
+      entry = null;
+    }
+  }
+  if (generation !== groupVoiceGeneration) return;
+  groupVoiceEncoding = false;
+  if (abandoned()) { groupVoiceViaNextcloud = false; renderGroupVoiceRow(); scheduleGroupFeeEstimate(); return; }
+  if (!entry) { setGroupSendError("Audio encoding failed. Please record again."); renderGroupVoiceRow(); scheduleGroupFeeEstimate(); return; }
+  setVoicePreview(groupVoicePanel, entry, "group-voice");
   scheduleGroupFeeEstimate();
+}
+/** Send on the preview (iOS sendRecording): the parts on chain, or the recording via Nextcloud. */
+async function sendGroupVoicePreview() {
+  const entry = groupVoicePreviewEntry();
+  const gid = activeGroupId;
+  // One send per preview: a second Send while this one waits does nothing.
+  if (!entry || entry.sending || !gid) return;
+  const blob = entry.recording || entry.blob;
+  const parts = entry.parts || null;
+  if (parts?.length > 1 && !(groupVoiceViaNextcloud && isNextcloudConnected())) {
+    entry.sending = true;
+    const fees = await Promise.all(groupPartPayloadSizes(parts.map((part) => part.length)).map((size) => engine.estimateMessageFee(size).catch(() => null)));
+    // Trashed, or another group opened, meanwhile: it no longer goes anywhere.
+    if (groupVoicePreviewEntry() !== entry || activeGroupId !== gid) return;
+    entry.sending = false;
+    const shortfall = partsBalanceShortfall(fees);
+    if (shortfall) { setGroupSendError(shortfall); return; }
+  }
+  clearVoicePreview(groupVoicePanel);
+  renderGroupVoiceRow();
+  await sendGroupVoiceBlob(blob, entry.seconds, gid, { parts, mime: entry.recordingMime || entry.mimeType });
+  scheduleGroupFeeEstimate();
+}
+/** Each part's gcomm payload bytes for WebM parts of these sizes: the binary frame (9 bytes and
+ *  ~142 of header) + 16 of tag, as hex, + ~391 of fixed fields (iOS estimatedGroupVoiceWirePayloadSize). */
+function groupPartPayloadSizes(partSizes) {
+  return partSizes.map((size) => (9 + 142 + size + 16) * 2 + 391);
 }
 // `groupId`: the group it was recorded in. The upload (or its fallback) takes seconds, and the
 // note still goes there - never to whichever group, or account, is open by then.
-async function sendGroupVoiceBlob(blob, durationSec, groupId = activeGroupId) {
+async function sendGroupVoiceBlob(blob, durationSec, groupId = activeGroupId, { parts = null, mime: recordedMime = null } = {}) {
   const owner = engine.address || "";
-  const mime = groupVoiceMime;
+  const mime = recordedMime || groupVoiceMime;
   const stillOwner = () => (engine.address || "") === owner;
   // "Record via Nextcloud" (chosen in the "+" sheet): the server carries it, the group gets the link.
   const viaNextcloud = groupVoiceViaNextcloud && isNextcloudConnected();
@@ -36069,11 +36528,25 @@ async function sendGroupVoiceBlob(blob, durationSec, groupId = activeGroupId) {
       showCopyToast("Nextcloud upload failed - sending on-chain instead");
     }
   }
+  // On chain: 16 kbps Opus parts, sealed as the binary media frame (iOS 7c5c22e3). A Nextcloud
+  // note whose upload failed (or whose server went away) is encoded to them first.
+  if (!parts?.length && VoiceNotes.longVoiceNotesSupported()) {
+    try { parts = (await VoiceNotes.prepareVoiceParts(blob, VOICE_PATHS.group)).parts; }
+    catch (error) { appendEngineLog(`Group voice note encoding failed: ${describeThrown(error)}`); if (activeGroupId === groupId) setGroupSendError("Audio encoding failed. Please record again."); return; }
+  }
+  if (parts?.length) {
+    if (!stillOwner()) return;
+    const envelopes = VoiceNotes.voicePartEnvelopes(parts);
+    if (envelopes.length === 1) await sendGroupWire(envelopes[0], { errorPrefix: "Failed to send voice message: ", groupId });
+    else await sendGroupParts(envelopes, { groupId });
+    return;
+  }
   const dataUrl = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || "")); r.readAsDataURL(blob); });
   if (!dataUrl.startsWith("data:") || !stillOwner()) return;
   await sendGroupWire(JSON.stringify({ type: "file", name: voiceFileName(mime), size: blob.size, mimeType: mime || "audio/webm", content: dataUrl, duration: durationSec }), { errorPrefix: "Failed to send voice message: ", groupId });
 }
 groupVoicePanel?.addEventListener("click", (event) => {
+  if (event.target.closest("[data-group-voice-play]")) { toggleVoicePreviewPlayback(groupVoicePanel); return; }
   if (event.target.closest("[data-group-voice-cancel]")) cancelGroupVoice();
 });
 

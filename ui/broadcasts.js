@@ -37,6 +37,8 @@ import { SEND_OUTCOME_UNKNOWN, SEND_OUTCOME_UNKNOWN_MESSAGE } from "../engine/tr
 import { settleLeftoverRoomRows, markRoomRowUnconfirmed, settleRoomCopy, ROOM_UNCONFIRMED } from "./leftover-sends.js";
 import { accountGuard } from "./account-guard.js";
 import { recordRoomEdit, restoreRoomEdit, roomLinkJoinPrompt, roomPollGapFloor } from "../engine/kaposts.js";
+import { groupParts, isLaterPart, VOICE_PATHS, voicePartSizes } from "../engine/voice-parts.js";
+import * as VoiceNotes from "./voice-notes.js";
 
 // Public chain data caches are global but per network: a testnet room is not the mainnet room.
 const NET_SUFFIX = IS_TESTNET ? "-testnet" : "";
@@ -56,7 +58,28 @@ const RETENTION_UNITS = [
 ];
 // A voice note that goes on-chain is capped hard (iOS BroadcastAudioRecording.maxDuration);
 // "Record via Nextcloud" runs to the app-wide Nextcloud cap instead.
-const ONCHAIN_VOICE_MAX_SECONDS = 10;
+// On chain a room note runs as long as 1 KAS of fees allows, 2:50, as tagged parts (KaPost
+// 1b15521, VoiceNotePolicy.publicChat); a browser without the encoder keeps the old 10 s note.
+const LEGACY_ONCHAIN_VOICE_MAX_SECONDS = 10;
+function onchainVoiceMaxSeconds() {
+  return VoiceNotes.longVoiceNotesSupported() ? VOICE_PATHS.room.maxSeconds : LEGACY_ONCHAIN_VOICE_MAX_SECONDS;
+}
+
+// Long voice notes in rooms: parts by (room, sender, id, count) are one bubble (KaPost
+// PublicChatVoiceParts). The cache is per room, so the sender is the owner.
+function roomPartStatus(m) {
+  if (m.status === "failed") return "failed";
+  if (m.status === "pending") return "pending";
+  if (m.status === ROOM_UNCONFIRMED) return "warning";
+  return "sent";
+}
+const ROOM_PART_ACCESSORS = {
+  content: (m) => m.content,
+  owner: (m) => String(m.senderAddress || "").toLowerCase(),
+  key: (m) => m.txId,
+  status: roomPartStatus,
+};
+let roomParts = { clusters: new Map(), hidden: new Set(), anchorKeyOf: new Map() };
 const LONG_MESSAGE_BYTES = 2000;
 const LONG_MESSAGE_PREVIEW_CHARS = 500;
 const LINK_HOST = "kachat.app"; // every shared link is https://kachat.app/... (KACHAT_APP_LINKS.md)
@@ -121,14 +144,23 @@ function unreadFor(channel) {
   const me = deps.engine.address || "";
   const hidden = hiddenIn(channel);
   let count = 0;
+  const seenNotes = new Set(); // a long voice note's parts count once (KaPost 1b15521)
   for (const m of messageCache[channel] || []) {
     if (m.senderAddress === me || m.status) continue;
     if (hidden.has(m.senderAddress)) continue;
     if (deps.parseReactionEnvelope?.(m.content)) continue;
-    if (Number(m.blockTime || 0) > marker) count += 1;
+    if (Number(m.blockTime || 0) <= marker) continue;
+    const before = seenNotes.size;
+    const note = roomNoteKey(m);
+    if (note) { seenNotes.add(note); if (seenNotes.size === before) continue; }
+    count += 1;
   }
   if (count === 0 && markedUnread[channel]) return 1;
   return count;
+}
+function roomNoteKey(m) {
+  const tag = typeof m.content === "string" && m.content.startsWith("{") ? VoiceNotes.sniffPartTag(m.content) : null;
+  return tag ? `${tag.kind}|${String(m.senderAddress || "").toLowerCase()}|${tag.id}|${tag.count}` : null;
 }
 function markChannelRead(channel) {
   if (!channel) return;
@@ -979,12 +1011,26 @@ function mergeMessages(channel, rows) {
   // you're not currently reading, never from a sender hidden in that room (iOS
   // PublicChatService.notifyIfEnabled). Capped so one poll can't fire a burst.
   const hiddenHere = hiddenIn(channel);
+  // One ring per long voice note: against the rows the room had before this batch, and only the
+  // first part of a note within the batch (parts often arrive together in one poll).
+  const freshTxIds = new Set(freshIncoming.map((row) => row.txId));
+  const before = (messageCache[channel] || []).filter((row) => !freshTxIds.has(row.txId));
+  const notesThisBatch = new Set();
+  const firstOfNote = (row) => {
+    const note = roomNoteKey(row);
+    if (!note) return true;
+    if (notesThisBatch.has(note)) return false;
+    notesThisBatch.add(note);
+    return !isLaterPart(row, before, ROOM_PART_ACCESSORS);
+  };
   const pingable = freshIncoming.filter((row) =>
     notifyByChannel[row.channel]
     // The room you are reading stays quiet only while the app is in front (iOS isViewing + active).
     && (row.channel !== activeChannel || document.hidden || !document.hasFocus())
     && !hiddenHere.has(row.senderAddress)
-    && Number(row.blockTime || 0) >= broadcastSessionStartMs);
+    && Number(row.blockTime || 0) >= broadcastSessionStartMs
+    // A later part of a long voice note isn't news of its own (KaChat's one ring per note).
+    && firstOfNote(row));
   for (const row of pingable.slice(0, 3)) {
     deps.postDesktopNotification?.({
       // Title the room, body the message preview alone (iOS: "#room" over previewText).
@@ -1153,7 +1199,7 @@ function roomSendErrorText(error, prefix = "") {
 /** Shared send pipeline used by the composer, voice-note share links, and reactions
  *  (reactions pass showBubble:false — they never get a message row). */
 async function sendBroadcastText(channel, text, { showBubble = true, feeKas = null } = {}) {
-  const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const pendingId = newRoomPendingId();
   if (showBubble) {
     pendingSendsThisRun.add(pendingId);
     (messageCache[channel] ||= []).push({
@@ -1165,6 +1211,53 @@ async function sendBroadcastText(channel, text, { showBubble = true, feeKas = nu
     });
     if (activeChannel === channel) renderRoom();
   }
+  return sendRoomRow(channel, pendingId, text, { showBubble, feeKas });
+}
+function newRoomPendingId() {
+  return `pending-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+/** A long voice note's parts (KaPost sendPublicChatVoiceParts): every part shows at once,
+ *  Sending, then they go in index order, each spending the change of the one before. When one
+ *  fails, the rest are Failed for one Retry. Never a reply. */
+async function sendRoomParts(channel, texts) {
+  const start = Date.now();
+  const ids = texts.map((text, offset) => {
+    const pendingId = newRoomPendingId();
+    pendingSendsThisRun.add(pendingId);
+    (messageCache[channel] ||= []).push({ txId: pendingId, senderAddress: deps.engine.address || "", content: text, blockTime: start + offset, status: "pending" });
+    return pendingId;
+  });
+  if (activeChannel === channel) renderRoom();
+  return sendRoomRowsInOrder(channel, ids);
+}
+async function sendRoomRowsInOrder(channel, ids) {
+  for (let i = 0; i < ids.length; i += 1) {
+    const row = (messageCache[channel] || []).find((m) => m.txId === ids[i]);
+    if (!row) return false;
+    try {
+      await sendRoomRow(channel, row.txId, row.content);
+    } catch (error) {
+      messageCache[channel] = (messageCache[channel] || []).map((m) => (ids.slice(i + 1).includes(m.txId) ? { ...m, status: "failed" } : m));
+      if (activeChannel === channel) renderRoom();
+      deps.showToast?.(roomSendErrorText(error, "Failed to send voice message: "));
+      return false;
+    }
+  }
+  renderChannelList();
+  return true;
+}
+/** Retry on a note's bubble: only its failed parts, in place and in order. */
+function retryRoomParts(channel, cluster) {
+  if (!channel) return;
+  const failed = cluster.parts.filter((m) => m.status === "failed").map((m) => m.txId);
+  if (!failed.length) return;
+  messageCache[channel] = (messageCache[channel] || []).map((m) => (failed.includes(m.txId) ? { ...m, status: "pending" } : m));
+  for (const id of failed) pendingSendsThisRun.add(id);
+  renderRoom();
+  sendRoomRowsInOrder(channel, failed);
+}
+/** Sends a row already in the room (status pending) under its pending id. */
+async function sendRoomRow(channel, pendingId, text, { showBubble = true, feeKas = null } = {}) {
   try {
     const txid = await enqueueBroadcastSend(() => sendBroadcastMessage({ engine: deps.engine, channel, content: text, feeKas: feeKas || "0" }));
     if (showBubble) {
@@ -1468,7 +1561,15 @@ function buildMessageElement(m) {
 
   const loneCard = !internalCard && loneLink && deps.isPreviewableUrl?.(loneLink) ? previewCardFor(loneLink) : null;
 
-  if (internalCard || loneCard) {
+  const partCluster = roomParts.clusters.get(m.txId) || null;
+  if (partCluster && deps.buildVoicePlayer) {
+    el.append(VoiceNotes.buildPartsBody(partCluster, {
+      contentOf: (row) => row.content,
+      buildVoicePlayer: (src, options) => deps.buildVoicePlayer(src, { ...options, chatStyle: false }),
+      outgoing: mine,
+      onReady: () => { if (activeChannel) renderRoom(); },
+    }));
+  } else if (internalCard || loneCard) {
     el.classList.add("link-card-only");
     el.append(internalCard || loneCard);
   } else if (audioEnvelope) {
@@ -1564,8 +1665,11 @@ function buildMessageElement(m) {
     // The bubble carries its edit's send state; `m` keeps the row's own (iOS ee5ec98 shownMessage).
     const editFailed = failedRoomEdits.has(failedRoomEditKey(activeChannel, m.txId));
     const status = editFailed ? "failed" : roomEdit?.status === ROOM_UNCONFIRMED ? ROOM_UNCONFIRMED : baseStatus;
-    const onRetry = editFailed ? () => retryFailedRoomEdit(activeChannel, m.txId) : () => retryBroadcastMessage(m);
-    const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status }, { onRetry });
+    const onRetry = editFailed ? () => retryFailedRoomEdit(activeChannel, m.txId)
+      : partCluster ? () => retryRoomParts(activeChannel, partCluster) : () => retryBroadcastMessage(m);
+    // A note's parts show one status (any failed, then any sending, then not confirmed).
+    const noteStatus = partCluster ? { failed: "failed", pending: "pending", warning: ROOM_UNCONFIRMED, sent: "confirmed" }[partCluster.status] : null;
+    const icon = deps.createDeliveryStatusIcon({ direction: "outgoing", status: noteStatus || status }, { onRetry });
     if (icon) {
       icon.classList.add("broadcast-delivery-icon");
       timeLine.append(icon);
@@ -1826,8 +1930,10 @@ function openBroadcastMessageMenu(m, x, y) {
       onClick: () => window.open(deps.explorerTxUrl(m.txId), "_blank", "noopener,noreferrer"),
     });
   }
-  if (mine && m.status === "failed") {
-    items.push({ label: "Retry Send", icon: icons.retry, onClick: () => retryBroadcastMessage(m) });
+  const noteCluster = roomParts.clusters.get(m.txId);
+  if (mine && (noteCluster ? noteCluster.status === "failed" : m.status === "failed")) {
+    // A note's bubble resends only its failed parts, in place and in order.
+    items.push({ label: "Retry Send", icon: icons.retry, onClick: () => (noteCluster ? retryRoomParts(activeChannel, noteCluster) : retryBroadcastMessage(m)) });
   }
   if (mine && failedRoomEdits.has(failedRoomEditKey(activeChannel, m.txId))) {
     items.push({ label: "Retry Edit", icon: icons.retry, onClick: () => retryFailedRoomEdit(activeChannel, m.txId) });
@@ -1946,8 +2052,15 @@ function renderRoom() {
   syncBroadcastFundingGate();
 
   const hidden = hiddenIn(activeChannel);
-  const allMessages = (messageCache[activeChannel] || []).filter((m) =>
+  const visibleRoomMessages = (messageCache[activeChannel] || []).filter((m) =>
     !hidden.has(m.senderAddress) && !deps.parseReactionEnvelope?.(m.content) && !deps.parseEditEnvelope?.(m.content));
+  // A long voice note: one bubble at its first part, the others hidden (KaPost 1b15521).
+  roomParts = groupParts(visibleRoomMessages, ROOM_PART_ACCESSORS);
+  for (const [key, cluster] of roomParts.clusters) {
+    // Rooms draw no photos: a multi-part photo's chunks stay as they are.
+    if (cluster.kind !== "voice") { roomParts.clusters.delete(key); for (const m of cluster.members) roomParts.hidden.delete(m.txId); }
+  }
+  const allMessages = roomParts.hidden.size ? visibleRoomMessages.filter((m) => !roomParts.hidden.has(m.txId)) : visibleRoomMessages;
   const messages = allMessages.length > roomWindow ? allMessages.slice(-roomWindow) : allMessages;
   if (roomBodyEl) {
     const before = { height: roomBodyEl.scrollHeight, top: roomBodyEl.scrollTop, client: roomBodyEl.clientHeight };
@@ -2172,7 +2285,10 @@ function showRecordingBar(state) { // "recording" | "encoding" | null
   if (bar) bar.hidden = Boolean(state);
   if (!state) return;
   const timeEl = voicePanelEl.querySelector("[data-broadcast-voice-time]");
-  if (timeEl) timeEl.textContent = state === "encoding" ? "Encoding…" : `Recording... ${Math.floor(Number(voiceRecordedSeconds) || 0)}s`;
+  // "Recording... 00:10 / 02:50" toward the limit (KaPost 1b15521).
+  const limit = voiceViaNextcloud && deps.isNextcloudConnected?.() ? (Number(deps.nextcloudVoiceMaxSeconds) || VOICE_MAX_DURATION_SECONDS) : onchainVoiceMaxSeconds();
+  const mmss = (value) => { const total = Math.max(0, Math.round(Number(value) || 0)); return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`; };
+  if (timeEl) timeEl.textContent = state === "encoding" ? "Encoding…" : `Recording... ${mmss(voiceRecordedSeconds)} / ${mmss(limit)}`;
   const send = voicePanelEl.querySelector("[data-broadcast-voice-stop]");
   if (send) send.disabled = state === "encoding";
 }
@@ -2186,16 +2302,34 @@ let recordingFeeBytes = null;
 function updateRecordingFeeEstimate(elapsedSeconds) {
   if (!deps.showFeeEstimate?.() || !deps.estimateFeeKas) return;
   const viaNextcloud = voiceViaNextcloud && Boolean(deps.isNextcloudConnected?.());
-  const bytes = viaNextcloud ? NEXTCLOUD_LINK_PAYLOAD_BYTES : Math.floor(150 + Math.floor(Number(elapsedSeconds) || 0) * 2870);
+  // On chain with the long-note encoder: the parts the note makes so far, each its own
+  // transaction (KaPost estimatePublicChatVoiceFee), as base64 JSON in the room payload.
+  const partBytes = !viaNextcloud && VoiceNotes.longVoiceNotesSupported()
+    ? voicePartSizes(Math.max(1, Math.floor(Number(elapsedSeconds) || 0)), VOICE_PATHS.room).map((size) => 260 + 4 * Math.ceil(size / 3))
+    : null;
+  const bytes = viaNextcloud ? NEXTCLOUD_LINK_PAYLOAD_BYTES : partBytes ? partBytes.join(",") : Math.floor(150 + Math.floor(Number(elapsedSeconds) || 0) * 2870);
   if (bytes === recordingFeeBytes) return;
   recordingFeeBytes = bytes;
   renderFeePill(feeOverrideKas ?? feeEstimateKas);
   const token = ++feeToken;
-  Promise.resolve(deps.estimateFeeKas(bytes)).then((fee) => {
+  const estimate = partBytes ? sumPartFees(partBytes, deps.estimateFeeKas) : deps.estimateFeeKas(bytes);
+  Promise.resolve(estimate).then((fee) => {
     if (token !== feeToken || !voiceRecorder?.isRecording()) return;
     feeEstimateKas = fee == null ? null : String(fee);
     renderFeePill(feeOverrideKas ?? feeEstimateKas);
   }).catch(() => {});
+}
+/** The fees of parts of these payload sizes, asked once per distinct size. */
+async function sumPartFees(sizes, estimate) {
+  const bySize = new Map();
+  for (const size of sizes) bySize.set(size, (bySize.get(size) || 0) + 1);
+  let total = 0;
+  for (const [size, count] of bySize) {
+    const fee = Number(await estimate(size));
+    if (!Number.isFinite(fee)) return null;
+    total += fee * count;
+  }
+  return Number(total.toFixed(8));
 }
 function endRecordingFee() {
   recordingFeeBytes = null;
@@ -2208,7 +2342,7 @@ function ensureVoiceRecorder() {
   voiceRecorder = deps.createVoiceRecorder({
     maxDurationSeconds: () => (voiceViaNextcloud && deps.isNextcloudConnected?.()
       ? (Number(deps.nextcloudVoiceMaxSeconds) || VOICE_MAX_DURATION_SECONDS)
-      : ONCHAIN_VOICE_MAX_SECONDS),
+      : onchainVoiceMaxSeconds()),
     onElapsed: (elapsed) => {
       voiceRecordedSeconds = elapsed;
       if (voiceRecordingChannel) {
@@ -2246,7 +2380,8 @@ async function startVoiceRecording() {
   voiceRecordedSeconds = 0;
   const error = await recorder.start();
   if (error) {
-    deps.showToast?.(error);
+    if (error === "Microphone access was denied." && deps.showMicrophoneAccessAlert) deps.showMicrophoneAccessAlert();
+    else deps.showToast?.(error);
     voiceRecordingChannel = null;
     voiceViaNextcloud = false;
     return;
@@ -2291,7 +2426,7 @@ async function sendBroadcastVoice({ blob, mimeType, channel, seconds }) {
       } catch (error) {
         deps.appendEngineLog?.(`Broadcast voice note upload failed: ${error.message}`);
         // The on-chain envelope is capped: a longer note would arrive cut short, so say so instead.
-        if (seconds > ONCHAIN_VOICE_MAX_SECONDS) {
+        if (seconds > onchainVoiceMaxSeconds()) {
           deps.showToast?.("Nextcloud upload failed, and the recording is too long to send on-chain.");
           return;
         }
@@ -2302,6 +2437,25 @@ async function sendBroadcastVoice({ blob, mimeType, channel, seconds }) {
         renderChannelList();
         return;
       }
+    }
+    // 16 kbps Opus in 60 ms frames, as parts of up to 14.5 s (KaPost 1b15521).
+    if (VoiceNotes.longVoiceNotesSupported()) {
+      const { parts } = await VoiceNotes.prepareVoiceParts(blob, VOICE_PATHS.room);
+      const envelopes = VoiceNotes.voicePartEnvelopes(parts);
+      if (!voiceRecorder?.isRecording()) showRecordingBar(null);
+      if (envelopes.length === 1) {
+        await sendBroadcastText(channel, envelopes[0], { feeKas: feeOverrideKas });
+        feeOverrideKas = null;
+        renderChannelList();
+        return;
+      }
+      // The whole note's fees first, before a single part goes out.
+      const fees = await Promise.all(envelopes.map((text) => Promise.resolve(deps.estimateFeeKas?.(new TextEncoder().encode(text).length + 40)).catch(() => null)));
+      const shortfall = deps.partsBalanceShortfall?.(fees);
+      if (shortfall) { deps.showToast?.(shortfall); return; }
+      feeOverrideKas = null;
+      await sendRoomParts(channel, envelopes);
+      return;
     }
     const dataUrl = await new Promise((resolve) => {
       const reader = new FileReader();

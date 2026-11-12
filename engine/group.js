@@ -13,6 +13,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { hkdf as nobleHkdf } from "@noble/hashes/hkdf.js";
 import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { schnorr } from "@noble/curves/secp256k1.js";
+import { mediaEnvelopeFromFrame, mediaFrameForEnvelope } from "./media-frame.js";
+import { sniffInlineMimeType } from "./voice-parts.js";
 
 // --- byte helpers -----------------------------------------------------------
 const UTF8 = new TextEncoder();
@@ -124,12 +126,34 @@ export function buildMessageAAD(groupId, epoch, senderId, msgId) {
   return concatBytes(new Uint8Array([0x01]), utf8Bytes("gcomm"), asBytes(groupId), leBytes8(epoch), asBytes(senderId), asBytes(msgId));
 }
 
+/**
+ * The bytes a group plaintext is sealed as (iOS 7c5c22e3 GroupChatService.groupPlaintextData):
+ * a voice note or photo's media-file JSON goes as the binary media frame, everything else as
+ * UTF-8. The outer gcomm payload is unchanged.
+ */
+export function groupPlaintextBytes(plaintext) {
+  if (typeof plaintext !== "string") return asBytes(plaintext);
+  const mime = plaintext.startsWith("{") ? sniffInlineMimeType(plaintext) : null;
+  const lowered = String(mime || "").toLowerCase();
+  if (lowered.startsWith("audio/") || lowered.startsWith("image/")) {
+    const frame = mediaFrameForEnvelope(plaintext);
+    if (frame) return frame;
+  }
+  return utf8Bytes(plaintext);
+}
+
+/** A decrypted group plaintext as text: the media frame read back as its media-file JSON (iOS
+ *  GroupCipher.decryptMessage, bytes first), else UTF-8. */
+export function groupPlaintextText(bytes) {
+  return mediaEnvelopeFromFrame(bytes) ?? FROM_UTF8.decode(bytes);
+}
+
 // Returns ciphertext || tag(16) — no nonce prefix (nonce is deterministic and
 // recomputed on decrypt).
 export function encryptGroupMessage({ plaintext, groupRootEpoch, groupId, epoch, senderId, msgId }) {
   const { senderKey, nonce } = deriveMessageKeys(groupRootEpoch, groupId, epoch, senderId, msgId);
   const aad = buildMessageAAD(groupId, epoch, senderId, msgId);
-  return chacha20poly1305(senderKey, nonce, aad).encrypt(utf8Bytes(plaintext));
+  return chacha20poly1305(senderKey, nonce, aad).encrypt(groupPlaintextBytes(plaintext));
 }
 
 export function decryptGroupMessage({ ciphertextWithTag, groupRootEpoch, groupId, epoch, senderId, msgId }) {
@@ -137,7 +161,7 @@ export function decryptGroupMessage({ ciphertextWithTag, groupRootEpoch, groupId
   if (ct.length < 16) throw new Error("Invalid group ciphertext.");
   const { senderKey, nonce } = deriveMessageKeys(groupRootEpoch, groupId, epoch, senderId, msgId);
   const aad = buildMessageAAD(groupId, epoch, senderId, msgId);
-  return FROM_UTF8.decode(chacha20poly1305(senderKey, nonce, aad).decrypt(ct));
+  return groupPlaintextText(chacha20poly1305(senderKey, nonce, aad).decrypt(ct));
 }
 
 // --- Schnorr signing (raw BIP340 over arbitrary bytes) ----------------------

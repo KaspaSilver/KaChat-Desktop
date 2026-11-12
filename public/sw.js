@@ -150,6 +150,20 @@ async function handlePush(event) {
     mapped = { title: String(payload.title || "KaChat"), options: { body: String(payload.body || "New notification"), tag: "kachat-push", icon: iconUrl(), data: { route: { kind: "tab", tab: "chats" }, key: "", push: true } }, badge: null, suppress: false };
   }
   let suppress = Boolean(mapped.suppress) || switchedOff;
+  // One ring per burst from a sender or group (iOS part_push_bursts, sw-push.js).
+  if (!suppress) {
+    try {
+      const burstKey = self.KaChatPushMap.partBurstKey(payload);
+      if (burstKey) {
+        const now = Date.now();
+        const bursts = (await kvGet("bursts")) || {};
+        self.KaChatPushMap.applyPartBurst(mapped, bursts[burstKey], now);
+        bursts[burstKey] = now;
+        for (const key of Object.keys(bursts)) if (now - Number(bursts[key]) > self.KaChatPushMap.PART_BURST_MS) delete bursts[key];
+        await kvSet("bursts", bursts);
+      }
+    } catch { /* ring */ }
+  }
   const clients = await windowClients();
   // Open pages fetch straight away rather than at their next poll.
   for (const client of clients) {

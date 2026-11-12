@@ -416,8 +416,6 @@ function prefsPage(storage, engine, saved = []) {
     extractFunction(app, "contactPrefsStore"),
     extractFunction(app, "saveContactPrefs"),
     extractFunction(app, "getContactNotifyOverride"),
-    extractFunction(app, "contactCallsEnabled"),
-    extractFunction(app, "setContactCallsEnabled"),
     extractFunction(app, "setContactPref"),
     extractFunction(app, "groupPrefsStore"),
     extractFunction(app, "saveGroupPrefs"),
@@ -440,7 +438,7 @@ await test("prefs: the old global stores move to the account open, once; an acco
   const engine = { address: "kaspa:qaccounta" };
   const { fns } = prefsPage(storage, engine);
   assert.equal(fns.getContactNotifyOverride("kaspa:qfriend"), "off");
-  assert.equal(fns.contactCallsEnabled("kaspa:qfriend"), true);
+  assert.equal((fns.contactPrefsStore()["kaspa:qfriend"]?.calls === true), true);
   assert.equal(fns.getGroupNotify("g1"), "mentions");
   assert.equal(storage.has("kachat-contact-prefs-v1"), false, "the global key is gone");
   assert.equal(storage.has("kachat-group-prefs-v1"), false);
@@ -448,16 +446,16 @@ await test("prefs: the old global stores move to the account open, once; an acco
   // Account B: nothing carried over.
   engine.address = "kaspa:qaccountb";
   assert.equal(fns.getContactNotifyOverride("kaspa:qfriend"), null);
-  assert.equal(fns.contactCallsEnabled("kaspa:qfriend"), false);
+  assert.equal((fns.contactPrefsStore()["kaspa:qfriend"]?.calls === true), false);
   assert.equal(fns.getGroupNotify("g1"), "all");
-  fns.setContactCallsEnabled("kaspa:qfriend", true);
+  fns.setContactPref("kaspa:qfriend", "calls", true);
   fns.setGroupNotify("g1", "muted");
   // Back to A: its own values, untouched by B's.
   engine.address = "kaspa:qaccounta";
   assert.equal(fns.getGroupNotify("g1"), "mentions");
-  fns.setContactCallsEnabled("kaspa:qfriend", false);
+  fns.setContactPref("kaspa:qfriend", "calls", undefined);
   engine.address = "kaspa:qaccountb";
-  assert.equal(fns.contactCallsEnabled("kaspa:qfriend"), true);
+  assert.equal((fns.contactPrefsStore()["kaspa:qfriend"]?.calls === true), true);
   assert.equal(fns.getGroupNotify("g1"), "muted");
 });
 
@@ -474,7 +472,7 @@ await test("prefs: the old global stores are copied to every saved account, not 
   assert.equal(fns.getContactNotifyOverride("kaspa:qfriend"), "off", "B kept the mute it had");
   engine.address = "kaspa:qaccountc";
   assert.equal(fns.getContactNotifyOverride("kaspa:qfriend"), null, "C's own prefs are not overwritten");
-  assert.equal(fns.contactCallsEnabled("kaspa:qother"), true);
+  assert.equal((fns.contactPrefsStore()["kaspa:qother"]?.calls === true), true);
 });
 
 await test("prefs: with no account open nothing is read or written, and the global store waits", () => {
@@ -482,7 +480,7 @@ await test("prefs: with no account open nothing is read or written, and the glob
   const engine = { address: "" };
   const { fns } = prefsPage(storage, engine);
   assert.equal(fns.getContactNotifyOverride("x"), null);
-  fns.setContactCallsEnabled("x", true);
+  fns.setContactPref("x", "calls", true);
   assert.equal(storage.has("kachat-contact-prefs-v1"), true, "not taken over without an account");
   assert.equal([...storage.keys()].length, 1);
   // Removing an account sweeps its prefixed keys, so these go with it (no global key to clean).

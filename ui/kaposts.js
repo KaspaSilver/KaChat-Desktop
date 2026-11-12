@@ -117,7 +117,7 @@ import "./kapost-terms.css";
 import { postReportBody, sendContentReport, withBlockedAccount } from "./kapost-moderation.js";
 // Who a poster is: their .kachat name, avatar, banner and bio (iOS 3d6fb7c, KachatLive.identityName /
 // profileBanner / profileBio). Profiles are on every network (mainnet: profile-only identities).
-import { kachatCachedLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, kachatRetryImage, onKachatIdentityChange } from "./kachat-names-live.js";
+import { kachatCachedLabel, kachatCachedDisplayLabel, kachatCachedAvatarUrl, kachatCachedProfilePieces, kachatRetryImage, onKachatIdentityChange } from "./kachat-names-live.js";
 import { kachatNamesUiEnabled } from "./kachat-names-runtime.js";
 // Imported, not a string path: Vite only rewrites and emits assets it can SEE, and a path inside
 // a template literal is invisible to it - which left this 404ing on the built site.
@@ -337,7 +337,7 @@ function posterName(address) {
   // identity since 5.2). Null on mainnet until names launch; it lands on its own
   // (onKachatIdentityChange repaints).
   if (kachatNamesUiEnabled()) {
-    const label = kachatCachedLabel(address);
+    const label = kachatCachedDisplayLabel(address);
     if (label) return label;
   } else {
     // A .kas name is no one's identity (iOS 509c0fe).
@@ -4685,7 +4685,7 @@ export function kaPostLinkSnippet(raw) {
 function kaPostLinkAuthorName(address) {
   if (!address) return null;
   if (kachatNamesUiEnabled()) {
-    const label = kachatCachedLabel(address);
+    const label = kachatCachedDisplayLabel(address);
     if (label) return label;
   } else if (deps.engine.knsNamesAsIdentity) {
     const domain = deps.engine.peekKnsAddressInfo?.(address)?.explicitPrimaryDomain || deps.engine.peekKnsAddressProfile?.(address)?.domainName;

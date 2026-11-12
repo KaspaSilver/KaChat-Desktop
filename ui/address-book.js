@@ -200,7 +200,6 @@ function detailHtml(address) {
       <div class="ab-card">
         ${actionRow({ attr: "data-ab-send", icon: ICONS.plane, label: "Send KAS", disabled: !canSend || Boolean(otherNetwork) })}
         ${isOwnAddress(entry.address) ? "" : actionRow({ attr: "data-ab-message", icon: ICONS.bubble, label: "Message", disabled: Boolean(otherNetwork) })}
-        ${!isOwnAddress(entry.address) && deps?.canCall?.(entry.address) ? actionRow({ attr: "data-ab-call", icon: ICONS.phone, label: "Call", disabled: Boolean(otherNetwork) || Boolean(deps?.callActive?.()) }) : ""}
       </div>
       ${otherNetwork ? `<p class="ab-section-foot">${esc(otherNetwork)}</p>` : ""}
       <div class="ab-card">
@@ -276,7 +275,6 @@ async function onScreenClick(event) {
   if (target.closest("[data-ab-share]")) { shareAddress(entry.address); return; }
   if (target.closest("[data-ab-send]")) { if (deps?.canSend?.() && !otherNetworkReason(entry.address)) deps?.openSend?.(entry.address); return; }
   if (target.closest("[data-ab-message]")) { if (!otherNetworkReason(entry.address)) deps?.openChat?.(entry.address); return; }
-  if (target.closest("[data-ab-call]")) { if (!otherNetworkReason(entry.address) && !deps?.callActive?.()) deps?.startCall?.(entry.address); return; }
   if (target.closest("[data-ab-edit]")) {
     const result = await openAddressBookEditor({ address: entry.address });
     if (result === "removed") { detailAddress = null; render(); }
@@ -309,8 +307,7 @@ function attachScreen() {
 }
 
 /** deps: { escapeHtml, shortAddress, personGlyphSvg, profileAvatarHtml(address, className),
- *  ownAddress(), canSend(), openSend(address), openChat(address), canCall(address), callActive(),
- *  startCall(address), copyText(text), showToast(text),
+ *  ownAddress(), canSend(), openSend(address), openChat(address), copyText(text), showToast(text),
  *  confirmDialog(opts), formatBytes(bytes), onChange(kind: "edit" | "photos" | "restore"),
  *  displayNameFor(address) (who an unnamed entry is), setContactName(address, name) (the chat
  *  with that address takes the entry's name; "" clears it) } */

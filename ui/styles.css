@@ -10490,7 +10490,7 @@ html.standalone .ios-install-hint { display: none; }
 .kaposts-cell.deleting { opacity: .45; transition: opacity .2s ease; }
 
 /* =============================================================================================
-   Calls (iOS 5.0): the header's call button, call-history lines in the thread, the call screen.
+   The header's round button (the chess game's; calls left with iOS 7c5c22e3).
    ============================================================================================= */
 .conversation-header .conversation-call-button {
   position: absolute; right: 10px; top: calc(var(--safe-top, 0px) + (100% - var(--safe-top, 0px)) / 2); transform: translateY(-50%);
@@ -10501,58 +10501,6 @@ html.standalone .ios-install-hint { display: none; }
 .conversation-header .conversation-call-button svg { width: 20px; height: 20px; fill: currentColor; }
 .conversation-header .conversation-call-button[hidden] { display: none; }
 
-.message-call-line { display: inline-flex; align-items: center; gap: 8px; font-weight: 650; }
-.message-call-line svg { width: 18px; height: 18px; fill: currentColor; opacity: .9; }
-.message-call-line.down { color: var(--ios-red); }
-
-.call-overlay {
-  position: fixed; inset: 0; z-index: 6000; display: flex; flex-direction: column;
-  background: radial-gradient(circle at 50% 20%, rgba(112,199,186,.14), transparent 45%), #070a0d;
-  color: var(--text);
-  padding: calc(16px + var(--safe-top, 0px)) 16px calc(16px + var(--safe-bottom, 0px));
-}
-.call-overlay[hidden] { display: none; }
-.call-stage { position: relative; flex: 1; min-height: 0; display: grid; place-items: center; border-radius: 22px; overflow: hidden; background: #0b1014; }
-.call-remote { width: 100%; height: 100%; object-fit: cover; background: #0b1014; }
-.call-overlay:not(.video) .call-remote { opacity: 0; }
-.call-info { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; padding: 20px; pointer-events: none; }
-/* A video call is two equal tiles: you on the left, the person you are talking to on the
-   right (stacked on a phone). The name and status float over the top. */
-.call-overlay.video .call-stage { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; background: transparent; overflow: visible; }
-.call-tile { position: relative; min-height: 0; border-radius: 18px; overflow: hidden; border: 1px solid rgba(255,255,255,.12); background: #0b1014; }
-.call-tile[hidden] { display: none; }
-.call-tile video { position: static; width: 100%; height: 100%; min-height: 0; aspect-ratio: auto; object-fit: cover; opacity: 1; background: #0b1014; }
-.call-tile-local { order: 1; }
-.call-tile-local video { transform: scaleX(-1); }
-.call-tile-remote { order: 2; }
-.call-tile-local.camera-off video { opacity: .25; }
-/* Whose square: the name on top of each. */
-.call-tile-name {
-  position: absolute; top: 10px; left: 10px; z-index: 2; padding: 5px 10px; border-radius: 999px;
-  background: rgba(0,0,0,.5); color: #fff; font-size: 13px; font-weight: 700; letter-spacing: .01em;
-  max-width: calc(100% - 20px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-/* Voice call: no tiles, the remote audio still plays through its element. */
-.call-overlay:not(.video) .call-tile { position: absolute; inset: 0; opacity: 0; pointer-events: none; }
-.call-overlay:not(.video) .call-tile-local { display: none; }
-.call-overlay.video .call-info { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 3; align-items: center; padding: 8px 16px; border-radius: 14px; background: rgba(0,0,0,.45); }
-.call-overlay.video .call-name { display: none; }
-.call-overlay.video .call-avatar { display: none; }
-@media (max-width: 620px) {
-  .call-overlay.video .call-stage { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
-}
-.call-avatar { width: 96px; height: 96px; border-radius: 50%; overflow: hidden; display: grid; place-items: center; background: var(--surface-2); font-size: 36px; font-weight: 800; }
-.call-avatar img, .call-avatar .chat-avatar, .call-avatar .message-avatar { width: 100%; height: 100%; object-fit: cover; }
-.call-name { font-size: 24px; font-weight: 800; letter-spacing: -.01em; }
-.call-status { color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
-.call-controls { flex: 0 0 auto; display: flex; justify-content: center; gap: 22px; padding: 22px 0 6px; }
-.call-button { display: flex; flex-direction: column; align-items: center; gap: 8px; border: 0; background: transparent; color: var(--text); cursor: pointer; font-size: 12.5px; font-weight: 650; }
-.call-button svg { width: 62px; height: 62px; padding: 18px; box-sizing: border-box; border-radius: 50%; background: rgba(255,255,255,.12); fill: currentColor; stroke: currentColor; stroke-width: 0; transition: background .15s ease, transform .15s ease; }
-.call-button:hover svg { transform: scale(1.04); }
-.call-button.active svg { background: rgba(255,255,255,.32); color: #06110f; }
-.call-button.decline svg { background: var(--ios-red); color: #fff; }
-.call-button.accept svg { background: var(--ios-green); color: #fff; }
-body.call-active .sidebar-tabbar { display: none; }
 
 /* Public Chats: the broadcast rooms as the Chats screen's third tab (iOS a566da7). The list sits
    in the chats pane like the other two lists; the room takes the detail pane. */
@@ -10608,16 +10556,6 @@ body.call-active .sidebar-tabbar { display: none; }
 .broadcast-room-row .broadcast-languages-chevron svg { width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform .15s ease; }
 .broadcast-room-row.expanded .broadcast-languages-chevron svg { transform: rotate(180deg); }
 
-/* Calls: the "wants to switch to video" question and short notices sit above the buttons. */
-.call-controls { flex-direction: column; align-items: center; gap: 14px; }
-.call-controls-row { display: flex; justify-content: center; gap: 22px; }
-.call-video-ask {
-  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 14px 18px; border-radius: 16px;
-  background: rgba(20,26,28,.96); border: 1px solid rgba(255,255,255,.12); max-width: min(420px, 92vw); text-align: center;
-}
-.call-video-ask strong { font-size: 15px; }
-.call-video-ask-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
-.call-notice { padding: 8px 14px; border-radius: 999px; background: rgba(0,0,0,.55); color: #fff; font-size: 13px; }
 
 /* Public Chats settings: the default rooms, each with a switch. */
 .broadcast-settings-sheet { max-height: min(86vh, 720px); display: flex; flex-direction: column; }
@@ -12247,9 +12185,6 @@ body.chats-tab .app-detail { background: var(--bg-plain); }
 .voice-player-time { font-size: 12px; }
 .voice-player.outgoing .voice-player-time { color: rgba(255,255,255,.8); }
 
-.message-call-line { font-size: 14px; font-weight: 500; gap: 8px; }
-.message-call-line.down { color: inherit; }
-.message-bubble:has(> .message-call-line) { padding: 10px 14px; }
 
 .message-bubble.handshake-request-bubble { background: var(--ios-gray6); padding: 12px; border-radius: 16px; max-width: 300px; }
 .handshake-request-line { font-size: 14px; }
@@ -13448,8 +13383,8 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
    row was sized by the photo, so `height: 100%` followed the image: a tall picture drew as a tall
    oval past the circle (it pushed the chat circle's name off the strip). One fixed cell the size of
    the circle, with the photo cropped to it. ==== */
-.chat-circle-avatar, .call-avatar, .chess-t-avatar, .create-chat-picker-avatar, .create-chat-preview-avatar { grid-template: 100% / 100%; }
-:is(.chat-circle-avatar, .call-avatar, .chess-t-avatar, .create-chat-picker-avatar, .create-chat-preview-avatar) > img {
+.chat-circle-avatar, .chess-t-avatar, .create-chat-picker-avatar, .create-chat-preview-avatar { grid-template: 100% / 100%; }
+:is(.chat-circle-avatar, .chess-t-avatar, .create-chat-picker-avatar, .create-chat-preview-avatar) > img {
   width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: cover; border-radius: 50%;
 }
 
@@ -15428,3 +15363,19 @@ body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--bac
 
 /* Under the chat list (iOS "{n} chat(s)"). */
 .chat-list-count { margin: 10px 0 14px; color: var(--muted); font-size: 13px; text-align: center; }
+
+/* Long voice notes and multi-part photos (iOS 7c5c22e3): one bubble for all the parts. */
+.message-parts-voice { display: flex; flex-direction: column; gap: 4px; }
+.message-parts-note { font-size: 12px; color: var(--muted); padding: 0 4px; }
+.message-bubble.local .message-parts-note { color: inherit; opacity: .75; }
+.voice-player.loading { display: flex; align-items: center; gap: 10px; min-height: 40px; min-width: 180px; }
+.message-parts-photo.receiving {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: min(240px, 60vw); aspect-ratio: 4 / 3; border-radius: 16px;
+  background: var(--surface-2, rgba(127,127,127,.12)); color: var(--muted); font-size: 13px;
+}
+.message-parts-photo img.message-photo { display: block; }
+/* The recording ring: a red arc that fills toward the length limit. */
+.voice-recording-ring { flex: 0 0 auto; width: 20px; height: 20px; transform: rotate(-90deg); }
+.voice-recording-ring circle { fill: none; stroke: rgba(127,127,127,.3); stroke-width: 3; }
+.voice-recording-ring .voice-recording-ring-fill { stroke: var(--ios-red, #ff3b30); stroke-linecap: round; transition: stroke-dashoffset 1s linear; }

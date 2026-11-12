@@ -257,15 +257,9 @@
                 <h1 data-conversation-name>Contact</h1>
                 <p class="conversation-bio" data-conversation-bio hidden aria-hidden="true"></p>
               </button>
-              <!-- One call button (iOS 12343f3): voice or video is chosen in a sheet. Always
-                   there; Chat Info's "Allow calls" switch is its only gate, and the first tap
-                   on a contact not yet enabled asks. -->
               <!-- Shown while a chess game with this contact is on (iOS "Open active chess game"). -->
               <button class="conversation-call-button" type="button" data-open-chess aria-label="Open active chess game" title="Open active chess game" hidden>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M4 9h16M4 14h16M9 4v16M14 4v16" opacity=".5"/></svg>
-              </button>
-              <button class="conversation-call-button" type="button" data-open-call aria-label="Call" title="Call">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.6 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.4 11.4 0 0 0 .6 3.6 1 1 0 0 1-.25 1z"/></svg>
               </button>
             </div>
             <div class="conversation-utility-controls" hidden aria-hidden="true">
@@ -1097,7 +1091,10 @@
                 <svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
               </button>
               <div class="settings-toggle-row" data-fee-estimate-row><span><strong>Show Fee Estimate</strong></span><label class="switch-control"><input type="checkbox" data-pref-estimate-fees checked><span></span></label></div>
+              <!-- iOS 94ed3a35 KachatEndingsToggle: display only, on by default. -->
+              <div class="settings-toggle-row"><span><strong>Show .kachat Endings</strong></span><label class="switch-control"><input type="checkbox" data-pref-kachat-endings checked><span></span></label></div>
             </div>
+            <p class="settings-group-footer field-hint">Turn off to show names like alice instead of alice.kachat. A name you gave someone yourself never has the ending.</p>
           </section>
 
           <!-- Customization sub-screen. -->

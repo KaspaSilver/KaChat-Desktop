@@ -161,7 +161,7 @@ const pipeline = between("async function runEngineSendPipeline", "function descr
 assert.match(pipeline, /if \(error\?\.code === SEND_OUTCOME_UNKNOWN\) \{[\s\S]{0,300}updateMessageStatus\(conversationId, messageId, sendFailurePatch\(error\)\);[\s\S]{0,200}return;/, "a 1:1 message not confirmed is not FAILED");
 assert.equal((app.match(/applyMessagePatch\(liveMessage, sendFailurePatch\(error, error\.message\)\)/g) || []).length, 3, "chat payment, tip sheet and instant tip");
 assert.doesNotMatch(app, /applyMessagePatch\(liveMessage, \{ status: MESSAGE_STATUSES\.FAILED, note: error\.message \}\)/);
-assert.equal((app.match(/unknown \? groupUnconfirmedPatch\(error\) : \{ status: MESSAGE_STATUSES\.FAILED \}/g) || []).length, 2, "group send and group retry");
+assert.equal((app.match(/unknown \? groupUnconfirmedPatch\(error\) : \{ status: MESSAGE_STATUSES\.FAILED \}/g) || []).length, 3, "group send, group retry and a note's parts in order");
 const statusIcon = between("function createDeliveryStatusIcon", "const LONG_MESSAGE_BYTES");
 assert.match(statusIcon, /const failed = status === MESSAGE_STATUSES\.FAILED;/, "only FAILED is the retry button");
 assert.match(statusIcon, /status === MESSAGE_STATUS_UNCONFIRMED\) \{[\s\S]{0,700}word = "Not confirmed";/);

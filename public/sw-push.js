@@ -198,5 +198,28 @@
     return "";
   }
 
-  root.KaChatPushMap = { notificationFromPush, routeKey, shortAddress, kasFromSompi };
+  // iOS ca013fc8 part_push_bursts: a push the extension can't read joins its sender's burst (by
+  // sender in 1:1, by blinded group id in a group), and one within 60 s of the last is delivered
+  // quiet, as a later part of a long voice note or multi-part photo would be. This worker never
+  // reads a message, so every chat and group message push is such a push. Payments, requests and
+  // group updates always ring.
+  const PART_BURST_MS = 60 * 1000;
+  function partBurstKey(payload) {
+    const p = payload && typeof payload === "object" ? payload : {};
+    const type = String(p.type || "");
+    if ((type === "contextual" || type === "audio") && String(p.inbox || "") !== "true" && lower(p.sender)) return `chat:${lower(p.sender)}`;
+    if (type === "group_message" && lower(p.blinded_group_id)) return `group:${lower(p.blinded_group_id)}`;
+    return null;
+  }
+  /** Makes `mapped` quiet when the burst's last push was under 60 s before `now`. */
+  function applyPartBurst(mapped, lastAt, now) {
+    const last = Number(lastAt);
+    if (!mapped || !Number.isFinite(last) || now - last < 0 || now - last >= PART_BURST_MS) return mapped;
+    mapped.options = { ...mapped.options, silent: true, renotify: false };
+    mapped.badge = null;
+    mapped.quietBurst = true;
+    return mapped;
+  }
+
+  root.KaChatPushMap = { notificationFromPush, routeKey, shortAddress, kasFromSompi, partBurstKey, applyPartBurst, PART_BURST_MS };
 })(typeof self !== "undefined" ? self : globalThis);

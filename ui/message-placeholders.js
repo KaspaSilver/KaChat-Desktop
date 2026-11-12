@@ -15,10 +15,33 @@ export function isSentPlaceholder(text) {
   return String(text ?? "") === SENT_PLACEHOLDER;
 }
 
-/** Placeholders the app never shows: cross-device sends and undecryptable messages. */
+/**
+ * KaChat has no calls since iOS 7c5c22e3 (2026-11-11). Other clients and older builds may still
+ * send `{"type":"call_invite" | "call_request" | "call_response" | "call_end", ...}` as 1:1
+ * messages: they are dropped on arrival and hidden if an older build stored them, never shown as
+ * raw JSON (iOS CallSignal). Cheap for ordinary text; JSON answers are cached.
+ */
+const callSignalCache = new Map();
+export function isCallSignal(text) {
+  const value = String(text ?? "");
+  if (value.length >= 4096 || !value.includes('"call_')) return false;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return false;
+  if (callSignalCache.has(trimmed)) return callSignalCache.get(trimmed);
+  let result = false;
+  try {
+    const parsed = JSON.parse(trimmed);
+    result = Boolean(parsed && typeof parsed === "object" && typeof parsed.type === "string" && parsed.type.startsWith("call_"));
+  } catch { result = false; }
+  if (callSignalCache.size >= 512) callSignalCache.clear();
+  callSignalCache.set(trimmed, result);
+  return result;
+}
+
+/** What the app never shows: cross-device sends, undecryptable messages and call messages. */
 export function isHiddenPlaceholder(text) {
   const value = String(text ?? "");
-  return value === SENT_PLACEHOLDER || value === UNREADABLE_PLACEHOLDER;
+  return value === SENT_PLACEHOLDER || value === UNREADABLE_PLACEHOLDER || isCallSignal(value);
 }
 
 /** A message record (desktop shape, `text`) whose body is a hidden placeholder. */
