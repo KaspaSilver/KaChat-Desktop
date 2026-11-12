@@ -15390,7 +15390,7 @@ body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--bac
    the bottom. The app sits to its right; there is no floating pill and nothing reserves a strip
    at the bottom any more. Phones and narrow windows keep the bottom bar above. */
 @media (min-width: 860px) {
-  :root { --rail-w: 88px; --rail-item-h: 52px; --dock-inset: 0px; }
+  :root { --rail-w: 72px; --rail-item-h: 48px; --dock-inset: 0px; }
   .kachat-shell { margin-left: var(--rail-w); width: calc(100% - var(--rail-w)); }
 
   body .sidebar-tabbar,
@@ -15406,7 +15406,7 @@ body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--bac
     align-items: stretch;
     justify-content: flex-start;
     gap: 2px;
-    padding: calc(12px + var(--safe-top, 0px)) 6px calc(12px + env(safe-area-inset-bottom, 0px));
+    padding: calc(10px + var(--safe-top, 0px)) 4px calc(10px + env(safe-area-inset-bottom, 0px));
     border: 0;
     border-right: 1px solid var(--bar-separator, var(--line));
     border-radius: 0;
@@ -15427,18 +15427,16 @@ body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--bac
     gap: 3px;
     min-width: 0;
     width: 100%;
-    height: var(--rail-item-h);
-    padding: 4px 2px;
-    border-radius: 14px;
+    min-height: var(--rail-item-h);
+    padding: 4px 1px;
+    border-radius: 12px;
   }
   body .sidebar-tabbar .sidebar-tab > span:last-child,
   body.chats-tab .sidebar-tabbar .sidebar-tab > span:last-child {
-    font-size: 11px; line-height: 13px; font-weight: 500;
+    font-size: 10px; line-height: 12px; font-weight: 500; letter-spacing: -0.1px;
     max-width: 100%; white-space: nowrap; text-align: center; overflow: hidden; text-overflow: ellipsis;
   }
-  /* The .kachat wordmark is wider than a glyph: scaled to fit the column. */
-  body .sidebar-tabbar .kachat-wordmark-icon { width: auto; }
-  body .sidebar-tabbar .kachat-wordmark-icon svg { width: 44px; height: auto; }
+  body .sidebar-tabbar .sidebar-tab-icon svg { width: 21px; height: 21px; }
   body .sidebar-tabbar .sidebar-tab-badge { top: 4px; right: auto; left: calc(50% + 6px); }
   /* A thin line where the next iOS app's screens start: KaPost, KaPay, KaPlay, the extras. */
   body .sidebar-tabbar .sidebar-tab[data-app-tab="kaposts"],
@@ -15449,17 +15447,11 @@ body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--bac
   body .sidebar-tabbar .sidebar-tab[data-app-tab="wallet"]::before,
   body .sidebar-tabbar .sidebar-tab[data-app-tab="chess"]::before,
   body .sidebar-tabbar .sidebar-tab[data-app-tab="kachat-stats"]::before {
-    content: ""; position: absolute; top: -6px; left: 18px; right: 18px; height: 1px; background: var(--line);
+    content: ""; position: absolute; top: -6px; left: 14px; right: 14px; height: 1px; background: var(--line);
   }
-  /* Profile and Settings at the bottom, and always on screen: on a short window the rest scrolls
-     under them. */
+  /* Profile and Settings at the bottom. Not pinned there: pinned, they covered the last screen
+     above them (Websites) on a window just too short for the column. Short, it all scrolls. */
   body .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] { margin-top: auto; }
-  body .sidebar-tabbar .sidebar-tab[data-app-tab="profile"],
-  body .sidebar-tabbar .sidebar-tab[data-app-tab="settings"] { position: sticky; z-index: 1; background: var(--bar-bg); box-shadow: 0 0 0 2px var(--bar-bg); }
-  body .sidebar-tabbar .sidebar-tab[data-app-tab="settings"] { bottom: 0; }
-  body .sidebar-tabbar .sidebar-tab[data-app-tab="profile"] { bottom: calc(var(--rail-item-h) + 2px); }
-  body .sidebar-tabbar .sidebar-tab[data-app-tab="profile"].active,
-  body .sidebar-tabbar .sidebar-tab[data-app-tab="settings"].active { background: linear-gradient(var(--fill-secondary, rgba(255,255,255,.12)), var(--fill-secondary, rgba(255,255,255,.12))), var(--bar-bg); }
 
   /* Settings opens in place beside the dock rather than under it. */
   body.settings-tab .account-overlay[data-account-overlay] { left: var(--rail-w); padding-bottom: 0; }
@@ -15470,35 +15462,4 @@ body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--bac
   body.chats-tab .sidebar-tabbar .sidebar-tab { flex: 1 1 0; min-width: 0; padding-left: 2px; padding-right: 2px; }
   body .sidebar-tabbar .sidebar-tab > span:last-child,
   body.chats-tab .sidebar-tabbar .sidebar-tab > span:last-child { font-size: 10.5px; max-width: 100%; letter-spacing: -0.1px; }
-}
-/* The left dock's fold button (owner, 2026-11-12): computers only. Folded, the column narrows to its
-   icons and each name becomes a tooltip. */
-.dock-collapse-toggle { display: none; }
-@media (min-width: 860px) {
-  body .sidebar-tabbar .dock-collapse-toggle {
-    display: grid; place-items: center; flex: 0 0 auto;
-    width: 36px; height: 30px; margin: 0 auto 6px; padding: 0;
-    border: 0; border-radius: 10px; background: transparent; color: var(--muted); cursor: pointer;
-  }
-  body .sidebar-tabbar .dock-collapse-toggle:hover { background: var(--fill-tertiary, rgba(255,255,255,.06)); color: var(--text); }
-  body .sidebar-tabbar .dock-collapse-toggle svg {
-    width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
-    transition: transform .2s ease;
-  }
-  body.dock-collapsed .sidebar-tabbar .dock-collapse-toggle svg { transform: scaleX(-1); }
-
-  body.dock-collapsed { --rail-w: 60px; --rail-item-h: 44px; }
-  body.dock-collapsed .sidebar-tabbar,
-  body.dock-collapsed.chats-tab .sidebar-tabbar { padding-left: 6px; padding-right: 6px; }
-  body.dock-collapsed .sidebar-tabbar .sidebar-tab > span:last-child,
-  body.dock-collapsed.chats-tab .sidebar-tabbar .sidebar-tab > span:last-child { display: none; }
-  body.dock-collapsed .sidebar-tabbar .sidebar-tab { padding: 0; }
-  body.dock-collapsed .sidebar-tabbar .sidebar-tab[data-app-tab="kaposts"]::before,
-  body.dock-collapsed .sidebar-tabbar .sidebar-tab[data-app-tab="wallet"]::before,
-  body.dock-collapsed .sidebar-tabbar .sidebar-tab[data-app-tab="chess"]::before,
-  body.dock-collapsed .sidebar-tabbar .sidebar-tab[data-app-tab="kachat-stats"]::before { left: 10px; right: 10px; }
-  body.dock-collapsed .sidebar-tabbar .kachat-wordmark-icon svg { width: 40px; }
-  body.dock-collapsed .sidebar-tabbar .sidebar-tab-badge { top: 2px; left: calc(50% + 5px); }
-  /* Folding moves everything beside it; the widths ease rather than jump. */
-  .kachat-shell, .sidebar-tabbar { transition: width .2s ease, margin-left .2s ease; }
 }

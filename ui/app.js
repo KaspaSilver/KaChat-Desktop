@@ -12166,33 +12166,7 @@ function loadDockPrefs() {
 // screen on a computer, five and More on a phone (ui/dock-arrangement.js dockLayoutFor). The old
 // saved arrangement and its editor are left alone, unused.
 const WIDE_DOCK_QUERY = window.matchMedia("(min-width: 860px)");
-// The left dock folds down to its icons (owner, 2026-11-12), remembered on this device. Folded, each
-// item's name is its tooltip.
-const DOCK_COLLAPSED_KEY = "kachat-dock-collapsed-v1";
-function applyDockCollapsed(collapsed) {
-  document.body.classList.toggle("dock-collapsed", collapsed);
-  const toggle = document.querySelector("[data-dock-collapse]");
-  if (toggle) {
-    const label = collapsed ? "Expand menu" : "Collapse menu";
-    toggle.setAttribute("aria-label", label);
-    toggle.title = label;
-    toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
-  }
-  document.querySelectorAll(".sidebar-tabbar .sidebar-tab").forEach((button) => {
-    if (collapsed) button.title = tabFullName(button.dataset.appTab);
-    else button.removeAttribute("title");
-  });
-}
-(() => {
-  let collapsed = false;
-  try { collapsed = localStorage.getItem(DOCK_COLLAPSED_KEY) === "1"; } catch { /* storage off */ }
-  applyDockCollapsed(collapsed);
-  document.querySelector("[data-dock-collapse]")?.addEventListener("click", () => {
-    const next = !document.body.classList.contains("dock-collapsed");
-    try { localStorage.setItem(DOCK_COLLAPSED_KEY, next ? "1" : "0"); } catch { /* storage off */ }
-    applyDockCollapsed(next);
-  });
-})();
+// (Build 282's fold button is gone: the owner wants the names always shown, 2026-11-12.)
 let dockPrefs = dockLayoutFor(WIDE_DOCK_QUERY.matches);
 WIDE_DOCK_QUERY.addEventListener?.("change", () => {
   // The screen on show stays on show: a More section on a phone is its own dock item on a computer,
@@ -13309,7 +13283,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 283;
+const APP_BUILD = 284;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of

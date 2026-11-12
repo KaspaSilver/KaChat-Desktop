@@ -13,7 +13,7 @@
   <!-- Too-old browsers (no WebAssembly / modern JS, e.g. iOS 10) get a clear message, not a blank layout. -->
   <script src="/browser-check.js"></script>
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=402" />
+  <link rel="stylesheet" href="./ui/styles.css?v=403" />
   <meta name="theme-color" content="#000000" />
   <link rel="manifest" href="manifest.json" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
@@ -916,10 +916,6 @@
   <!-- The four tabs that live in Kaspa Hub by default start hidden: the dock is drawn from the
        saved arrangement once app.js runs, and before that the page must not flash all nine. -->
   <nav class="sidebar-tabbar" aria-label="Main sections">
-      <!-- Computers only: folds the left dock down to its icons, and back (owner, 2026-11-12). -->
-      <button class="dock-collapse-toggle" type="button" data-dock-collapse aria-label="Collapse menu" title="Collapse menu" aria-expanded="true">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 6.5 8 12l5.5 5.5M19 6.5 13.5 12l5.5 5.5"/></svg>
-      </button>
       <button class="sidebar-tab" type="button" data-app-tab="cold-storage">
         <span class="sidebar-tab-icon" aria-hidden="true"><svg class="tab-glyph-outline" viewBox="0 0 24 24"><path d="M12 2.4 20 5.1v6.2c0 4.6-3.2 8.4-8 10.3-4.8-1.9-8-5.7-8-10.3V5.1Z"/><rect x="9.1" y="11.3" width="5.8" height="4.7" rx="1.2"/><path d="M10.4 11.3v-1.5a1.6 1.6 0 0 1 3.2 0v1.5"/></svg><svg class="tab-glyph-filled" viewBox="0 0 24 24"><defs><mask id="kc-dock-cut-storage" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24"><rect width="24" height="24" fill="#fff"/><rect x="8.9" y="11.1" width="6.2" height="5" rx="1.1" fill="#000"/><path d="M10.2 11.1V9.7a1.8 1.8 0 0 1 3.6 0v1.4" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round"/></mask></defs><path mask="url(#kc-dock-cut-storage)" d="M12 2.2 20.2 5v6.3c0 4.8-3.3 8.7-8.2 10.6C7.1 20 3.8 16.1 3.8 11.3V5Z"/></svg></span>
         <span>Storage</span>
@@ -953,7 +949,8 @@
         <span>Websites</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="kachat-names" hidden>
-        <span class="sidebar-tab-icon kachat-wordmark-icon" aria-hidden="true" data-kachat-wordmark></span>
+        <!-- at (KaPay AppTab.kachatNames): the name is under it, so it is not spelled out twice. -->
+        <span class="sidebar-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.6"/><path d="M15.6 12v1.4a2.6 2.6 0 0 0 5.2 0V12a8.8 8.8 0 1 0-3.4 6.9"/></svg></span>
         <span>.kachat</span>
       </button>
       <button class="sidebar-tab" type="button" data-app-tab="kachat-stats" hidden>
