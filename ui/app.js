@@ -13259,7 +13259,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 278;
+const APP_BUILD = 279;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -18494,9 +18494,11 @@ function renderChats() {
     return;
   }
 
-  // Chats, groups and rooms share the one list, by latest activity (iOS d1844582).
+  // Chats, groups and rooms share the one list, by latest activity (iOS d1844582) - except your
+  // own chat, "Your Address", which always sits first, right under Message Requests (the owner's
+  // call, 2026-11-12; iOS sorts it by date with the rest).
   const rows = [
-    ...visibleConversations.map((conversationEntry, order) => ({ at: conversationRecency(conversationEntry), order, html: () => conversationRowHtml(conversationEntry, {
+    ...visibleConversations.map((conversationEntry, order) => ({ pinned: isSelfConversation(conversationEntry), at: conversationRecency(conversationEntry), order, html: () => conversationRowHtml(conversationEntry, {
       selecting: chatSelectionModeActive,
       selected: selectedChatConversationIds.has(conversationEntry.id),
       active: conversationEntry.id === activeConversationId,
@@ -18510,7 +18512,7 @@ function renderChats() {
       selecting: chatSelectionModeActive,
       selected: selectedRoomNames.has(room.name),
     }) })),
-  ].sort((a, b) => b.at - a.at || a.order - b.order);
+  ].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.at - a.at || a.order - b.order);
   // iOS: "{n} chat(s)" under the list.
   const countLineHtml = `<p class="chat-list-count">${rows.length} chat${rows.length === 1 ? "" : "s"}</p>`;
   chatList.innerHTML = requestsRowHtml + rows.map((row) => row.html()).join("") + countLineHtml;
