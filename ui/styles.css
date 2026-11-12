@@ -14823,6 +14823,12 @@ html.keyboard-open .sidebar-tabbar { display: none !important; }
 .kaposts-settings-modal .settings-page-form > .settings-toggle-row:not(:has(~ .settings-toggle-row:not([hidden]))) { background-image: none; }
 .kaposts-settings-modal .settings-list-card + .settings-list-card { margin-top: 24px; }
 .kaposts-settings-modal .settings-group-label { margin-top: 8px; }
+/* iOS KaPostsSettingsView's sections (owner, 2026-11-12, "fix the spacing"): a heading sits well
+   clear of the footer above it, Tips From is a row of the Tipping card, and every section starts
+   the same distance below the last, whether or not that section's footer is showing. */
+.kaposts-settings-modal .settings-group-footer + .settings-group-label { margin-top: 22px; }
+.kaposts-settings-modal .settings-list-card > .settings-page-form + .settings-list-row { border-top: 1px solid var(--line); }
+.kaposts-settings-modal .kaposts-settings-notifications-card { margin-top: 24px; }
 /* The Settings balance is centred on the toolbar's row (with Done), not on the whole header: on a
    phone the header's top padding is the status bar's height, and centring on all of it put the
    balance up in the status bar, half under the clock, while Done sat below it. */

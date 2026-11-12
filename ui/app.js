@@ -13309,7 +13309,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 282;
+const APP_BUILD = 283;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -20595,12 +20595,10 @@ function openKaPostsSettings() {
               <span class="kaposts-tip-amount-field"><img src="${kaspaLogoUrl}" alt="" class="kaposts-tip-amount-logo" data-kaposts-tip-logo /><span class="kaposts-tip-amount-symbol" data-kaposts-tip-symbol hidden></span><input class="field-input" type="text" inputmode="decimal" placeholder="1" aria-label="Default tip" data-kaposts-tip-amount value="${escapeHtml(initialText)}" /><button type="button" class="kaposts-tip-unit" data-kaposts-tip-unit><span data-kaposts-tip-unit-code></span>${unitArrows}</button></span>
             </div>
           </div>
-        </div>
-        <p class="settings-group-footer" data-kaposts-tip-footer ${current ? "" : "hidden"}></p>
-        <div class="settings-list-card">
           <button class="settings-list-row" type="button" data-kaposts-open-tips-from><span class="settings-row-copy"><strong>Tips From</strong></span><span class="settings-row-value" data-kaposts-tips-from-title>${escapeHtml(kaPostsTipSourceTitle())}</span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
         </div>
-        <div class="settings-list-card">
+        <p class="settings-group-footer" data-kaposts-tip-footer ${current ? "" : "hidden"}></p>
+        <div class="settings-list-card kaposts-settings-notifications-card">
           <button class="settings-list-row" type="button" data-kaposts-open-notifications>${bell}<span class="settings-row-copy"><strong>Notifications</strong></span><svg class="settings-dropdown-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
         </div>
       </div>
