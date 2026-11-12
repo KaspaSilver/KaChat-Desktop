@@ -121,7 +121,8 @@ export const RAIL_ORDER = [
   "kaposts",
   "wallet", "portfolio", "cold-storage", "kachat-names", "swaps",
   "chess",
-  "kachat-stats", "kachat-bots", "apps",
+  // No KaChat Bots item (owner, 2026-11-12): the bots live in Chats, as circles above the list.
+  "kachat-stats", "apps",
   "profile", "settings",
 ];
 export const PHONE_BAR = ["chats", "broadcasts", "wallet", "profile", "hub"];

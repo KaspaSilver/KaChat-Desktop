@@ -15467,3 +15467,9 @@ body.has-backup-banner .app-body { padding-top: calc(var(--topbar-h) + var(--bac
    Linux drew one, arrows and all, on an empty box. The auto-grow code turns it back on past the
    box's tallest. */
 textarea.composer-input { overflow-y: hidden; }
+/* Profile in the dock wears your own picture (owner, 2026-11-12): a small circle where the glyph was,
+   ringed in the accent while Profile is open. */
+.sidebar-tab-icon.has-avatar { background: transparent !important; -webkit-mask: none; mask: none; }
+.sidebar-tab-icon .sidebar-tab-avatar { display: block; width: 24px; height: 24px; border-radius: 50%; overflow: hidden; }
+.sidebar-tab-icon .sidebar-tab-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.sidebar-tab.active .sidebar-tab-icon .sidebar-tab-avatar { box-shadow: 0 0 0 2px var(--kaspa-ink); }

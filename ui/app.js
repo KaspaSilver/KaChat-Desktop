@@ -112,7 +112,7 @@ import {
 } from "../engine/conversations.js";
 import { KNSProfileLinkBuilder, safeExternalHref, clearAllKnsCache } from "../engine/kns.js";
 import { onIndexerAvailabilityChange, indexerKey, isIndexerDown, INDEXER_RECOVERY_MARGIN_MS } from "../engine/indexer-health.js";
-import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
+import { getEndpoint, getEndpoints, getEndpointOverride, setEndpoint, resetEndpoints, ENDPOINT_DEFAULTS, DEFAULT_TRUSTED_NODE, DEFAULT_MAINNET_INDEXER, setVerboseApiLogging, isProxyAvailable, proxiedUrl } from "../engine/endpoints.js";
 import { isBip39Word, bip39Matches } from "./bip39-english.js";
 import { createAccountBackupStatus, nextDefaultAccountName, accountHasFunds } from "./account-backup-status.js";
 import { walletTotalSompi, spendingTotalAfterRead, sumBalancesSompi, walletAmountText } from "./wallet-balance.js";
@@ -3877,6 +3877,26 @@ function selfAvatarHtml(className = "chat-avatar") {
   return `<span class="${className} avatar-fallback">${personGlyphSvg()}</span>`;
 }
 
+/** The Profile dock item wears your own picture (owner, 2026-11-12), the person glyph while you have
+ *  none. Redrawn only when the picture changes, so the many callers cost nothing. */
+function refreshDockProfileAvatar() {
+  const icon = document.querySelector('.sidebar-tab[data-app-tab="profile"] .sidebar-tab-icon');
+  if (!icon) return;
+  if (refreshDockProfileAvatar.glyph === undefined) refreshDockProfileAvatar.glyph = icon.innerHTML;
+  let html = "";
+  try { html = engine.address ? selfAvatarHtml("sidebar-tab-avatar") : ""; } catch { html = ""; }
+  const picture = html.includes("<img") ? html : "";
+  if (icon.dataset.avatarHtml === picture) return;
+  icon.dataset.avatarHtml = picture;
+  icon.classList.toggle("has-avatar", Boolean(picture));
+  icon.innerHTML = picture || refreshDockProfileAvatar.glyph;
+  // A picture that won't load goes back to the glyph.
+  icon.querySelector("img")?.addEventListener("error", () => {
+    icon.classList.remove("has-avatar");
+    icon.innerHTML = refreshDockProfileAvatar.glyph;
+  }, { once: true });
+}
+
 function updateAvatarElement(initialsEl, imageEl, contact) {
   if (initialsEl) initialsEl.innerHTML = personGlyphSvg();
   if (!imageEl) return;
@@ -5070,6 +5090,15 @@ function rejectChatRequest(conversationEntry) {
  *  unreachable indexer is asked again next time. `inboxSupportKnown` is the cached answer for
  *  synchronous UI (undefined until probed). */
 function currentIndexerUrl() { return indexerUrlInput?.value?.trim() || getEndpoint("kasiaIndexer"); }
+/** KaChat's own indexer, however the URL is written (a trailing slash, or the same-origin proxy that
+ *  stands in for it in a browser). */
+function isDefaultKachatIndexer(url) {
+  const clean = (value) => String(value || "").trim().replace(/\/+$/, "").toLowerCase();
+  const target = clean(url);
+  if (!target) return false;
+  if (target === clean(DEFAULT_MAINNET_INDEXER)) return true;
+  try { return target === clean(proxiedUrl(DEFAULT_MAINNET_INDEXER)); } catch { return false; }
+}
 function inboxSupportKnown() { return (inboxSupportKnown.byUrl ||= new Map()).get(currentIndexerUrl()); }
 async function inboxSupported() {
   const url = currentIndexerUrl();
@@ -5077,7 +5106,10 @@ async function inboxSupported() {
   if (map.has(url)) return map.get(url);
   let answer = null;
   try { answer = await engine.probeInboxSupport(url); } catch { answer = null; }
-  if (answer === null) return false;
+  // Not reachable (iOS ChatService.inboxSupported): KaChat's own indexer files inbox tags, and a
+  // first message sent untagged would never reach someone who has no chat with us yet - they would
+  // get no request and no push. Not remembered, so the next send asks again.
+  if (answer === null) return isDefaultKachatIndexer(url);
   const changed = map.get(url) !== answer;
   map.set(url, answer);
   if (changed && activeConversationId) {
@@ -8829,6 +8861,7 @@ async function refreshOwnKnsProfile({ force = false } = {}) {
 
 function applyOwnKnsProfile(info, profileInfo) {
   updateProfileHero(info, profileInfo);
+  try { refreshDockProfileAvatar(); } catch { /* not started */ }
   // Before the primary-domain branch below: Your Domains lists everything this account owns, and
   // an account with domains but no primary set still owns them (iOS yourDomainsSection).
   setProfileDomains(info);
@@ -12011,6 +12044,7 @@ function setActiveAppTab(tab) {
   if (listChanged && chatSelectionModeActive) setChatSelectionMode(false);
   currentAppTab = tab;
   toolbarBalanceScreen = screenTab;
+  try { refreshDockProfileAvatar(); } catch { /* not started */ }
   renderToolbarBalance();
   try { updatePublicChatsSettingsButton(); } catch { /* not ready yet */ }
   // Chats and Public Chats share the list column and the pane beside it (owner, 2026-11-12).
@@ -13283,7 +13317,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.2.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 285;
+const APP_BUILD = 286;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -18486,6 +18520,7 @@ function renderChats() {
   if (activeConversationId && !state.conversations.some((entry) => entry.id === activeConversationId)) setActiveConversationId(null);
   // The bots and anything pinned are the circles above the list.
   renderChatCircles();
+  refreshDockProfileAvatar();
   // The app icon's badge follows the same counts (iOS ChatService.updateAppBadge).
   scheduleAppBadgeUpdate();
   // The bots' cards carry their chats' unread counts (iOS d576941).
