@@ -590,13 +590,20 @@ export async function syncConversationFromIndexerWithLegacyAliases({ legacyAlias
 
 
 // --- No-handshake first contact (NO_HANDSHAKE_MESSAGING.md §5.3) -----------------------------
+// An indexer that accepts the connection and never answers would hold a first message on
+// "Building" (the send waits on the probe) and the inbox sweep forever: these give up (audit 2026-11-13).
+const INBOX_PROBE_TIMEOUT_MS = 8_000;
+const INBOX_PAGE_TIMEOUT_MS = 15_000;
+function timeoutSignal(ms) {
+  return typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined;
+}
 /** Whether the indexer answers inbox lookups: true on an answer, false on 404 (an indexer
  *  without the feature), null when it couldn't be reached - unknown, so not worth caching. */
 export async function probeInboxSupport(indexerUrl = DEFAULT_KASIA_INDEXER_URL) {
   try {
     const baseUrl = normalizeBaseUrl(indexerUrl);
     const query = new URLSearchParams({ tag: "0".repeat(32), limit: "1" });
-    const response = await fetch(`${baseUrl}/contextual-messages/by-inbox?${query}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+    const response = await fetch(`${baseUrl}/contextual-messages/by-inbox?${query}`, { headers: { Accept: "application/json" }, cache: "no-store", signal: timeoutSignal(INBOX_PROBE_TIMEOUT_MS) });
     if (response.status === 404) return false;
     if (!response.ok) return null;
     const body = await response.json().catch(() => null);
@@ -618,7 +625,7 @@ export async function fetchInboxMessages({ tag, cursor = 0, indexerUrl = DEFAULT
     maxPages,
     fetchPage: async ({ blockTime, limit: pageSize }) => {
       const query = new URLSearchParams({ tag, block_time: String(blockTime), limit: String(pageSize) });
-      const response = await fetch(`${baseUrl}/contextual-messages/by-inbox?${query}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+      const response = await fetch(`${baseUrl}/contextual-messages/by-inbox?${query}`, { headers: { Accept: "application/json" }, cache: "no-store", signal: timeoutSignal(INBOX_PAGE_TIMEOUT_MS) });
       if (!response.ok) throw new Error(`Inbox lookup failed (${response.status}).`);
       const rows = await response.json();
       return Array.isArray(rows) ? rows : [];

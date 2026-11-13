@@ -4,7 +4,7 @@ import { getEndpoint, ENDPOINT_DEFAULTS } from "./endpoints.js";
 import { KAS_UNIT } from "./network.js";
 import { hex } from "./kachat-names/codec.js";
 import { isRpcConnectionError } from "./rpc.js";
-import { isP2shScript, quantumScriptPublicKey, kip22SignatureScript, sdkTransactionKip22ExtraMass, signedSdkTransactionComputeMass, verifyKip22Spend } from "./quantum.js";
+import { isP2shScript, quantumScriptPublicKey, quantumAddressForRedeem, kip22SignatureScript, sdkTransactionKip22ExtraMass, signedSdkTransactionComputeMass, verifyKip22Spend } from "./quantum.js";
 
 // Every real send (messages, handshakes, self-stash, KAS payments, KNS
 // commits) funnels through sendKaspa()'s UTXO-fetch-then-spend window below.
@@ -1049,7 +1049,21 @@ function pendingSpends(pending) {
 // Builds the representative tx and returns { feeSompi, massGrams } from the generator summary.
 // `destinationAddress` (optional): the recipient, so its output script is priced as the send's will
 // be (the fee shown is the fee paid, iOS 4922804); without one, or an unreadable one, the source.
-export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddress, destinationAddress = null, amountKas = "0.2", payloadBytes = 0, selectedOutpoints = null, singleInput = false }) {
+// A stand-in quantum-safe (P2SH) address: every P2SH output script is the same 35 bytes, so the
+// change output of a send whose change goes to a fresh quantum-safe slot is priced right without
+// knowing (or reserving) that slot yet.
+let quantumChangeStandIn = null;
+function quantumChangeStandInAddress() {
+  if (!quantumChangeStandIn) {
+    try { quantumChangeStandIn = String(quantumAddressForRedeem(new Uint8Array([0x51]))); } catch { quantumChangeStandIn = null; }
+  }
+  return quantumChangeStandIn;
+}
+
+// `quantumChange`: the send puts its change on a fresh quantum-safe address. That output is longer
+// than the source's own, and pricing it as the source's left the estimate 1,100 sompi short, so the
+// send refused itself with SEND_FEE_CHANGED every time (audit 2026-11-13).
+export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sourceAddress, destinationAddress = null, amountKas = "0.2", payloadBytes = 0, selectedOutpoints = null, singleInput = false, quantumChange = false }) {
   // An amount that isn't one (or is past the supply) has no estimate, rather than a WASM panic.
   const amountSompi = kasToSompi(amountKas);
   if (amountSompi == null) return null;
@@ -1084,7 +1098,7 @@ export async function estimateOnchainFeeDetail({ kaspa, rpc, withRpc = null, sou
     entries,
     outputs: [{ address: to, amount: amountSompi }],
     priorityFee: 0n,
-    changeAddress: sourceAddress,
+    changeAddress: (quantumChange && quantumChangeStandInAddress()) || sourceAddress,
     networkId: NETWORK_ID,
     payload: new Uint8Array(Math.max(0, payloadBytes)),
   });

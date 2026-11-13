@@ -821,7 +821,7 @@ function guideStepHtml(step) {
         ${guideStepHeader("Claim your .kachat name", "It's the name people see you as across KaChat - in chats, on posts and on your profile link. Without one, people see your address.", `<span class="kmkt-guide-mark">${KACHAT_WORDMARK_SVG}</span>`)}
         <div class="kmkt-guide-claim">
           <div class="kmkt-guide-field"><span class="kmkt-placeholder-text">yourname</span><span class="kmkt-search-suffix">.kachat</span></div>
-          <small class="kmkt-muted">Search for the name you want in Kaspa Hub &gt; .kachat, then claim it.</small>
+          <small class="kmkt-muted">Search for the name you want in .kachat, then claim it.</small>
         </div>`;
     }
     case "howItWorks":
@@ -849,7 +849,7 @@ function guideStepHtml(step) {
           "You can transfer it, list it for sale, or accept an offer for it.",
         ])}`;
     default:
-      return guideStepHeader("You're all set", "Claim your name in Kaspa Hub > .kachat whenever you're ready.", ICON.sealCheck);
+      return guideStepHeader("You're all set", "Claim your name in .kachat whenever you're ready.", ICON.sealCheck);
   }
 }
 

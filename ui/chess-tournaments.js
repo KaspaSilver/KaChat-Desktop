@@ -1,4 +1,4 @@
-// Chess Online (CHESS_TOURNAMENTS.md; iOS 334cdd1 … 01af8bc): Kaspa Hub > Chess Online.
+// Chess Online (CHESS_TOURNAMENTS.md; iOS 334cdd1 … 01af8bc): KaPlay > Chess Online.
 // The `#chess-arena` room is read through the broadcast indexer and the live block scan,
 // reduced by engine/chess-tournament.js into the rooms every device agrees on, and every
 // action a player takes - join, leave, move, resign, claim - is one broadcast
@@ -2075,10 +2075,11 @@ function onClick(event) {
   const share = event.target.closest("[data-chess-t-share]");
   if (share) {
     // The tournament screen and the waiting room word the invite differently (iOS ShareLink), in
-    // KaPlay, the app's name now (iOS 1d23002).
+    // KaPlay, the app's name now (iOS 1d23002). "open KaPlay" holds on Desktop (its dock item, no
+    // Kaspa Hub since Build 281) and on iPhone (the KaPlay app).
     const text = share.dataset.invite === "tournament"
-      ? `Join my chess tournament in KaPlay: open Kaspa Hub > KaPlay > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`
-      : `Play me at chess in KaPlay: open Kaspa Hub > KaPlay > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`;
+      ? `Join my chess tournament in KaPlay: open KaPlay > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`
+      : `Play me at chess in KaPlay: open KaPlay > ${share.dataset.kind} > Join with a code, and enter ${share.dataset.chessTShare}`;
     if (navigator.share) navigator.share({ text }).catch(() => {});
     else navigator.clipboard?.writeText(text).then(() => deps.showToast?.("Invite copied"), () => {});
     return;

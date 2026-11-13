@@ -13,7 +13,7 @@
   <!-- Too-old browsers (no WebAssembly / modern JS, e.g. iOS 10) get a clear message, not a blank layout. -->
   <script src="/browser-check.js"></script>
   <title>KaChat Desktop</title>
-  <link rel="stylesheet" href="./ui/styles.css?v=405" />
+  <link rel="stylesheet" href="./ui/styles.css?v=406" />
   <meta name="theme-color" content="#000000" />
   <link rel="manifest" href="manifest.json" />
   <!-- The KaChat logo the app already ships (432px PNG) doubles as the tab icon. -->
@@ -553,8 +553,6 @@
         <div class="profile-screen" data-app-tab-screen="kachat-stats" data-kachat-stats hidden></div>
         <!-- Kaspa Hub > Contacts (iOS 00767a4; the Address Book until KaPay 8118f09): saved addresses, per wallet (ui/address-book.js). -->
         <div class="profile-screen" data-app-tab-screen="address-book" data-address-book hidden></div>
-        <!-- Kaspa Hub > KaChat Bots (iOS 82ab31d): the four bots as cards (ui/kachat-bots.js). -->
-        <div class="profile-screen" data-app-tab-screen="kachat-bots" data-kachat-bots hidden></div>
         <!-- Settings as a tab (iOS d54ea87c): the Settings page itself comes up in place (ui/app.js
              syncSettingsTab), so this screen stays empty under it. -->
         <div class="profile-screen" data-app-tab-screen="settings" hidden></div>
@@ -1091,24 +1089,6 @@
               <div class="settings-toggle-row"><span><strong>Show .kachat Endings</strong></span><label class="switch-control"><input type="checkbox" data-pref-kachat-endings checked><span></span></label></div>
             </div>
             <p class="settings-group-footer field-hint">Turn off to show names like alice instead of alice.kachat. A name you gave someone yourself never has the ending.</p>
-          </section>
-
-          <!-- Customization sub-screen. -->
-          <section class="settings-group" data-settings-subscreen="dock">
-            <p class="settings-group-label">Customize Dock</p>
-            <!-- Two drag lists (iOS 4da34ab MenuVisibilityView): the dock, then Kaspa Hub. Rows are
-                 drawn by renderDockEditor; the footers' text depends on the arrangement. -->
-            <div class="dock-list-head">
-              <p class="settings-group-label">Your Dock</p>
-              <span class="dock-list-count" data-dock-count>5/5</span>
-            </div>
-            <div class="settings-list-card dock-list" data-dock-list="dock"></div>
-            <p class="settings-group-footer" data-dock-footer="dock"></p>
-            <div class="dock-list-head">
-              <p class="settings-group-label">Kaspa Hub</p>
-            </div>
-            <div class="settings-list-card dock-list" data-dock-list="hub"></div>
-            <p class="settings-group-footer" data-dock-footer="hub"></p>
           </section>
 
           <section class="settings-group">

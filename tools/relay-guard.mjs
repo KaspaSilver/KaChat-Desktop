@@ -379,6 +379,21 @@ export function createRelay(options = {}) {
     return Boolean(req.headers.referer) && hostOf(req.headers.referer) === expected;
   };
 
+  /** Another website's page calling through this relay (the Pages relay's crossSiteCaller, audit
+   *  2026-11-13): the browser marks it Sec-Fetch-Site: cross-site, or names another host in Origin.
+   *  The app's own pages are same-origin; an extension's page has a non-web Origin and passes. */
+  const crossSiteCaller = (req) => {
+    const site = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+    if (site === "cross-site") return true;
+    if (site === "same-origin") return false;
+    const origin = req.headers.origin;
+    if (origin === undefined) return false;
+    let url = null;
+    try { url = new URL(String(origin)); } catch { return true; } // "null": an opaque origin, never the app
+    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+    return url.host.toLowerCase() !== requestHost(req);
+  };
+
   /** Is this one of the app's four ChangeNOW swap calls (the only ones the server key rides on)? */
   const isChangenowKeyRoute = (method, target) => target.origin.toLowerCase() === changenowOrigin
     && CHANGENOW_KEY_ROUTES.has(`${String(method || "GET").toUpperCase()} ${target.pathname.replace(/\/+$/, "")}`);
@@ -433,6 +448,10 @@ export function createRelay(options = {}) {
     // Only fetch() is answered (relayFetchKindAllowed).
     if (!relayFetchKindAllowed(req.headers)) {
       refuse(res, 403, "Proxy target not allowed");
+      return;
+    }
+    if (crossSiteCaller(req)) {
+      refuse(res, 403, "This relay serves this site's own pages only");
       return;
     }
     const who = clientKey(req);

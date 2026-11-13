@@ -18,7 +18,8 @@
 // own beyond what's passed in — economics (fee tiers, dust, priority fees)
 // live in KNS_ECONOMICS below, matching the documented indexer behavior.
 
-import { ADDRESS_PREFIX, NETWORK } from "./network.js";
+import { ADDRESS_PREFIX, NETWORK, IS_TESTNET } from "./network.js";
+import { getEndpoint } from "./endpoints.js";
 import { NETWORK_ID, sompiToKaspaDisplay } from "./utils.js";
 import {
   KNS_DEFAULT_URL,
@@ -49,6 +50,12 @@ const OP_0 = 0x00;
 const OP_ENDIF = 0x68;
 
 export const KNS_REVENUE_ADDRESS_MAINNET = "kaspa:qyp4nvaq3pdq7609z09fvdgwtc9c7rg07fuw5zgeee7xpr085de59eseqfcmynn";
+
+// The KNS API the writes read from: the custom one set in Settings, as every read uses
+// (engine/index.js), else this network's default. Writes ignored a custom URL (audit 2026-11-13).
+function knsWriteUrl() {
+  return getEndpoint("knsApi") || KNS_DEFAULT_URL;
+}
 
 export const KNS_ECONOMICS = Object.freeze({
   revealPriorityFeeSompi: 2_000_000n, // 0.02 KAS, added on top of computed mass fee
@@ -675,11 +682,11 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
   const fullDomain = `${normalizedLabel}.kas`;
 
   onStatus({ status: "checking-availability" });
-  const availability = await checkDomainAvailability(engine.address, fullDomain, { baseUrl: KNS_DEFAULT_URL });
+  const availability = await checkDomainAvailability(engine.address, fullDomain, { baseUrl: knsWriteUrl() });
   if (!availability.available) throw new Error(`${fullDomain} is already taken.`);
 
   onStatus({ status: "fetching-fees" });
-  const feeTiers = await fetchInscribeFeeTiers({ baseUrl: KNS_DEFAULT_URL });
+  const feeTiers = await fetchInscribeFeeTiers({ baseUrl: knsWriteUrl() });
   const { commitAmountKas, revealAmountKas } = registrationAmounts(normalizedLabel, feeTiers, { isReservedDomain: availability.isReservedDomain });
 
   const payloadJson = buildDomainCreatePayload(normalizedLabel);
@@ -688,6 +695,9 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
   const xOnlyPubkeyHex = xOnlyPublicKeyHexFromPrivateKey(engine.privateKey);
   const { builder, redeemScriptHex, commitScriptPublicKey, commitAddressString } = buildKnsRedeemScript(engine.kaspa, xOnlyPubkeyHex, payloadJson);
 
+  // The registration fee goes to KNS's mainnet address; there is none on testnet, so a paid name
+  // can't be registered there (it would have tried to pay a mainnet address, audit 2026-11-13).
+  if (!availability.isReservedDomain && IS_TESTNET) throw new Error("Registering a .kas domain works on mainnet only.");
   const revealTargetAddress = availability.isReservedDomain ? engine.address : KNS_REVENUE_ADDRESS_MAINNET;
   const commitAmountSompi = engine.kaspa.kaspaToSompi(String(commitAmountKas));
   const revealAmountSompi = engine.kaspa.kaspaToSompi(String(revealAmountKas));
@@ -732,7 +742,7 @@ export async function inscribeDomain({ engine, label, onStatus = () => {}, log =
   clearKnsCache(engine.address);
   const verified = await pollUntil(
     async () => {
-      const resolution = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_URL });
+      const resolution = await resolveDomain(fullDomain, { baseUrl: knsWriteUrl() });
       return resolution && resolution.ownerAddress === engine.address ? resolution : null;
     },
     { timeoutMs: 90_000 },
@@ -803,7 +813,7 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
   let recipient = String(toAddress || "").trim();
   if (recipient.toLowerCase().endsWith(".kas")) {
     onStatus({ status: "resolving-recipient" });
-    const resolution = await resolveDomain(recipient, { baseUrl: KNS_DEFAULT_URL });
+    const resolution = await resolveDomain(recipient, { baseUrl: knsWriteUrl() });
     if (!resolution?.ownerAddress) throw new Error("Could not resolve the recipient KNS domain.");
     recipient = resolution.ownerAddress;
   }
@@ -826,7 +836,7 @@ export async function transferDomain({ engine, domain, assetId, toAddress, signe
   // Ownership pre-check (best-effort — a resolver miss doesn't block; the
   // chain-side inscription rules are authoritative).
   onStatus({ status: "verifying-ownership" });
-  const owned = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_URL }).catch(() => null);
+  const owned = await resolveDomain(fullDomain, { baseUrl: knsWriteUrl() }).catch(() => null);
   if (owned && owned.ownerAddress !== sourceAddress) {
     throw new Error("This domain is not owned by the sending address.");
   }
@@ -925,7 +935,7 @@ async function verifyKnsTransfer({ fullDomain, sourceAddress, recipient, onStatu
   clearKnsCache(recipient);
   const verified = await pollUntil(
     async () => {
-      const resolution = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_URL });
+      const resolution = await resolveDomain(fullDomain, { baseUrl: knsWriteUrl() });
       return resolution && resolution.ownerAddress === recipient ? resolution : null;
     },
     { timeoutMs: 90_000 },
@@ -983,7 +993,7 @@ export async function resumeKnsTransfer({ engine, assetId, signer = null, onStat
     // Nothing unspent at the commit address. Either the reveal already went through (the
     // domain moved), the commit is still only in the mempool (use the recorded txid), or it
     // never went out.
-    const owner = await resolveDomain(fullDomain, { baseUrl: KNS_DEFAULT_URL }).catch(() => null);
+    const owner = await resolveDomain(fullDomain, { baseUrl: knsWriteUrl() }).catch(() => null);
     if (owner?.ownerAddress === recipient) {
       await clearPendingKnsTransfer(record.assetId).catch(() => {});
       onStatus({ status: "confirmed", domain: fullDomain });
@@ -1094,7 +1104,7 @@ export async function submitProfileField({ engine, assetId, key, value, onStatus
   onStatus({ status: "verifying", key });
   const verified = await pollUntil(
     async () => {
-      const profile = await fetchProfileByAssetId(assetId, { baseUrl: KNS_DEFAULT_URL, keys: [key] });
+      const profile = await fetchProfileByAssetId(assetId, { baseUrl: knsWriteUrl(), keys: [key] });
       const expectEmpty = value === "";
       const actual = profile?.[key] ?? null;
       if (expectEmpty) return actual == null ? { profile } : null;
@@ -1157,7 +1167,7 @@ async function sha256Bytes(bytes) {
 // The signed message has to match app.knsdomains.org's bytes exactly; the signature is tried in
 // the same three modes the image upload uses, because the API accepts one of them and does not
 // say which up front.
-export async function setKnsPrimaryDomain({ engine, domainId, baseUrl = KNS_DEFAULT_URL }) {
+export async function setKnsPrimaryDomain({ engine, domainId, baseUrl = knsWriteUrl() }) {
   if (!engine?.kaspa || !engine?.privateKey) throw new Error("Load a wallet before setting a primary domain.");
   const trimmedId = String(domainId || "").trim();
   if (!trimmedId) throw new Error("KNS domain id is missing.");

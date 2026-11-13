@@ -111,7 +111,7 @@ function entryName(entry) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Kaspa Hub > Contacts
+// The Contacts screen
 // ---------------------------------------------------------------------------------------------
 
 function rowHtml(entry) {
@@ -585,7 +585,10 @@ function resolveEditorName(input) {
     s.nameResolutions = results || [];
     s.resolving = false;
     if (resolution?.ownerAddress) selectEditorResolution({ address: resolution.ownerAddress, name: resolution.domain, tld: resolution.tld });
-    else s.lookupError = nameNotFoundText(typed, results);
+    else {
+      s.lookupError = nameNotFoundText(typed, results);
+      clearEditorLookupName(s);
+    }
     renderEditorResolution();
     refreshEditorChrome();
   }, 300);
@@ -597,12 +600,23 @@ function selectEditorResolution({ address, name, tld }) {
   s.resolvedName = name || null;
   s.selectedTld = tld || null;
   s.lookupError = null;
-  // the name they're known by, unless one was typed already
-  if (!String(s.name || "").trim() && name) {
+  // the name they're known by, unless one was typed already. A name an earlier lookup filled in
+  // is replaced, not kept for the new address (audit 2026-11-13).
+  const current = String(s.name || "").trim();
+  if (name && (!current || current === s.lookupFilledName)) {
     s.name = name;
+    s.lookupFilledName = name;
     const field = editorEl?.querySelector("[data-ab-editor-name]");
     if (field) field.value = name;
   }
+}
+/** A lookup found nobody: the name the last one filled in goes with it (one typed stays). */
+function clearEditorLookupName(s) {
+  if (!s?.lookupFilledName || String(s.name || "").trim() !== s.lookupFilledName) return;
+  s.name = "";
+  s.lookupFilledName = null;
+  const field = editorEl?.querySelector("[data-ab-editor-name]");
+  if (field) field.value = "";
 }
 
 function editorShowsAssignedPhoto() {
@@ -939,7 +953,7 @@ function renderPicker() {
       <div class="ab-empty ab-picker-empty">
         <span class="ab-empty-icon muted">${ADDRESS_BOOK_ICONS.book}</span>
         <strong>No contacts yet</strong>
-        <p>Add contacts in Kaspa Hub &gt; Contacts.</p>
+        <p>Add contacts from the Contacts screen.</p>
       </div>`;
     return;
   }

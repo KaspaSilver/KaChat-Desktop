@@ -143,11 +143,21 @@ function loadState() {
   try { account = readNextcloudAccount(deps.accountScopedKey(NC_KEY)); } catch { account = null; }
   // Locked (or a sealed password that does not open): nothing may run, and nothing is ever sent
   // without the real password, so `nc` stays null; Settings shows the connection from ncLocked.
-  if (account && (account.locked || !account.appPassword)) { nc = null; ncLocked = account; return; }
   // A login saved on this site back when it went through the relay is never used here: only one
-  // connected directly is. Settings offers to remove it, or to connect again directly.
+  // connected directly is. Settings offers to remove it, or to connect again directly. Checked
+  // first, so a locked one isn't shown as "Connected" either (audit 2026-11-13).
   if (account && DIRECT_ONLY && !account.direct) { nc = null; return; }
+  if (account && (account.locked || !account.appPassword)) { nc = null; ncLocked = account; return; }
   nc = account;
+}
+/** That relay-era login with its app password, when KaChat is unlocked: revoked on the server when
+ *  it is removed or replaced (audit 2026-11-13). null when there is none or it can't be opened. */
+function storedRelayLoginToRevoke() {
+  if (!DIRECT_ONLY) return null;
+  let account = null;
+  try { account = readNextcloudAccount(deps.accountScopedKey(NC_KEY)); } catch { account = null; }
+  if (!account || account.direct || account.locked || !account.appPassword) return null;
+  return { server: account.server, username: account.username, appPassword: account.appPassword, direct: true };
 }
 /** A login saved on this site before connections went direct, which is never used here. */
 function storedRelayLoginOnHostedSite() {
@@ -184,6 +194,7 @@ function handleVaultStateChanged() {
   if (!deps || NC_OFF) return;
   let next = null;
   try { next = readNextcloudAccount(deps.accountScopedKey(NC_KEY)); } catch { next = null; }
+  if (next && DIRECT_ONLY && !next.direct) next = null; // a relay-era login is never used here
   const state = (account, locked) => (account ? `open\u0000${account.server}\u0000${account.username}\u0000${account.appPassword}` : locked ? `locked\u0000${locked.unreadable ? 1 : 0}` : "none");
   const usable = next && !next.locked && next.appPassword ? next : null;
   if (state(usable, usable ? null : next) === state(nc, ncLocked)) return;
@@ -1444,11 +1455,13 @@ function renderSettings() {
       ${legacy ? `<div class="settings-list-card danger-list-card">
         <button class="settings-list-row danger-row" type="button" data-nc-forget-hosted><span class="settings-row-copy"><strong>Remove Saved Nextcloud Login</strong></span></button>
       </div>
-      <p class="settings-group-footer">A Nextcloud login saved in this browser earlier went through KaChat's relay, so it isn't used any more. Remove it, then connect again above. Nothing changes on your Nextcloud server.</p>` : ""}`;
+      <p class="settings-group-footer">A Nextcloud login saved in this browser earlier went through KaChat's relay, so it isn't used any more. Remove it, then connect again above.</p>` : ""}`;
     settingsEl.querySelector("[data-nc-forget-hosted]")?.addEventListener("click", async () => {
-      const ok = await confirmDialog({ title: "Remove Saved Login", message: "The Nextcloud login saved in this browser is deleted. Nothing changes on your Nextcloud server.", confirmLabel: "Remove", destructive: true });
+      const ok = await confirmDialog({ title: "Remove Saved Login", message: "The Nextcloud login saved in this browser is deleted, and KaChat asks your Nextcloud to revoke its app password. If your server doesn't allow this website, revoke it in Nextcloud's Security settings.", confirmLabel: "Remove", destructive: true });
       if (!ok) return;
+      const old = storedRelayLoginToRevoke();
       clearStoredState();
+      if (old) revokeAppPassword(old);
       renderSettings();
     });
     updateComposerButton();
@@ -1814,6 +1827,8 @@ function wireSettings() {
       const button = event.target.closest("[data-nc-connect]");
       button.disabled = true;
       button.textContent = "Connecting…";
+      // A relay-era login this replaces (a site KaChat hosts) is revoked once the new one is saved.
+      const replaced = storedRelayLoginToRevoke();
       try {
         const { userId, direct } = await connectRoute(server, username, appPassword);
         // Automatic Sync starts off (the owner's call, 2026-10-13; iOS bde94b0 switched it on at
@@ -1822,6 +1837,7 @@ function wireSettings() {
         try { saveState({ strict: true }); }
         catch (error) { nc = null; throw error; } // locked meanwhile: not connected, nothing stored
         ncLocked = null;
+        if (replaced && replaced.appPassword !== appPassword) revokeAppPassword(replaced);
         renderSettings();
         armAutoBackup();
         deps.showToast?.("Nextcloud connected.");

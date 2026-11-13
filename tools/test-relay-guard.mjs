@@ -577,6 +577,15 @@ v6.server.close();
   }
   const fetched = await request(relayPort, `/nc-proxy/${UP}/echo`, { headers: { "sec-fetch-dest": "empty", "sec-fetch-mode": "cors" } });
   check("relay answers fetch() (sec-fetch-dest: empty)", fetched.status === 200);
+  // Another website's page (audit 2026-11-13, as the Pages relay's crossSiteCaller).
+  lastSeen = null;
+  const crossSite = await request(relayPort, `/nc-proxy/${UP}/echo`, { headers: { "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "cross-site", origin: "https://evil.example" } });
+  check("relay refuses another site's page (Sec-Fetch-Site: cross-site)", crossSite.status === 403 && lastSeen === null, `got ${crossSite.status}`);
+  lastSeen = null;
+  const otherOrigin = await request(relayPort, `/nc-proxy/${UP}/echo`, { headers: { "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", origin: "https://evil.example" } });
+  check("relay refuses another site's Origin without Fetch Metadata", otherOrigin.status === 403 && lastSeen === null, `got ${otherOrigin.status}`);
+  const extension = await request(relayPort, `/nc-proxy/${UP}/echo`, { headers: { "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "none", origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop" } });
+  check("relay still answers an extension's page", extension.status === 200, `got ${extension.status}`);
   const typed = http.createServer((req, res) => { res.writeHead(200, { "content-type": decodeURIComponent(req.url.slice(1)) }); res.end("x"); });
   const typedPort = await listen(typed);
   const TYPED = encodeURIComponent(`http://upstream.test:${typedPort}`);

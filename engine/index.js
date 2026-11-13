@@ -1540,7 +1540,8 @@ export class KaspaEngine {
   // Fee estimate ({ sdkFeeKas, policyFeeKas }) for a send FROM an arbitrary address (spending
   // addresses), mirroring estimateSendFee for the chatting address. `payloadBytes` sizes a payment
   // that carries its encrypted payment payload (a memo makes it longer).
-  async estimateSendFeeForAddress(address, amountKas = "0.2", selectedOutpoints = null, payloadBytes = 0, destinationAddress = null) {
+  // `quantumChange`: the send's change goes to a fresh quantum-safe address (transactions.js).
+  async estimateSendFeeForAddress(address, amountKas = "0.2", selectedOutpoints = null, payloadBytes = 0, destinationAddress = null, { quantumChange = false } = {}) {
     if (!this.kaspa || !address) return null;
     await this.connect();
     return estimateSendFeeDetail({
@@ -1552,6 +1553,7 @@ export class KaspaEngine {
       amountKas: String(amountKas || "0.2"),
       payloadBytes: Math.max(0, Number(payloadBytes) || 0),
       selectedOutpoints,
+      quantumChange,
     });
   }
 

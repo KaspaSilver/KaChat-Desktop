@@ -469,7 +469,9 @@ export async function webPushSignOut(wallet = null) {
 /** An account removed from this device: its registration goes if it was this browser's. */
 export async function webPushForgetAccount(address) {
   const stored = loadRegistration();
-  if (stored?.wallet && stored.wallet === String(address || "").trim()) await webPushSignOut(null);
+  // Compared case-insensitively: a stored "kaspa:QZ…" and a removed "kaspa:qz…" are one address,
+  // and a raw compare left the removed account's registration ringing (audit 2026-11-13).
+  if (stored?.wallet && String(stored.wallet).trim().toLowerCase() === String(address || "").trim().toLowerCase()) await webPushSignOut(null);
 }
 
 // ---- badge, focus, taps -------------------------------------------------------------------------

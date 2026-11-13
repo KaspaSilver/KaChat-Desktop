@@ -26,7 +26,11 @@ assert.match(between(app, "function scheduleSendKaspaFeeEstimate", "\n}\n"), /se
 assert.match(between(app, "function stopSendKaspaFeeEstimate", "\n}\n"), /setSendKaspaFeeError\(""\);/, "Max owns the fee: no stale error");
 assert.match(app, /function refreshSendKaspaSwipe\(\) \{[^}]*sendKaspaBaseFeeKas != null\);/, "the swipe stays off without a fee");
 // priced with the recipient's own output (the fee shown is the fee paid)
-assert.match(between(app, "function sendKaspaEstimateFee", "\n}\n"), /engine\.estimateSendFee\(amountKas, selectedOutpoints, 0, sendKaspaRecipient\)[\s\S]*engine\.estimateSendFeeForAddress\(sendKaspaSourceAddress\(\), amountKas, selectedOutpoints, 0, sendKaspaRecipient\)/);
+assert.match(between(app, "function sendKaspaEstimateFee", "\n}\n"), /engine\.estimateSendFee\(amountKas, selectedOutpoints, payloadBytes, sendKaspaRecipient\)[\s\S]*engine\.estimateSendFeeForAddress\(sendKaspaSourceAddress\(\), amountKas, selectedOutpoints, 0, sendKaspaRecipient, \{ quantumChange \}\)/);
+// A request to a chatting address is priced as the chat payment it becomes (payload, memo
+// included), and a spending source's quantum-safe change is priced in (audit 2026-11-13).
+assert.match(between(app, "function sendKaspaEstimateFee", "\n}\n"), /estimatePaymentPayloadBytes\(String\(request\.memo \|\| ""\)/);
+assert.match(between(app, "function spendingSendRotatesChange", "\n}\n"), /if \(purpose === "payment"\) return true;[\s\S]*spendingChangeIndex\(/);
 
 // --- Send Kaspa: the swipe-time fee check ----------------------------------------------------
 const sendFn = between(app, "sendFn: ({ destination, amountKas, feeKas, selectedOutpoints }) => {", "onSent: ({ txid, destination, amountKas }) => {");

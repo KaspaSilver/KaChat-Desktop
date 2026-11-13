@@ -246,6 +246,11 @@ function sanitizeProfile(rawProfile) {
     const trimmed = typeof value === "string" ? value.trim() : "";
     profile[key] = trimmed || null;
   }
+  // The pictures are drawn straight into <img src>: only an https link is (audit 2026-11-13), never
+  // http, data:, javascript: or a relative path someone wrote on chain.
+  for (const key of ["avatarUrl", "bannerUrl"]) {
+    if (profile[key] && !/^https:\/\/[^\s]+$/i.test(profile[key])) profile[key] = null;
+  }
   return profile;
 }
 

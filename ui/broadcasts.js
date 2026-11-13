@@ -113,6 +113,9 @@ let listenByChannel = {};
 // True while the Broadcasts tab is the visible tab. An open room only counts as "wanted"
 // (and only polls) while its screen is actually on screen.
 let tabVisible = false;
+// True only while Public Chats itself is on screen. tabVisible stays true on Chats too (the rooms
+// keep their badge count there), but a room left open behind Chats isn't being read (audit 2026-11-13).
+let roomOnScreen = false;
 // Only messages arriving AFTER app launch may ping — backfilled history never notifies.
 const broadcastSessionStartMs = Date.now();
 let messageCache = {}; // { [channel]: [{ txId, senderAddress, content, blockTime, status? }] }
@@ -998,7 +1001,7 @@ function mergeMessages(channel, rows) {
   messageCache[channel] = existing;
   if (added > 0) saveCache();
   if (added > 0) {
-    if (channel === activeChannel && tabVisible && !document.hidden) markChannelRead(channel);
+    if (channel === activeChannel && tabVisible && roomOnScreen && !document.hidden) markChannelRead(channel);
     if (!listRenderSuppressed) { try { renderChannelList(); } catch { /* list not mounted */ } }
   }
   if (reactionsChanged) saveReactions();
@@ -1026,7 +1029,7 @@ function mergeMessages(channel, rows) {
   const pingable = freshIncoming.filter((row) =>
     notifyByChannel[row.channel]
     // The room you are reading stays quiet only while the app is in front (iOS isViewing + active).
-    && (row.channel !== activeChannel || document.hidden || !document.hasFocus())
+    && (row.channel !== activeChannel || !roomOnScreen || document.hidden || !document.hasFocus())
     && !hiddenHere.has(row.senderAddress)
     && Number(row.blockTime || 0) >= broadcastSessionStartMs
     // A later part of a long voice note isn't news of its own (KaChat's one ring per note).
@@ -3026,13 +3029,24 @@ function openRetentionSheet(channel) {
 // Init
 // ---------------------------------------------------------------------------
 
-export function refreshBroadcasts() {
+export function refreshBroadcasts({ onScreen = false } = {}) {
   // Chats (where the room circles live) can come up before the rooms are started.
   if (!deps) return;
   tabVisible = true;
+  roomOnScreen = Boolean(onScreen);
   loadState({ caches: false });
   renderChannelList();
-  if (activeChannel) renderRoom();
+  if (activeChannel) {
+    renderRoom();
+    if (roomOnScreen && !document.hidden) markChannelRead(activeChannel);
+    // Leaving Public Chats stops the open room's poll; coming back starts it again, with a quiet
+    // catch-up, or the room sits frozen until another one is opened (audit 2026-11-13).
+    if (!pollTimer && isIndexerTrackedBroadcastChannel(activeChannel)) {
+      const channel = activeChannel;
+      backfillChannel(channel, { quiet: true });
+      startPolling(channel);
+    }
+  }
   syncScanWanted();
 }
 
@@ -3095,6 +3109,7 @@ async function sweepClosedRooms() {
 
 export function stopBroadcastPolling() {
   stopPolling();
+  roomOnScreen = false;
   if (!deps) return;
   tabVisible = false;
   syncScanWanted();

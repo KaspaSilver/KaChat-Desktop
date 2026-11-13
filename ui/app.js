@@ -5,7 +5,7 @@ import { fitBackgroundBanner, installBannerImageFit } from "./banner-fit.js";
 import { safeCssUrl } from "./css-url.js";
 import { installGroupedAmountInputs } from "./grouped-amount.js";
 import { contractPurgePlan, contractSuppressionRecovery } from "./contract-purge.js";
-import { DOCK_MAX_ITEMS, DOCK_ASSIGNABLE, DOCK_DEFAULT_ORDER, DOCK_DEFAULT, HUB_DEFAULT, isPinnedToDock, normalizeDockPrefs, dockIsFull, removeFromDock, addToDock, reorderVisible, RAIL_ORDER, dockLayoutFor } from "./dock-arrangement.js";
+import { RAIL_ORDER, dockLayoutFor } from "./dock-arrangement.js";
 import { initAddressDomainsTab, renderAddressDomainsTab } from "./address-domains-tab.js";
 import { catchUpCandidates, spendsOwnFunds } from "./address-activity.js";
 import { isHiddenPlaceholder, isHiddenPlaceholderMessage, newestVisibleMessage, upgradesPlaceholder, isCallSignal } from "./message-placeholders.js";
@@ -53,7 +53,7 @@ import { openKaPostComposerWithText } from "./kaposts.js";
 import { blockKaPostAccount, closeKaPostCovers, kaPostsBlockedAddresses, kaPostsFeedToTop } from "./kaposts.js";
 import { broadcastBlockedAccountsChanged } from "./broadcasts.js";
 import { askKaPostTerms, kaPostTermsAccepted, kaPostTermsHtml } from "./kapost-moderation.js";
-import { initKachatBots, showKachatBots, hideKachatBots, refreshKachatBots, isKachatBot, kachatBotFor, kachatBotIconHtml, KACHAT_BOTS } from "./kachat-bots.js";
+import { isKachatBot, kachatBotFor, kachatBotIconHtml, KACHAT_BOTS } from "./kachat-bots.js";
 import {
   configureAddressBook, addressBookName, addressBookEntry, addressBookEntries, addressBookPhoto, addressBookIsEmpty, archiveAddressBook,
   importAddressBookArchive, removeAddressBookForWallet, saveAddressBookEntry,
@@ -4154,7 +4154,7 @@ function maybeNotifyIncoming(conversationEntry, contact, message) {
   }
   // Don't notify for the conversation you're already looking at in a focused window (iOS: the
   // active conversation while the app is active - a visible window behind another app still rings).
-  if (activeConversationId === conversationEntry.id && appIsInFront()) return;
+  if (chatOnScreen(conversationEntry.id) && appIsInFront()) return;
   // Who sent it - the name you gave them, else their .kachat name, else the short address - and a
   // chat payment says what: "Sent you 1.5 KAS" (iOS dcb329a). A notice still reads "Received
   // payment", never the amount it claims.
@@ -4408,6 +4408,19 @@ let currentAppTab = "chats";
 // mutually exclusive. Declared here (hoisted above its group-module usage) so the shared
 // layout helpers below can reference it during boot without a TDZ error.
 let activeGroupId = null;
+// A chat or group counts as being read only while Chats is the screen showing it. One left open
+// behind Public Chats, Wallet or any other screen still counts unread and still rings (audit
+// 2026-11-13); coming back to Chats clears it (markOpenChatsRead).
+function chatOnScreen(id) { return Boolean(id) && id === activeConversationId && currentAppTab === "chats"; }
+function groupOnScreen(id) { return Boolean(id) && id === activeGroupId && currentAppTab === "chats"; }
+function markOpenChatsRead() {
+  if (currentAppTab !== "chats") return;
+  let changed = false;
+  const open = activeConversationId ? (state.conversations || []).find((entry) => entry.id === activeConversationId) : null;
+  if (open && Number(open.unreadCount || 0) > 0) { open.unreadCount = 0; changed = true; }
+  if (activeGroupId && groupUnreadFor(activeGroupId) > 0) { setGroupUnread(activeGroupId, 0); changed = true; }
+  if (changed) { schedulePersistState(); try { renderChats(); } catch { /* not started */ } }
+}
 
 // `.detail-active` covers both "a conversation is open" and "a non-Chats tab
 // is selected" — either one means the detail pane, not the sidebar's chat
@@ -4466,7 +4479,11 @@ function setActiveConversationId(id) {
   // is showing, and unconditionally unhiding the empty state stacked it on top of that
   // tab's screen.
   if (conversation) conversation.hidden = !isOpen || !onChatsTab;
-  if (detailEmptyState) detailEmptyState.hidden = isOpen || groupOwnsDetail || !onChatsTab;
+  if (currentAppTab === "broadcasts") {
+    // Public Chats' own empty state ("Select a public chat") stays up when no room is open; hiding
+    // it here left a blank pane after a background refresh (audit 2026-11-13).
+    try { syncPublicChatsPane(); } catch { /* not started */ }
+  } else if (detailEmptyState) detailEmptyState.hidden = isOpen || groupOwnsDetail || !onChatsTab;
   if (groupOwnsDetail && activeGroupId && groupChatScreen) groupChatScreen.hidden = false;
   updateDetailActiveClass();
   updateActiveRowHighlight();
@@ -5104,6 +5121,9 @@ async function inboxSupported() {
   const url = currentIndexerUrl();
   const map = (inboxSupportKnown.byUrl ||= new Map());
   if (map.has(url)) return map.get(url);
+  // An indexer already marked down isn't asked (each probe would wait out its timeout): the same
+  // answer as one that can't be reached (audit 2026-11-13).
+  if (isIndexerDown(url)) return isDefaultKachatIndexer(url);
   let answer = null;
   try { answer = await engine.probeInboxSupport(url); } catch { answer = null; }
   // Not reachable (iOS ChatService.inboxSupported): KaChat's own indexer files inbox tags, and a
@@ -5126,11 +5146,24 @@ async function inboxSupported() {
  *  Only a MESSAGE from them counts as "written to us" - a payment does not (iOS 1eb4708). Someone
  *  who just sent KAS may have no chat with us at all, so an untagged reply would never reach them;
  *  the tag costs nothing there, the payment already links the two addresses on chain. */
+// A tagged first message being sent to an address, by lower-cased address. A second message
+// typed before it is out waits here, then finds the address tagged and goes untagged: only the
+// first carries the tag (audit 2026-11-13). Released in runEngineSendPipeline once the send ends.
+const inboxTagClaims = new Map();
+function releaseInboxTagClaim(address) {
+  const key = String(address || "").toLowerCase();
+  const claim = inboxTagClaims.get(key);
+  if (!claim) return;
+  inboxTagClaims.delete(key);
+  claim.release();
+}
 async function firstContactInboxTag(contact, conversationEntry) {
   const address = contact?.address;
   if (!address) return null;
   const key = address.toLowerCase();
   if (key === String(engine.address || "").toLowerCase()) return null;
+  const pending = inboxTagClaims.get(key);
+  if (pending) { await pending.promise; return firstContactInboxTag(contact, conversationEntry); }
   const s = chatRequestState();
   if (s.privateChats.has(key) || s.inboxTagged.has(key)) return null;
   // Only a real message counts as them writing first. A payment - even one sent from their chat
@@ -5144,8 +5177,14 @@ async function firstContactInboxTag(contact, conversationEntry) {
     && String(contactForConversation(entry)?.address || "").toLowerCase() === key
     && (entry.messages || []).some(wroteToUs));
   if (heardFrom) return null;
-  if (!(await inboxSupported())) return null;
-  return engine.inboxTagFor(address);
+  let release = () => {};
+  const promise = new Promise((resolve) => { release = resolve; });
+  inboxTagClaims.set(key, { promise, release });
+  let supported = false;
+  try { supported = await inboxSupported(); } catch { supported = false; }
+  if (!supported) { releaseInboxTagClaim(key); return null; }
+  try { return engine.inboxTagFor(address); }
+  catch (error) { releaseInboxTagClaim(key); throw error; }
 }
 function isPaymentLikeMessage(m) {
   return m?.messageType === "payment"
@@ -5184,7 +5223,10 @@ async function syncInbox({ catchUp = false, streamHits = null } = {}) {
     const nextCursor = unresolvedTimes.length
       ? Math.min(Math.max(0, Math.min(...unresolvedTimes) - 1), resolvedNewest ?? 0)
       : resolvedNewest;
-    if (nextCursor != null && nextCursor > s.inboxCursor) { s.inboxCursor = nextCursor; saveChatRequestState(s); }
+    // Only the indexer's own answer moves it. A block-scan hit is one message the stream happened
+    // to see, often while the indexer is down: moving the cursor past it skipped every older first
+    // message the indexer hadn't served yet (audit 2026-11-13; iOS leaves the cursor alone there).
+    if (!streamHits && nextCursor != null && nextCursor > s.inboxCursor) { s.inboxCursor = nextCursor; saveChatRequestState(s); }
     const senders = [];
     for (const row of found) {
       const sender = String(row.sender || "");
@@ -5738,8 +5780,10 @@ function hydrateConversationMessages(conversationEntry) {
     const newer = messageUpdatedAt >= existingUpdatedAt ? message : existing;
     const older = newer === message ? existing : message;
     const merged = { ...older, ...newer };
-    if (statusRank(existing.status) > statusRank(merged.status)) merged.status = existing.status;
-    if (statusRank(message.status) > statusRank(merged.status)) merged.status = message.status;
+    // The newer copy's status stands, except that nothing older takes a confirmed message back. A
+    // stale backup's "pending" used to outrank a later Failed, which brought back "Sending" with no
+    // Retry (audit 2026-11-13).
+    if (statusRank(older.status) === 2 && statusRank(merged.status) < 2) merged.status = older.status;
     merged.confirmations = Math.max(Number(existing.confirmations || 0), Number(message.confirmations || 0));
     byId.set(key, merged);
   }
@@ -6036,6 +6080,9 @@ function activateWalletDataScope(address, { migrateLegacy = true } = {}) {
   try { closeChatsForAccountSwitch(); } catch { /* not yet initialized */ }
   // Profile's spending total belongs to the account it was read for (iOS c130dc1).
   try { profileSpendingTotal.clear(); } catch { /* not yet initialized */ }
+  // Each account's leftover sends are settled again when it loads: a send cut off by a switch is
+  // marked Failed with Retry, not left "Sending" forever (audit 2026-11-13).
+  try { leftoverSendsSettled.clear(); } catch { /* not yet initialized */ }
   // A Manage Addresses render in flight is the old account's: its balances must not land (nor be
   // cached) under the new one.
   try { spendingListToken += 1; } catch { /* not yet initialized */ }
@@ -6275,7 +6322,10 @@ function downloadBlob(filename, type, content) {
 }
 
 function csvEscape(value) {
-  const text = value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  let text = value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  // A cell starting with = + - @ (or a tab or return) runs as a formula in a spreadsheet, and the
+  // text can be someone else's message: a leading ' keeps it plain text (audit 2026-11-13).
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
   return `"${text.replaceAll('"', '""')}"`;
 }
 
@@ -7263,7 +7313,7 @@ async function syncOneConversationWork(conversationEntry, { quiet, catchUp, cont
     scannedCount: Number(result.scannedCount || 0), decryptFailures: Number(result.decryptFailures || 0), indexerUrl,
   };
   // Backfill (restore / first sweep) is added as read; only live messages bump unread.
-  if (liveAdded && activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + liveAdded;
+  if (liveAdded && !chatOnScreen(conversationEntry.id)) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + liveAdded;
   if ((added || sentAdded || paymentStatusChanged || sendsSettled || statusHealed) && activeConversationId === conversationEntry.id) renderMessages(conversationEntry);
   if (!quiet && added) setStatus(`${added} new message${added === 1 ? "" : "s"}`);
   if (added || sentAdded) scheduleReplyGapRefetch(conversationEntry);
@@ -7382,7 +7432,10 @@ async function syncIncomingHandshakeRequests({ quiet = true, catchUp = pendingIn
     const isAcceptance = request.isResponse === true;
     if (!contact) {
       const createdAt = Number(request.createdAt || Date.now());
-      const displayName = request.alias || shortAddress(request.sender);
+      // The name a stranger put in their request is theirs to choose, so it is never stored as who
+      // they are: someone could arrive as "alice.kachat" or "KaChat Support" (audit 2026-11-13, as
+      // iOS a80d271). Their .kachat name or the name you give them replaces this.
+      const displayName = defaultAliasFor(request.sender);
       contact = {
         id: nowId(), name: displayName, nameIsCustom: false, address: request.sender, avatar: initialsFor(displayName),
         createdAt, updatedAt: createdAt, relationshipState: isAcceptance ? "established" : "incoming-request", handshakeTxid: "",
@@ -7437,7 +7490,7 @@ async function syncIncomingHandshakeRequests({ quiet = true, catchUp = pendingIn
       appendIncomingOrReactionMessage(conversationEntry, message);
       // Like messages: backfill (restore / first sweep / a reset scan) is added as read, and the
       // chat on screen is being read.
-      if (!catchUp && isLiveMessageTime(message.createdAt) && activeConversationId !== conversationEntry.id) {
+      if (!catchUp && isLiveMessageTime(message.createdAt) && !chatOnScreen(conversationEntry.id)) {
         conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + 1;
       }
       added += 1;
@@ -8261,11 +8314,6 @@ function closeAccountOverlay() {
     return;
   }
   accountOverlay.hidden = true;
-  // the next Settings visit starts at its own top level, never inside Customize Dock
-  if (customizeDockFromHub) {
-    customizeDockFromHub = false;
-    try { showSettingsCategory(null); } catch { /* not built yet */ }
-  }
 }
 
 document.querySelector("[data-close-account-overlay]").addEventListener("click", closeAccountOverlay);
@@ -9849,7 +9897,7 @@ function sendSpendingPaymentNotice(conversationEntry, contact, { txId, amountSom
   const shortId = String(txId).slice(0, 12);
   Promise.resolve().then(async () => {
     try {
-      await sendPaymentNoticeEnvelope(conversationEntry, contact, payload);
+      await sendPaymentNoticeEnvelope(conversationEntry, contact, payload, walletAddress);
       appendEngineLog(`Sent payment_notice for ${shortId}`);
     } catch (error) {
       appendEngineLog(`payment_notice send failed for ${shortId}, kept for later: ${error?.message || error}`);
@@ -9859,12 +9907,15 @@ function sendSpendingPaymentNotice(conversationEntry, contact, { txId, amountSom
 }
 
 /// The notice itself: an encrypted contextual message from the chatting address.
-async function sendPaymentNoticeEnvelope(conversationEntry, contact, payload) {
+// `walletAddress` is the account that paid. A switch while the payment was going out must not have
+// the next account write the notice; it is kept for the payer instead (audit 2026-11-13).
+async function sendPaymentNoticeEnvelope(conversationEntry, contact, payload, walletAddress) {
+  if (!walletAddress || engine.address !== walletAddress) throw new Error("The account changed before the payment notice went out.");
   const envelope = await engine.createEncryptedMessageEnvelope({
     conversationId: conversationEntry.id,
     contactId: contact.id,
     toAddress: contact.address,
-    fromAddress: engine.address,
+    fromAddress: walletAddress,
     text: payload,
     localNonce: nowId(),
     createdAt: Date.now(),
@@ -9916,7 +9967,7 @@ async function sendUnsentPaymentNotices() {
       const conversationEntry = contact ? state.conversations.find((entry) => entry.contactId === contact.id) : null;
       if (!contact || !conversationEntry) { done.add(notice.txId); continue; }
       try {
-        await sendPaymentNoticeEnvelope(conversationEntry, contact, notice.payload);
+        await sendPaymentNoticeEnvelope(conversationEntry, contact, notice.payload, walletAddress);
         done.add(notice.txId);
         appendEngineLog(`Sent a kept payment_notice for ${String(notice.txId).slice(0, 12)}`);
       } catch { /* stays for next time */ }
@@ -10094,7 +10145,7 @@ async function checkReceivedPaymentNotice(conversationId, contact, message, vali
   if (verdict.unknown && paymentNoticeRows(txId, conversationEntry).length) return;
   const bubble = filePaymentNotice(conversationEntry, contact, message, valid, { unverified: Boolean(verdict.unknown) });
   if (isLiveMessageTime(bubble.createdAt)) {
-    if (activeConversationId !== conversationEntry.id) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + 1;
+    if (!chatOnScreen(conversationEntry.id)) conversationEntry.unreadCount = Number(conversationEntry.unreadCount || 0) + 1;
     // The notice itself notifies: "Received payment", never the amount it claims.
     maybeNotifyIncoming(conversationEntry, contact, message);
     renderChats();
@@ -12059,7 +12110,6 @@ function setActiveAppTab(tab) {
   // On Chats the topbar narrows to the chats list and the conversation takes the full height
   // beside it; everywhere else there is no list, so it spans as before. CSS reads this class.
   document.body.classList.toggle("chats-tab", isChats);
-  document.body.classList.toggle("rooms-tab", isRooms);
   // The wide layout lines the toolbar up with the open screen's column (ui/styles.css).
   document.body.dataset.appTab = screenTab;
   publishDockHeight();
@@ -12083,16 +12133,19 @@ function setActiveAppTab(tab) {
   } else {
     // Chats or Public Chats: the list shows that screen's rows, and syncPublicChatsPane (below)
     // gives the pane to its open chat, group or room.
-    if (listChanged || !appSidebar?.dataset.listMode) { try { renderChats(); } catch { /* not started */ } }
+    // Compared with what the list last drew, not the previous tab: Public Chats -> Wallet -> Chats
+    // must redraw the chats rows (audit 2026-11-13).
+    if (appSidebar?.dataset.listMode !== (isRooms ? "rooms" : "chats")) { try { renderChats(); } catch { /* not started */ } }
   }
   updateDetailActiveClass();
+  try { markOpenChatsRead(); } catch { /* not started */ }
   if (screenTab === "profile") refreshOwnKnsProfile();
   try { if (screenTab === "wallet") { renderProfileAccountTotal(); refreshSpendingSummaryOnShow(); warmReceiveAddressOnShow(); } } catch { /* not started */ }
   if (screenTab === "kaposts") refreshKaPostsFeed();
   else stopKaPostsPolling();
   // The rooms stay live while Chats or Public Chats is up, so the Public Chats badge keeps count.
   // Simple Mode hides public rooms.
-  if (isChats && !isChildModeEnabled()) { refreshBroadcasts(); syncPublicChatsPane(); }
+  if (isChats && !isChildModeEnabled()) { refreshBroadcasts({ onScreen: isRooms }); syncPublicChatsPane(); }
   else { stopBroadcastPolling(); syncPublicChatsPane(); }
   if (screenTab === "portfolio") refreshPortfolio();
   if (screenTab === "cold-storage") refreshColdStorage();
@@ -12102,7 +12155,6 @@ function setActiveAppTab(tab) {
   try { if (screenTab === "kachat-names") showKachatMarket(); else hideKachatMarket(); } catch { /* not started */ }
   try { if (screenTab === "kachat-stats") showKachatStats(); else hideKachatStats(); } catch { /* not started */ }
   try { if (screenTab === "address-book") showAddressBook(); else hideAddressBook(); } catch { /* not started */ }
-  try { if (screenTab === "kachat-bots") showKachatBots(); else hideKachatBots(); } catch { /* not started */ }
   syncSettingsTab(screenTab === "settings");
 }
 
@@ -12152,9 +12204,8 @@ sidebarTabButtons.forEach((button) => {
 // (iOS 0a3848f). The tab lists and the arrangement rules live in ui/dock-arrangement.js.
 // ---------------------------------------------------------------------------
 
-const DOCK_PREFS_KEY = "kachat-dock-prefs-v1"; // account-scoped: { dock, hub }
-/** Full names, used in the Hub grid and Customize Dock where a dock label is too short. */
-const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "KaPlay", "kachat-names": ".kachat Domains", "kachat-stats": "KaChat Stats", "kachat-bots": "KaChat Bots" };
+/** Full names, used in the More grid where a dock label is too short. */
+const TAB_FULL_NAMES = { apps: "Kaspa Websites", swaps: "ChangeNOW Swap", chess: "KaPlay", "kachat-names": ".kachat Domains", "kachat-stats": "KaChat Stats" };
 
 function tabFullName(tab) {
   if (TAB_FULL_NAMES[tab]) return TAB_FULL_NAMES[tab];
@@ -12174,31 +12225,9 @@ function tabIconMarkup(tab) {
   return icon ? icon.innerHTML : "";
 }
 
-function loadDockPrefs() {
-  const stored = (() => {
-    try { return JSON.parse(localStorage.getItem(accountScopedKey(DOCK_PREFS_KEY)) || "null"); }
-    catch { return null; }
-  })();
-
-  // 4.0 blobs were { hiddenTabs, order } against a dock with no cap. Read them into placement:
-  // the order's first entries fill the dock up to the cap and everything else - including what
-  // used to be "hidden", since there is no off state any more - lands in the Hub.
-  if (stored && Array.isArray(stored.hiddenTabs) && !Array.isArray(stored.dock)) {
-    const order = (Array.isArray(stored.order) ? stored.order : DOCK_DEFAULT_ORDER)
-      .filter((t) => DOCK_ASSIGNABLE.includes(t) && !stored.hiddenTabs.includes(t));
-    // normalizeDockPrefs keeps the first picks up to the cap and slots the pinned tabs in.
-    return normalizeDockPrefs({ dock: order, hub: [] });
-  }
-
-  if (stored && Array.isArray(stored.dock)) return normalizeDockPrefs(stored);
-  return normalizeDockPrefs({ dock: [...DOCK_DEFAULT], hub: [...HUB_DEFAULT] });
-}
-
-// normalizeDockPrefs (ui/dock-arrangement.js) resolves any stored pair into a legal arrangement.
-
 // The left dock (owner, 2026-11-12): the arrangement follows the window, not a saved choice - every
 // screen on a computer, five and More on a phone (ui/dock-arrangement.js dockLayoutFor). The old
-// saved arrangement and its editor are left alone, unused.
+// saved arrangement and its Customize Dock editor were removed (audit 2026-11-13).
 const WIDE_DOCK_QUERY = window.matchMedia("(min-width: 860px)");
 // (Build 282's fold button is gone: the owner wants the names always shown, 2026-11-12.)
 let dockPrefs = dockLayoutFor(WIDE_DOCK_QUERY.matches);
@@ -12208,19 +12237,14 @@ WIDE_DOCK_QUERY.addEventListener?.("change", () => {
   const screen = currentAppTab === "hub" ? hubSection : currentAppTab;
   dockPrefs = dockLayoutFor(WIDE_DOCK_QUERY.matches);
   hubSection = null;
-  applyDockLayout();
+  // Straight to the same screen, before the dock is redrawn: drawing it first switched away from
+  // "More" (no such item on a computer) and back, which reset an open Settings page (audit 2026-11-13).
   setActiveAppTab(screen || "chats");
   applyDockLayout();
 });
 
-function persistDockPrefs() {
-  localStorage.setItem(accountScopedKey(DOCK_PREFS_KEY), JSON.stringify(dockPrefs));
-}
-
 function reloadDockPrefsForAccount() {
   dockPrefs = dockLayoutFor(WIDE_DOCK_QUERY.matches);
-  // A draft open across an account switch was the other account's: start again from this one's.
-  if (dockDraft) dockDraft = { dock: [...dockPrefs.dock], hub: [...dockPrefs.hub] };
   hubSection = null;
   applyDockLayout();
 }
@@ -12269,7 +12293,7 @@ function applyDockLayout() {
 
   // Each button is appended ONCE, visible ones first in the user's order and the rest trailing
   // behind hidden. Without the guard the second list re-appended every visible tab, so the live
-  // dock always came out in DEFAULT order and reordering in Customize Dock did nothing to it.
+  // dock always came out in DEFAULT order.
   const placed = new Set();
   for (const tab of [...visible, ...RAIL_ORDER, "hub"]) {
     if (placed.has(tab)) continue;
@@ -12281,7 +12305,6 @@ function applyDockLayout() {
   }
 
   renderHubGrid();
-  renderDockEditor();
   publishDockHeight();
 
   // A tab that just left the dock must not stay on screen with nothing selected, and a Hub
@@ -12390,207 +12413,6 @@ hubGrid?.addEventListener("click", (event) => {
   if (!tile) return;
   hubSection = tile.dataset.hubTile;
   setActiveAppTab("hub");
-});
-
-// Straight to the one screen that decides what is in the dock and what is in here, as its own
-// screen: its back button says "Kaspa Hub" and closes it, so nobody has to back out through
-// Settings (iOS: the Hub's sliders button presents MenuVisibilityView by itself).
-document.querySelector("[data-open-customize-dock]")?.addEventListener("click", () => {
-  openAccountOverlay();
-  showSettingsSubscreen("dock", null);
-  customizeDockFromHub = true;
-  setSettingsBackBar(true, "Kaspa Hub", "Customize Dock");
-});
-
-// --- Customize Dock ---------------------------------------------------------
-//
-// Two lists ordered by dragging, the way Brave arranges its menu actions (iOS 4da34ab
-// MenuVisibilityView). Your Dock is the dock itself, all of it, in order: every row drags, Chats,
-// Kaspa Hub and Profile included - always there, so they carry a lock instead of a remove button -
-// and the two picks carry a red minus that sends them to the top of Kaspa Hub. Kaspa Hub lists
-// everything else in its grid order, also by dragging, each with a green plus that moves it to the
-// end of the dock, shown only while the dock has room (five at most).
-//
-// Every move is applied at once (iOS 476ea20): the live dock is rebuilt as each one is made, so
-// it is already right when the screen is left. The draft is only what this screen draws from.
-
-const dockSubscreenEl = document.querySelector('[data-settings-subscreen="dock"]');
-const dockListEls = {
-  dock: document.querySelector('[data-dock-list="dock"]'),
-  hub: document.querySelector('[data-dock-list="hub"]'),
-};
-const dockCountEl = document.querySelector("[data-dock-count]");
-
-/** The arrangement being edited, or null while Customize Dock is not on screen. */
-let dockDraft = null;
-/** The row being dragged by its grip: { list, listEl, row, pointerId }. */
-let dockDrag = null;
-
-const DOCK_ROW_LOCK = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>';
-const DOCK_ROW_MINUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"/><path d="M7 12h10"/></svg>';
-const DOCK_ROW_PLUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11"/><path d="M7 12h10M12 7v10"/></svg>';
-const DOCK_ROW_GRIP = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16M4 12h16M4 16h16"/></svg>';
-
-function dockEditorArrangement() {
-  return dockDraft || dockPrefs;
-}
-
-function dockEditorRowMarkup(tab, list, full) {
-  const hubLabel = tabDockLabel("hub");
-  let control = "";
-  if (list === "dock") {
-    control = isPinnedToDock(tab)
-      ? `<span class="dock-row-lock" role="img" aria-label="Always in your dock">${DOCK_ROW_LOCK}</span>`
-      : `<button class="dock-row-control remove" type="button" data-dock-remove="${tab}" aria-label="${escapeHtml(`Move ${tabDockLabel(tab)} to ${hubLabel}`)}">${DOCK_ROW_MINUS}</button>`;
-  } else if (!full) {
-    control = `<button class="dock-row-control add" type="button" data-dock-add="${tab}" aria-label="${escapeHtml(`Add ${tabDockLabel(tab)} to your dock`)}">${DOCK_ROW_PLUS}</button>`;
-  }
-  // The dock list wears the dock's own short labels, Kaspa Hub its full names (iOS label vs
-  // ecosystemTitle).
-  const name = list === "dock" ? tabDockLabel(tab) : tabFullName(tab);
-  return `<div class="settings-list-row dock-row" data-dock-row="${tab}">
-    ${control}
-    <span class="dock-row-icon" aria-hidden="true">${tabIconMarkup(tab)}</span>
-    <span class="dock-row-label">${escapeHtml(name)}</span>
-    <span class="dock-row-grip" data-dock-grip aria-hidden="true">${DOCK_ROW_GRIP}</span>
-  </div>`;
-}
-
-function renderDockEditor() {
-  if (dockDrag) return; // redrawn when the drag ends; redrawing now would drop the row being held
-  const arrangement = dockEditorArrangement();
-  const dock = arrangement.dock.filter(tabAllowed);
-  const hub = arrangement.hub.filter(tabAllowed);
-  const full = dockIsFull(arrangement, tabAllowed);
-  const hubLabel = tabDockLabel("hub");
-
-  if (dockListEls.dock) dockListEls.dock.innerHTML = dock.map((tab) => dockEditorRowMarkup(tab, "dock", full)).join("");
-  if (dockListEls.hub) dockListEls.hub.innerHTML = hub.map((tab) => dockEditorRowMarkup(tab, "hub", full)).join("");
-  if (dockCountEl) dockCountEl.textContent = `${dock.length}/${DOCK_MAX_ITEMS}`;
-  const dockFooter = document.querySelector('[data-dock-footer="dock"]');
-  if (dockFooter) dockFooter.textContent = `${tabDockLabel("chats")}, ${hubLabel} and ${tabDockLabel("profile")} always stay in your dock.`;
-  const hubFooter = document.querySelector('[data-dock-footer="hub"]');
-  if (hubFooter) {
-    hubFooter.textContent = full
-      ? "Your dock is full. Remove one from it to add one of these."
-      : `In the order ${hubLabel} shows them.`;
-  }
-}
-
-/** Both lists are written together, so a tab can never be missing from both or in both. */
-function commitDockPrefs(dock, hub) {
-  dockPrefs = normalizeDockPrefs({ dock, hub });
-  persistDockPrefs();
-  applyDockLayout();
-}
-
-/** Every move is applied at once (iOS 476ea20): the dock beside Settings follows each one, so
- *  leaving the screen has nothing left to apply. The draft then takes the arrangement as written. */
-function editDockDraft(next) {
-  if (!dockDraft || next === dockDraft) return;
-  dockDraft = next;
-  persistDockDraft();
-  dockDraft = { dock: [...dockPrefs.dock], hub: [...dockPrefs.hub] };
-  renderDockEditor();
-}
-
-/** Writes the draft to the real arrangement, and so rebuilds the dock - only when it changed. */
-function persistDockDraft() {
-  if (!dockDraft) return;
-  const same = (a, b) => a.length === b.length && a.every((t, i) => t === b[i]);
-  if (same(dockDraft.dock, dockPrefs.dock) && same(dockDraft.hub, dockPrefs.hub)) return;
-  commitDockPrefs(dockDraft.dock, dockDraft.hub);
-}
-
-/** Seeds the draft when Customize Dock comes on screen and drops it when the screen is left - by
- *  the back bar, another settings page, or closing Settings. Each move is already written
- *  (editDockDraft); the save on the way out stays as a safety net. */
-function syncDockDraftWithScreen() {
-  const open = !!dockSubscreenEl && !dockSubscreenEl.hidden && !accountOverlay.hidden;
-  if (open && !dockDraft) {
-    dockDraft = { dock: [...dockPrefs.dock], hub: [...dockPrefs.hub] };
-    renderDockEditor();
-  } else if (!open && dockDraft) {
-    endDockDrag(false);
-    persistDockDraft();
-    dockDraft = null;
-    renderDockEditor();
-  }
-}
-
-if (typeof MutationObserver === "function") {
-  const observer = new MutationObserver(syncDockDraftWithScreen);
-  if (dockSubscreenEl) observer.observe(dockSubscreenEl, { attributes: true, attributeFilter: ["hidden"] });
-  observer.observe(accountOverlay, { attributes: true, attributeFilter: ["hidden"] });
-}
-
-// Going to the background is the one way off this screen that never leaves it: a safety net like
-// the save on leaving, since every move is written as it is made (iOS 476ea20).
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") persistDockDraft();
-});
-
-Object.values(dockListEls).forEach((listEl) => {
-  listEl?.addEventListener("click", (event) => {
-    const remove = event.target.closest("[data-dock-remove]");
-    if (remove && dockDraft) { editDockDraft(removeFromDock(dockDraft, remove.dataset.dockRemove)); return; }
-    const add = event.target.closest("[data-dock-add]");
-    if (add && dockDraft) editDockDraft(addToDock(dockDraft, add.dataset.dockAdd, tabAllowed));
-  });
-});
-
-// Dragging by the grip, with pointer events so a finger works the same as a mouse (HTML5 drag and
-// drop never starts from a touch on iOS Safari). The row follows the pointer within its own list;
-// the NEIGHBOURS are moved past it rather than the row itself, because taking the captured row out
-// of the page would drop the pointer capture mid-drag.
-
-function endDockDrag(commit) {
-  if (!dockDrag) return;
-  const { list, listEl, row } = dockDrag;
-  dockDrag = null;
-  row.classList.remove("dragging");
-  listEl.classList.remove("reordering");
-  if (!commit || !dockDraft) { renderDockEditor(); return; }
-  const order = [...listEl.querySelectorAll("[data-dock-row]")].map((el) => el.dataset.dockRow);
-  const next = reorderVisible(dockDraft[list], order, tabAllowed);
-  editDockDraft(next === dockDraft[list] ? dockDraft : { ...dockDraft, [list]: next });
-}
-
-Object.entries(dockListEls).forEach(([list, listEl]) => {
-  if (!listEl) return;
-  listEl.addEventListener("pointerdown", (event) => {
-    const grip = event.target.closest("[data-dock-grip]");
-    if (!grip || !dockDraft || event.button > 0 || dockDrag) return;
-    const row = grip.closest("[data-dock-row]");
-    if (!row) return;
-    event.preventDefault();
-    try { grip.setPointerCapture(event.pointerId); } catch { /* still works while over the list */ }
-    dockDrag = { list, listEl, row, pointerId: event.pointerId };
-    row.classList.add("dragging");
-    listEl.classList.add("reordering");
-  });
-  listEl.addEventListener("pointermove", (event) => {
-    if (!dockDrag || dockDrag.listEl !== listEl || event.pointerId !== dockDrag.pointerId) return;
-    event.preventDefault();
-    const { row } = dockDrag;
-    const y = event.clientY;
-    for (let prev = row.previousElementSibling; prev; prev = row.previousElementSibling) {
-      const box = prev.getBoundingClientRect();
-      if (y >= box.top + box.height / 2) break;
-      row.after(prev);
-    }
-    for (let next = row.nextElementSibling; next; next = row.nextElementSibling) {
-      const box = next.getBoundingClientRect();
-      if (y <= box.top + box.height / 2) break;
-      row.before(next);
-    }
-  });
-  listEl.addEventListener("pointerup", (event) => {
-    if (dockDrag?.pointerId === event.pointerId) endDockDrag(true);
-  });
-  listEl.addEventListener("pointercancel", (event) => {
-    if (dockDrag?.pointerId === event.pointerId) endDockDrag(false);
-  });
 });
 
 applyDockLayout();
@@ -13317,7 +13139,7 @@ document.querySelector("[data-open-kachat-profile]")?.addEventListener("click", 
 // --- Settings > About: Version (iOS d1844582 AccountAboutPage).
 const APP_VERSION = "5.3";
 // Bumped by one on every push, so About says exactly which build is running.
-const APP_BUILD = 288;
+const APP_BUILD = 289;
 // "5.2.2 (194)", as iOS AppVersion.display writes it.
 const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD})`;
 // Stay on the newest build without a manual reload (ui/app-update.js): never while a message of
@@ -14061,9 +13883,38 @@ function sendKaspaLoadBalance() {
 }
 function sendKaspaEstimateFee(amountKas, selectedOutpoints) {
   // Priced with the recipient's own output, as the send builds it (the fee shown is the fee paid).
-  return sendKaspaSourceIndex == null
-    ? engine.estimateSendFee(amountKas, selectedOutpoints, 0, sendKaspaRecipient)
-    : engine.estimateSendFeeForAddress(sendKaspaSourceAddress(), amountKas, selectedOutpoints, 0, sendKaspaRecipient);
+  // A request to someone's chatting address goes as a chat payment (payPaymentRequestAsChatPayment):
+  // from the chatting address it carries the encrypted payment payload, memo included, and from a
+  // spending address its change always rotates, so the estimate prices those (audit 2026-11-13).
+  const request = sendKaspaPaymentRequest;
+  const asChatPayment = Boolean(request?.toChattingAddress && sendKaspaRecipient
+    && request.address.toLowerCase() === String(sendKaspaRecipient).toLowerCase());
+  if (sendKaspaSourceIndex == null) {
+    let payloadBytes = 0;
+    if (asChatPayment) {
+      const sompi = kasToSompi(String(amountKas || "0"));
+      payloadBytes = estimatePaymentPayloadBytes(String(request.memo || ""), Number(sompi ?? 0n));
+    }
+    return engine.estimateSendFee(amountKas, selectedOutpoints, payloadBytes, sendKaspaRecipient);
+  }
+  const quantumChange = asChatPayment
+    ? spendingSendRotatesChange(sendKaspaSourceIndex, { purpose: "payment" })
+    : spendingSendRotatesChange(sendKaspaSourceIndex, { destination: sendKaspaRecipient });
+  return engine.estimateSendFeeForAddress(sendKaspaSourceAddress(), amountKas, selectedOutpoints, 0, sendKaspaRecipient, { quantumChange });
+}
+// Whether a send from spending address `index` puts its change on a fresh quantum-safe address, as
+// freshChangeForSpendingIndex / freshSpendingChangeAddress decide at the swipe: the fee estimate
+// prices that longer change output (audit 2026-11-13). A payment or tip from a spending address
+// always rotates; a Send KAS withdrawal follows spendingChangeIndex.
+function spendingSendRotatesChange(index, { purpose = "withdraw", destination = null } = {}) {
+  if (index == null) return false;
+  if (purpose === "payment") return true;
+  try {
+    const account = captureActiveSpendingAccount();
+    const st = getSpendingState(account?.owner);
+    const selfSend = destination != null && String(destination).toLowerCase() === String(deriveSpendingAddressFor(account, index) || "").toLowerCase();
+    return spendingChangeIndex({ purpose, sourceIndex: index, primaryIndex: st.activeIndex, qMaxIndex: st.qMaxIndex, selfSend }) != null;
+  } catch { return false; }
 }
 
 function sendKaspaCurrencyCode() { return selectedCurrency.toUpperCase(); }
@@ -18523,8 +18374,6 @@ function renderChats() {
   refreshDockProfileAvatar();
   // The app icon's badge follows the same counts (iOS ChatService.updateAppBadge).
   scheduleAppBadgeUpdate();
-  // The bots' cards carry their chats' unread counts (iOS d576941).
-  try { refreshKachatBots(); } catch { /* not started */ }
   setChatToolRowsForGroupsTab(false);
 
   // The list's own title and search say which screen it is (Chats or Public Chats).
@@ -18922,7 +18771,9 @@ async function sendOneToOnePartsInOrder(conversationId, messageIds) {
     await runEngineSendPipeline(conversationId, messageIds[i]);
     const entry = state.conversations.find((c) => c.id === conversationId);
     const sent = entry?.messages.find((m) => m.id === messageIds[i]);
-    if (!sent || sent.status === MESSAGE_STATUSES.FAILED) {
+    // "Not confirmed" stops it too, as on iOS: that part's coins may or may not be spent, so the next
+    // part could spend the same ones (audit 2026-11-13). The rest wait, Failed, for Retry.
+    if (!sent || sent.status === MESSAGE_STATUSES.FAILED || sent.status === MESSAGE_STATUS_UNCONFIRMED) {
       for (const later of messageIds.slice(i + 1)) updateMessageStatus(conversationId, later, { status: MESSAGE_STATUSES.FAILED });
       return false;
     }
@@ -21091,8 +20942,11 @@ function tipScheduleFee() {
       const payloadBytes = state.fundingAddress ? 0
         : (state.tip ? estimateTipPayloadBytes(memo, Number(amountSompi)) : estimatePaymentPayloadBytes(memo, Number(amountSompi)));
       const detail = state.fundingAddress
-        ? await engine.estimateSendFeeForAddress(state.fundingAddress, amountKas, selection)
-        : await engine.estimateSendFee(amountKas, selection, payloadBytes);
+        // Priced with the recipient's output and, from a spending address, the fresh quantum-safe
+        // change the tip pays to (audit 2026-11-13).
+        ? await engine.estimateSendFeeForAddress(state.fundingAddress, amountKas, selection, 0, state.address || null,
+          { quantumChange: spendingSendRotatesChange(state.fundingIndex, { purpose: "payment" }) })
+        : await engine.estimateSendFee(amountKas, selection, payloadBytes, state.address || null);
       base = detail?.sdkFeeSompi ?? null;
     } catch (error) {
       base = null;
@@ -22042,8 +21896,6 @@ const settingsHubEl = (() => {
 // When a sub-screen (e.g. Storage > Nextcloud) is showing, back returns to its
 // parent category instead of the hub.
 let settingsSubscreenParentIndex = null;
-/** Customize Dock is on screen because Kaspa Hub's button opened it (not walked to in Settings). */
-let customizeDockFromHub = false;
 
 // iOS pushes each category as its own page: the toolbar swaps the connection dot, balance and
 // Done for a round back button and the page's inline title. The in-page back link stays hidden.
@@ -22063,9 +21915,6 @@ function setSettingsBackBar(visible, label, title = "") {
   if (titleEl) { titleEl.hidden = !visible; titleEl.textContent = visible ? title : ""; }
 }
 document.querySelector("[data-settings-nav-back]")?.addEventListener("click", () => {
-  // Customize Dock opened from Kaspa Hub's button is its own screen: back closes it, straight to
-  // the Hub, never into Settings (iOS: the Hub's sliders button presents MenuVisibilityView alone).
-  if (customizeDockFromHub) { closeAccountOverlay(); return; }
   showSettingsCategory(settingsSubscreenParentIndex != null ? settingsSubscreenParentIndex : null);
 });
 
@@ -22086,7 +21935,6 @@ function refreshSettingsCaptions() {
 
 function showSettingsCategory(index) {
   saveAccountNameOnLeaving();
-  customizeDockFromHub = false; // any walk through Settings is Settings' own again
   if (!settingsScreenEl || !settingsHubEl) return;
   refreshSettingsCaptions();
   const inCategory = Number.isInteger(index);
@@ -22985,7 +22833,7 @@ function syncChatCirclesForSimpleMode() {
     selectedRoomNames.clear();
     try { closeBroadcastRoom(); stopBroadcastPolling(); } catch { /* rooms not started */ }
   } else if (currentAppTab === "chats" || currentAppTab === "broadcasts") {
-    try { refreshBroadcasts(); } catch { /* rooms not started */ }
+    try { refreshBroadcasts({ onScreen: currentAppTab === "broadcasts" }); } catch { /* rooms not started */ }
   }
   updatePublicChatsSettingsButton();
   renderChats();
@@ -23755,10 +23603,11 @@ async function runEngineSendPipeline(conversationId, messageId) {
   // The account this message was written in, read before any await: an in-place create / import
   // during the build below must not have the next account sign and pay for it (iOS dfaba68).
   const ownerAddress = engine.address || "";
+  let envelopeDetails = null;
 
   try {
     updateMessageStatus(conversationId, messageId, { status: MESSAGE_STATUSES.BUILDING });
-    const envelopeDetails = {
+    envelopeDetails = {
       conversationId,
       contactId: contact.id,
       toAddress: contact.address,
@@ -23806,6 +23655,9 @@ async function runEngineSendPipeline(conversationId, messageId) {
     appendEngineLog(`Message send failed: ${reason}`);
     // iOS "Failed to Send": the reason, in front of you, rather than a status line nobody reads.
     showFailedToSend(reason);
+  } finally {
+    // A tagged send that ended either way lets the next message to this address decide again.
+    if (envelopeDetails?.inboxTag) releaseInboxTagClaim(contact.address);
   }
 }
 
@@ -24587,9 +24439,14 @@ function schedulePaymentFee() {
       const selection = paymentManualUtxos ? paymentManualUtxos.map((coin) => coin.key) : null;
       // Chat payments pay the SDK's own fee at Normal (no priority tip), so that is the base shown;
       // Fast / Priority / a custom fee add on top.
+      // Priced with the contact's own output (a quantum-safe recipient's is longer) and, from a
+      // spending address, the fresh quantum-safe change (audit 2026-11-13).
+      const payConversation = (state.conversations || []).find((entry) => entry.id === (paySheetConversationId || activeConversationId));
+      const recipient = payConversation ? contactForConversation(payConversation)?.address || null : null;
       const detail = fundingAddress
-        ? await engine.estimateSendFeeForAddress(fundingAddress, amountKas, selection, payloadBytes)
-        : await engine.estimateSendFee(amountKas, selection, payloadBytes);
+        ? await engine.estimateSendFeeForAddress(fundingAddress, amountKas, selection, payloadBytes, recipient,
+          { quantumChange: spendingSendRotatesChange(paymentSourceIndex, { purpose: "payment" }) })
+        : await engine.estimateSendFee(amountKas, selection, payloadBytes, recipient);
       if (token !== payFeeToken) return;
       if (detail?.sdkFeeSompi == null) paymentFeeError = "Couldn't work out the network fee.";
       renderPaymentFeePill(detail?.sdkFeeSompi ?? null);
@@ -31494,8 +31351,10 @@ function webPushMirror() {
 /** What is on screen, in the worker's terms (sw-push.js routeKey): it keeps quiet for it. */
 function webPushFocusKey() {
   if (!engine.address || !appIsInFront()) return "";
-  if (activeGroupId) return `group:${activeGroupId}`;
   try { const room = activeBroadcastChannelName(); if (room && currentAppTab === "broadcasts") return `room:${String(room).toLowerCase()}`; } catch { /* rooms not started */ }
+  // A chat or group is in focus only while Chats shows it (audit 2026-11-13).
+  if (currentAppTab !== "chats") return "";
+  if (activeGroupId) return `group:${activeGroupId}`;
   const conversationEntry = activeConversationId ? state.conversations.find((entry) => entry.id === activeConversationId) : null;
   const address = conversationEntry ? contactForConversation(conversationEntry)?.address : "";
   return address ? `chat:${address.toLowerCase()}` : "";
@@ -32065,7 +31924,7 @@ queueMicrotask(async () => {
     });
     // The rooms are rows in the Chats list: if Chats came up before the rooms started, they
     // go live now (setActiveAppTab does it on every later visit).
-    if ((currentAppTab === "chats" || currentAppTab === "broadcasts") && !isChildModeEnabled()) refreshBroadcasts();
+    if ((currentAppTab === "chats" || currentAppTab === "broadcasts") && !isChildModeEnabled()) refreshBroadcasts({ onScreen: currentAppTab === "broadcasts" });
   } catch (error) { appendEngineLog(`initBroadcasts did not start: ${error?.message || error}`); }
 
   try {
@@ -32376,13 +32235,6 @@ queueMicrotask(async () => {
       nameFor: (address) => addressBookEntry(address)?.name || null,
     });
   } catch (error) { appendEngineLog(`Address Book did not start: ${error?.message || error}`); }
-  try {
-    initKachatBots({
-      escapeHtml,
-      unreadFor: (address) => kachatBotConversation(address)?.unreadCount || 0,
-      openBot: (bot) => openKachatBotChat(bot),
-    });
-  } catch (error) { appendEngineLog(`KaChat Bots did not start: ${error?.message || error}`); }
   function initChessTournamentsSafe() { initChessTournaments({
     engine,
     escapeHtml,
@@ -32654,7 +32506,7 @@ function isReplyToMyGroupMessage(text) {
 // available while it is on, exactly as the existing 1:1 and mention paths behave.
 function groupOsPingAllowed(groupId) {
   if ((accountShellPrefs.chatNotifications ?? true) === false) return false;
-  if (activeGroupId === groupId && appIsInFront()) return false;
+  if (groupOnScreen(groupId) && appIsInFront()) return false;
   return true;
 }
 
@@ -32808,6 +32660,20 @@ function appendGroupMessage(groupId, message) {
   // A send marked failed did go out after all: its delivered copy takes the row's place (iOS fdb32549).
   const mine = (m) => m.senderAddress === engine.address;
   if (message.txId && mine(message)) {
+    // Our own message read back from the chain while its send still waits for the node's answer:
+    // the bubble being sent has no ids yet, so nothing above matched it and it showed twice (audit
+    // 2026-11-13). The chain copy fills that bubble in instead.
+    const text = String(message.text ?? "");
+    const inFlight = text ? list
+      .filter((m) => mine(m) && !m.txId && !m.msgIdHex && m.status === MESSAGE_STATUSES.PENDING && String(m.text ?? "") === text)
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0] : null;
+    if (inFlight) {
+      inFlight.txId = message.txId;
+      if (message.msgIdHex) inFlight.msgIdHex = message.msgIdHex;
+      inFlight.status = MESSAGE_STATUSES.CONFIRMED;
+      saveGroupMessages(groupId, list);
+      return false;
+    }
     const failedRow = undeliveredRowFor(list, message, { idOf: (m) => m.txId, mine });
     if (failedRow?.status === MESSAGE_STATUSES.FAILED) {
       list.splice(list.indexOf(failedRow), 1);
@@ -33465,6 +33331,10 @@ function openGroupChat(groupId) {
   // Re-opening the group already open (a photo control arriving in a sync, a notification tap, the
   // header refresh after a Group Info action) repaints it but keeps what is being composed there.
   const switching = groupId !== activeGroupId;
+  // A repaint of the open group while another screen is up (a photo change in a sync, a Rename or
+  // Remove Member finishing after the person moved on) redraws it in place and leaves that screen
+  // in front; the group comes back with Chats (audit 2026-11-13).
+  const repaintBehind = !switching && currentAppTab !== "chats";
   if (switching) releaseTypingFocus();
   markGroupOpened(groupId);
   if (switching) {
@@ -33477,8 +33347,10 @@ function openGroupChat(groupId) {
   // activeGroupId first means setActiveConversationId(null) treats the group as the pane
   // owner (keeps conversation-open/detail-active on for the narrow-layout collapse).
   activeGroupId = groupId;
-  setActiveConversationId(null);
-  setGroupUnread(groupId, 0);
+  if (!repaintBehind) {
+    setActiveConversationId(null);
+    setGroupUnread(groupId, 0);
+  }
   if (groupChatName) groupChatName.textContent = g.name || "Group";
   // The header is the photo and the name only (iOS groupTitleChip): no member count.
   if (groupChatSub) { groupChatSub.textContent = ""; groupChatSub.hidden = true; }
@@ -33488,6 +33360,7 @@ function openGroupChat(groupId) {
   if (groupComposer) groupComposer.hidden = !amMember;
   renderGroupMessages();
   syncGroupFundingGate();
+  if (repaintBehind) { renderGroupList(); return; }
   if (detailEmptyState) detailEmptyState.hidden = true;
   if (conversation) conversation.hidden = true;
   if (groupChatScreen) groupChatScreen.hidden = false;
@@ -35258,7 +35131,7 @@ function applyGroupSyncResult(result, { catchUp = false } = {}) {
         if (live) {
           maybeNotifyGroupIncoming(decoded.groupId, decoded.senderAddress, decoded.plaintext, decoded.txId || decoded.msgIdHex || nowId(), createdAt);
         }
-        if (live && decoded.groupId !== activeGroupId) {
+        if (live && !groupOnScreen(decoded.groupId)) {
           setGroupUnread(decoded.groupId, groupUnreadFor(decoded.groupId) + 1);
         }
       }
@@ -36046,12 +35919,21 @@ async function sendGroupWire(text, { feeKas = null, errorPrefix = "", groupId = 
   renderGroupList();
   try {
     const res = await mgr.sendGroupMessage(gid, text, { feeKas: feeKas || "0" });
-    // Patch the same row so a later sync of our own message dedupes by msgId (no duplicate).
-    patchGroupMessage(gid, localId, { txId: res?.txid || null, msgIdHex: res?.msgIdHex || null, status: MESSAGE_STATUSES.CONFIRMED });
+    // Patch the same row so a later sync of our own message dedupes by msgId (no duplicate). An id
+    // its chain copy already filled in is kept when the answer lacks one.
+    const sentRow = groupMessages(gid).find((m) => m.id === localId);
+    patchGroupMessage(gid, localId, { txId: res?.txid || sentRow?.txId || null, msgIdHex: res?.msgIdHex || sentRow?.msgIdHex || null, status: MESSAGE_STATUSES.CONFIRMED });
     if (activeGroupId === gid) renderGroupMessages();
     renderGroupList();
     return true;
   } catch (error) {
+    // Its chain copy already came back and filled the row in (appendGroupMessage): it went out.
+    const row = groupMessages(gid).find((m) => m.id === localId);
+    if (row?.txId && row.status === MESSAGE_STATUSES.CONFIRMED) {
+      if (activeGroupId === gid) renderGroupMessages();
+      renderGroupList();
+      return true;
+    }
     const unknown = error?.code === SEND_OUTCOME_UNKNOWN;
     patchGroupMessage(gid, localId, unknown ? groupUnconfirmedPatch(error) : { status: MESSAGE_STATUSES.FAILED });
     if (activeGroupId === gid) renderGroupMessages();

@@ -6630,34 +6630,6 @@ body.session-logged-out [data-account-rename-modal] {
 .hub-empty h3 { margin: 0; font-size: 16px; }
 .hub-empty p { margin: 0; max-width: 42ch; font-size: 13px; color: var(--muted); line-height: 1.55; }
 
-/* Customize Dock (iOS 4da34ab MenuVisibilityView): the dock and Kaspa Hub as two drag lists. Each
-   row is lock or red minus (dock) / green plus (Hub, only while the dock has room), the tab's icon,
-   its name, and the grip it is dragged by - on the right, where iOS's edit mode draws it. */
-.dock-list-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 16px; }
-.dock-list-count { padding-right: 4px; color: var(--muted); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.dock-row { min-height: 52px; padding: 9px 9px 9px 15px; gap: 14px; }
-.dock-row-control, .dock-row-lock { flex: 0 0 24px; width: 24px; height: 24px; display: grid; place-items: center; }
-.dock-row-control { padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
-.dock-row-control svg { width: 22px; height: 22px; }
-.dock-row-control circle { stroke: none; }
-.dock-row-control.remove circle { fill: var(--ios-red); }
-.dock-row-control.add circle { fill: var(--ios-green); }
-.dock-row-control path { fill: none; stroke: #fff; stroke-width: 2.4; stroke-linecap: round; }
-.dock-row-lock { color: var(--muted); }
-.dock-row-lock svg { width: 15px; height: 15px; }
-.dock-row-lock rect { fill: currentColor; stroke: none; }
-.dock-row-lock path { fill: none; stroke: currentColor; stroke-width: 2.4; }
-.dock-row-icon { flex: 0 0 28px; width: 28px; display: grid; place-items: center; color: var(--kaspa-ink); }
-.dock-row-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.dock-row-icon img { width: 20px; height: 20px; object-fit: contain; }
-.dock-row-icon .kmkt-wordmark { width: 28px !important; max-width: 28px; height: auto !important; fill: currentColor; stroke: none; }
-.dock-row-label { flex: 1; min-width: 0; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* touch-action: none so a finger on the grip drags the row instead of scrolling the page. */
-.dock-row-grip { flex: 0 0 36px; width: 36px; height: 36px; display: grid; place-items: center; color: var(--muted); cursor: grab; touch-action: none; }
-.dock-row-grip svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
-.dock-list.reordering { user-select: none; -webkit-user-select: none; }
-.dock-list.reordering, .dock-list.reordering .dock-row-grip { cursor: grabbing; }
-.dock-row.dragging { position: relative; z-index: 1; background: var(--surface-2); box-shadow: 0 6px 18px rgba(0,0,0,.35); }
 
 @media (max-width: 859px) {
   .hub-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
@@ -7484,7 +7456,6 @@ button.quick-reaction-slot { cursor: pointer; padding: 0; line-height: 1; }
 .chess-tab-glyph { display: inline-block; font-family: -apple-system, "Segoe UI Symbol", "Apple Symbols", "DejaVu Sans", sans-serif; font-weight: 400; line-height: 1; letter-spacing: 0; color: currentColor; white-space: nowrap; font-size: 22px; }
 .sidebar-tab .sidebar-tab-icon .chess-tab-glyph { font-size: 23px; max-width: none; overflow: visible; }
 .hub-tile-icon .chess-tab-glyph { font-size: 28px; }
-.dock-row-icon .chess-tab-glyph { font-size: 17px; }
 
 /* Profile > Help screen: guide rows (iOS ProfileHelpView.helpRow). */
 .help-guide-list { display: flex; flex-direction: column; padding: 4px 4px 14px; }
@@ -13555,34 +13526,6 @@ button.kl-tile:focus-visible, .kl-tile-open:focus-visible { outline: 2px solid v
 .ios-install-hint-icon { display: grid; place-items: center; overflow: hidden; background: transparent; }
 .ios-install-hint-icon img { width: 100%; height: 100%; object-fit: cover; transform: scale(2.33); }
 
-/* Kaspa Hub > KaChat Bots (iOS KaChatBotsView, 82ab31d / d576941): one card per bot - its icon in a
-   tinted circle, name and description, the chat's unread count and a chevron; a bot that can't be
-   messaged here (testnet) is dimmed and says why. */
-.kb-screen { display: flex; flex-direction: column; min-height: 0; }
-.kb-header { width: 100%; flex-shrink: 0; }
-.kb-body { display: flex; flex-direction: column; gap: 14px; padding: 4px 0 28px; }
-.kb-card {
-  display: flex; align-items: center; gap: 14px; width: 100%; padding: 16px; border: 0; border-radius: 16px;
-  background: var(--panel); color: var(--text); font: inherit; text-align: left; cursor: pointer;
-}
-.kb-card:disabled { opacity: .6; cursor: default; }
-@media (hover: hover) { .kb-card:not(:disabled):hover { background: var(--row-hover); } }
-.kb-card:focus-visible { outline: 2px solid var(--kaspa-ink); outline-offset: 2px; }
-.kb-card-icon {
-  flex: 0 0 52px; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center;
-  background: color-mix(in srgb, var(--kaspa) 15%, transparent); color: var(--kaspa-ink);
-}
-.kb-card-icon svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.kb-card-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
-.kb-card-copy strong { font-size: 17px; font-weight: 600; }
-.kb-card-copy small { color: var(--muted); font-size: 15px; line-height: 1.35; }
-.kb-card-badge {
-  flex: 0 0 auto; min-width: 22px; padding: 3px 7px; border-radius: 999px;
-  background: var(--ios-red, #ff3b30); color: #fff; font-size: 12px; font-weight: 700; line-height: 16px; text-align: center;
-}
-.kb-card-chevron { flex: 0 0 auto; display: grid; place-items: center; color: var(--muted); }
-.kb-card-chevron svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
-.kb-footnote { margin: 4px 8px 0; color: var(--muted); font-size: 13px; line-height: 1.4; text-align: center; }
 
 /* Payment requests (iOS c6851d6 / 7c71a98 / 1fe8388): the Request Payment and Your Payment Request
    sheets, the request above the amount on Send Kaspa, and the card in a message. */
@@ -15177,7 +15120,7 @@ body.settings-tab [data-account-overlay] .account-overlay-card {
 }
 body.settings-tab [data-account-overlay] .settings-done-button { visibility: hidden; pointer-events: none; }
 .sidebar-tab-icon svg.tab-glyph-controller { fill: currentColor; stroke: none; }
-.hub-tile-icon svg.tab-glyph-controller, .dock-row-icon svg.tab-glyph-controller { fill: var(--kaspa-ink); stroke: none; }
+.hub-tile-icon svg.tab-glyph-controller { fill: var(--kaspa-ink); stroke: none; }
 .sidebar-tab-icon .tab-glyph-gear { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 /* A chat pinned to the top row (iOS 7abc06e8): its own avatar, filling the circle. */
 .chat-circle-person { width: 100%; height: 100%; display: grid; place-items: center; overflow: hidden; border-radius: 50%; }

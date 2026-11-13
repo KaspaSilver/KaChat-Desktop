@@ -182,7 +182,7 @@ test("both handshake scans read Settings > Connectivity's indexer", () => {
 test("a handshake row bumps unread only when live, like a message", () => {
   const incoming = between("async function syncIncomingHandshakeRequests(", "// Restore-parity pass (matches iOS)");
   assert.match(incoming, /async function syncIncomingHandshakeRequests\(\{ quiet = true, catchUp = pendingInitialCatchUp \} = \{\}\)/);
-  assert.match(incoming, /if \(!catchUp && isLiveMessageTime\(message\.createdAt\) && activeConversationId !== conversationEntry\.id\) \{\s*conversationEntry\.unreadCount/);
+  assert.match(incoming, /if \(!catchUp && isLiveMessageTime\(message\.createdAt\) && !chatOnScreen\(conversationEntry\.id\)\) \{\s*conversationEntry\.unreadCount/);
   assert.match(app, /syncIncomingHandshakeRequests\(\{ quiet, catchUp \}\)/, "the sweep passes its catch-up flag");
 });
 
